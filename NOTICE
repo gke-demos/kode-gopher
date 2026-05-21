@@ -1,0 +1,8 @@
+kode-gopher
+Copyright 2026 Google LLC
+
+This product includes software developed at Google.
+
+This product depends on, but does not redistribute, software developed by:
+  - The Kubernetes Authors (https://github.com/kubernetes-sigs/agent-sandbox)
+  - Google LLC (https://github.com/gke-demos/go-runtime-sandbox)

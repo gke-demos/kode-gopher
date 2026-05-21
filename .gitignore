@@ -1,0 +1,23 @@
+# Build artifacts
+/bin/
+/kode-gopher
+
+# Smoketest scratch
+/.smoke/
+
+# Vendored deps (we use Go modules, not vendor)
+/vendor/
+
+# Editor / IDE / agent local state
+/.claude/
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS noise
+.DS_Store
+
+# In-progress files outside the project scope (file or dir)
+/resume
+/resume/
