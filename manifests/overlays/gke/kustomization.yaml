@@ -1,0 +1,94 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# GKE Autopilot + agent-sandbox addon overlay.
+#
+# Differences from manifests/base (which works on local kind):
+#   - Resources land in the 'codemode' namespace, not 'default'.
+#   - Sandbox container pulls from ghcr.io/gke-demos/... (not the local
+#     kind-loaded image). imagePullPolicy: Always so the kubelet picks
+#     up new pushes without us having to bump the tag.
+#   - /spec/service is removed: the GKE-bundled SandboxTemplate CRD
+#     doesn't have that field and the apiserver rejects unknown fields.
+#   - /spec/networkPolicyManagement: Managed — required by the
+#     Autopilot addon for the controller to actually materialize pods.
+#   - runtimeClassName: gvisor + matching nodeSelector + toleration —
+#     pin the sandbox pod to GKE's gVisor node pool. Autopilot taints
+#     those nodes; pods without the toleration won't schedule.
+#   - Pod- and container-level securityContext — required by
+#     Autopilot's strict pod-security policy (non-root, no privilege
+#     escalation, dropped capabilities, RuntimeDefault seccomp).
+#
+# All of this matches the upstream working template that GKE installs
+# with the agent-sandbox addon (see the SandboxTemplate already
+# deployed in the go-runtime-sandbox-mcp-poc namespace).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: codemode
+
+resources:
+  - ../../base
+  - warmpool.yaml
+  - sandbox-router.yaml
+
+patches:
+  - target:
+      kind: SandboxTemplate
+      name: go-runtime-template
+    patch: |-
+      - op: remove
+        path: /spec/service
+      - op: add
+        path: /spec/networkPolicyManagement
+        value: Managed
+      - op: replace
+        path: /spec/podTemplate/spec/containers/0/image
+        value: ghcr.io/gke-demos/kode-gopher-sandbox:latest
+      - op: replace
+        path: /spec/podTemplate/spec/containers/0/imagePullPolicy
+        value: Always
+      - op: add
+        path: /spec/podTemplate/spec/containers/0/securityContext
+        value:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          runAsGroup: 1000
+          runAsUser: 1000
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+      - op: add
+        path: /spec/podTemplate/spec/runtimeClassName
+        value: gvisor
+      - op: add
+        path: /spec/podTemplate/spec/nodeSelector
+        value:
+          sandbox.gke.io/runtime: gvisor
+      - op: add
+        path: /spec/podTemplate/spec/tolerations
+        value:
+          - key: sandbox.gke.io/runtime
+            operator: Equal
+            value: gvisor
+            effect: NoSchedule
+      - op: add
+        path: /spec/podTemplate/spec/securityContext
+        value:
+          fsGroup: 1000
+          runAsGroup: 1000
+          runAsUser: 1000
+          runAsNonRoot: true

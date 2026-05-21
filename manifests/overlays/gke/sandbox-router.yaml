@@ -1,0 +1,105 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# sandbox-router for the codemode namespace.
+#
+# The goruntime client (via sigs.k8s.io/agent-sandbox) looks for a
+# Service named `sandbox-router-svc` in the SandboxClaim's own
+# namespace — it doesn't search cluster-wide — so we need a router
+# instance per namespace where we run claims. Two replicas + a zonal
+# topology spread for HA.
+#
+# Image: pulled from the same Artifact Registry repo the existing
+# upstream router in `go-runtime-sandbox-mcp-poc` uses. Since our
+# cluster runs in the same GCP project, AR auth Just Works via the
+# default node service account — no imagePullSecret needed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-svc
+  labels:
+    app: sandbox-router
+spec:
+  type: ClusterIP
+  selector:
+    app: sandbox-router
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router-deployment
+  labels:
+    app: sandbox-router
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: sandbox-router
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: router
+          image: us-central1-docker.pkg.dev/gke-demos-345619/agent-repo/sandbox-router:v0.4.6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PROXY_TIMEOUT_SECONDS
+              value: "180"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+          securityContext:
+            capabilities:
+              drop:
+                - NET_RAW

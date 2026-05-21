@@ -210,3 +210,41 @@ Caught during slice 1.5 smoketest verification — first run's snippet test time
 
 ### Smoketest script executable bit
 The header-prepending script overwrote `scripts/smoketest-kind.sh` via `cat | mv`, which created the new file with default `644` instead of preserving `755`. Caught by next smoketest run failing with `Permission denied`. Fixed in working tree with `chmod +x` and in git index with `git update-index --chmod=+x scripts/smoketest-kind.sh`. **Note for future bulk-rewrites**: prefer in-place tools (`sed -i`) that preserve mode, or use `install -m 755` instead of `mv`.
+
+---
+
+## Slice 1.7 — 2026-05-21 — GKE Autopilot smoketest
+
+Pulled forward from Slice 3 because the user had a GKE cluster ready and we wanted to validate the production-realistic substrate (Autopilot + gVisor + Artifact Registry / GHCR) before piling on Slice 2's MCP-server complexity. Each `kode-gopher exec` runs end-to-end in ~55s against the cluster; the loop verified passes (`docs/plan.md` slice 3's canonical-demo pass criterion).
+
+### Image distribution: GHCR (`ghcr.io/gke-demos/kode-gopher-sandbox`)
+User picked GHCR over Artifact Registry. Pushed 2.23 GB image; required `gh auth refresh -h github.com -s write:packages` to mint a token with the right scope, then `gh auth token | docker login ghcr.io`. **GHCR packages start private by default** — even though the upstream `ghcr.io/gke-demos/go-runtime-sandbox` is public, new packages under the same org default private and need a manual visibility flip via the web UI (https://github.com/orgs/gke-demos/packages/container/kode-gopher-sandbox/settings → Change visibility → Public). No GitHub REST API for this; UI-only.
+
+### CLI: subcommand-aware FlagSet, `--namespace` flag
+Stdlib `flag.Parse()` stops parsing flags at the first positional argument, so `kode-gopher exec --namespace=codemode <file>` treated `--namespace=...` as positional and the validator rejected it. Restructured `cmd/kode-gopher/main.go` to dispatch on `os.Args[1]` and parse the rest with a per-subcommand `flag.NewFlagSet`. Also closes the slice-1.5 "kubectl context drift" item: the smoketest now `kubectl config use-context ap-gke-sandbox` upfront, and within a single `kode-gopher exec` invocation the kubeconfig is read once. Full `--context` flag still deferred — would require constructing the agent-sandbox client with explicit kubeconfig loading.
+
+### GKE overlay: `manifests/overlays/gke/`
+Three resources composed via kustomize:
+- **SandboxTemplate** (patched from `manifests/base/`): strips `/spec/service` (GKE-bundled CRD rejects it), sets `/spec/networkPolicyManagement: Managed` (required by the Autopilot addon), swaps image to GHCR with `imagePullPolicy: Always`, adds `runtimeClassName: gvisor` + matching `nodeSelector` + `toleration` for the gVisor node pool, and adds pod + container `securityContext` (non-root uid 1000, drop ALL, `seccompProfile: RuntimeDefault`).
+- **SandboxWarmPool** (replicas=2): **load-bearing on Autopilot**. Without one, SandboxClaims sit at `Ready=False` indefinitely — the addon's controller appears to require a warmpool to back claims rather than spinning up sandboxes on demand. (Manual confirmation: a claim against the existing upstream template in `go-runtime-sandbox-mcp-poc` — which has a warmpool — resolves in 5 s; a claim against our template without a warmpool sat 6+ minutes with no pod, no events.)
+- **sandbox-router** (Deployment + Service): the goruntime client looks for a Service named `sandbox-router-svc` *in the SandboxClaim's own namespace*, not cluster-wide. So every namespace where we run claims needs its own router. Uses the AR image already present in the project (`us-central1-docker.pkg.dev/gke-demos-345619/agent-repo/sandbox-router:v0.4.6`) — same project, same default node SA, pulls without setup. 2 replicas with zonal topology spread.
+
+All three are inside the overlay, applied in one `kubectl apply -k`.
+
+### Smoketest design: pares down to the deltas
+`scripts/smoketest-gke.sh` is ~110 LOC vs the kind script's ~170. Skipped because the cluster already has them: cluster provisioning, agent-sandbox controller install, sandbox-router image build. Added: warmpool readiness wait (up to 8 min on cold), router rollout-status wait. Reuses the kind script's `extract_data` helper for output parsing (Python `JSONDecoder.raw_decode` to ignore trailing log noise).
+
+### Timings — Autopilot vs kind
+| Phase | kind (slice 0.5 steady-state) | GKE Autopilot (slice 1.7 steady-state) |
+|---|---|---|
+| warmpool initial fill | n/a | ~130 s (one-time per cluster) |
+| `kode-gopher exec` (verbatim) | ~5 s | ~55 s |
+| `kode-gopher exec` (wrapped) | ~5 s | ~55 s |
+
+GKE is ~10× slower per exec at steady state. Suspect: gVisor syscall-interception overhead + Autopilot's per-pod resource accounting + warmpool-pod cold filesystem state. Worth investigating in slice 3/4 (PVC for `$GOCACHE`, larger pod resources, warmpool replenishment tuning). For slice 1.7's purpose — proving the loop runs on production-realistic infra — 55 s is fine.
+
+### Found: GKE-bundled SandboxClaim schema is stricter than upstream's
+Upstream `pkg/goruntime` (via `sigs.k8s.io/agent-sandbox@v0.4.6` client) appears to create SandboxClaims with `spec.template.name` — works on kind, but the GKE-bundled CRD declares only `spec.sandboxTemplateRef.name` (verified via `kubectl explain sandboxclaim.spec --recursive`). Our calls succeed because the goruntime client is up-to-date with the newer schema. Worth noting as a long-term coupling: if we ever pin to an older `agent-sandbox` version that emits the old shape, GKE Autopilot will silently reject the claim spec and the controller will sit idle.
+
+### Decision deferred (again): `--context` flag and `--kubeconfig`
+The smoketest pins context via `kubectl config use-context` before invoking the binary. A proper `--context` flag on `kode-gopher exec` requires constructing the agent-sandbox `*sandbox.Client` explicitly (rather than letting it inherit ambient kubeconfig) and threading it into `goruntime.Options.Client`. Defer to Slice 2 along with `cobra` introduction.

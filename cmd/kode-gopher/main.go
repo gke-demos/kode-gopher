@@ -48,9 +48,8 @@ import (
 )
 
 const (
-	sandboxNamespace = "default"
-	sandboxTemplate  = "go-runtime-template"
-	adcInSandbox     = "/app/.kode-gopher/creds/adc.json"
+	sandboxTemplate = "go-runtime-template"
+	adcInSandbox    = "/app/.kode-gopher/creds/adc.json"
 )
 
 // forwardedEnv lists host env vars copied into the sandbox if set.
@@ -59,36 +58,63 @@ const (
 var forwardedEnv = []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT"}
 
 func main() {
-	var (
-		openTO = flag.Duration("open-timeout", 5*time.Minute, "max time spent opening the sandbox")
-		execTO = flag.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (upstream caps at ~60s regardless)")
-		claim  = flag.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one")
-		keep   = flag.Bool("keep", false, "leave the sandbox alive on exit (Disconnect) instead of deleting it (Close)")
-	)
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: kode-gopher exec [flags] <file.go>\n\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-
-	if flag.NArg() != 2 || flag.Arg(0) != "exec" {
-		flag.Usage()
-		os.Exit(2)
-	}
-	path := flag.Arg(1)
-
 	log.SetOutput(os.Stderr)
 	log.SetFlags(0)
 	log.SetPrefix("kode-gopher: ")
 
-	exitCode, err := run(path, *openTO, *execTO, *claim, *keep)
-	if err != nil {
-		log.Fatalf("%v", err)
+	// Subcommand routing first; per-subcommand FlagSet so flags can
+	// appear after the subcommand name (`exec --namespace=...` rather
+	// than the stdlib `flag` default of "all flags before positionals").
+	if len(os.Args) < 2 {
+		printRootUsage()
+		os.Exit(2)
 	}
-	os.Exit(exitCode)
+	switch os.Args[1] {
+	case "exec":
+		os.Exit(runExec(os.Args[2:]))
+	case "-h", "--help", "help":
+		printRootUsage()
+		os.Exit(0)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n", os.Args[1])
+		printRootUsage()
+		os.Exit(2)
+	}
 }
 
-func run(path string, openTimeout, execTimeout time.Duration, claim string, keep bool) (int, error) {
+func printRootUsage() {
+	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n")
+}
+
+func runExec(args []string) int {
+	fs := flag.NewFlagSet("exec", flag.ExitOnError)
+	namespace := fs.String("namespace", "default", "Kubernetes namespace for the sandbox claim (must already exist)")
+	openTO := fs.Duration("open-timeout", 5*time.Minute, "max time spent opening the sandbox")
+	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (upstream caps at ~60s regardless)")
+	claim := fs.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one")
+	keep := fs.Bool("keep", false, "leave the sandbox alive on exit (Disconnect) instead of deleting it (Close)")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: kode-gopher exec [flags] <file.go>\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return 2
+	}
+	path := fs.Arg(0)
+
+	exitCode, err := run(path, *namespace, *openTO, *execTO, *claim, *keep)
+	if err != nil {
+		log.Printf("%v", err)
+		return 1
+	}
+	return exitCode
+}
+
+func run(path, namespace string, openTimeout, execTimeout time.Duration, claim string, keep bool) (int, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", path, err)
@@ -123,9 +149,9 @@ func run(path string, openTimeout, execTimeout time.Duration, claim string, keep
 
 	openCtx, cancelOpen := context.WithTimeout(ctx, openTimeout)
 	defer cancelOpen()
-	log.Printf("opening sandbox (namespace=%s template=%s claim=%q)", sandboxNamespace, sandboxTemplate, claim)
+	log.Printf("opening sandbox (namespace=%s template=%s claim=%q)", namespace, sandboxTemplate, claim)
 	sess, err := goruntime.Open(openCtx, goruntime.Options{
-		Namespace: sandboxNamespace,
+		Namespace: namespace,
 		Template:  sandboxTemplate,
 		ClaimName: claim,
 	})
