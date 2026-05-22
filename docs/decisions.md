@@ -292,3 +292,49 @@ GKE-warm slower than expected (vs kind-warm). Suspect: gVisor syscall-intercepti
 
 ### Still deferred to slice 2+: `cobra`, `--context` flag
 Subcommand dispatch in `main.go` plus per-subcommand `flag.NewFlagSet` works cleanly enough that `cobra` would add weight without UX win. Revisit when `auth` / future subcommands land. The `--context` flag also still deferred — both kind and GKE smoketests pin context via `kubectl config use-context` before invoking, and the MCP server inherits that. A real `--context` requires constructing the agent-sandbox client with an explicit kubeconfig and threading it into `goruntime.Options.Client`. Slice 3 or 4.
+
+---
+
+## Slice 2.5 — 2026-05-22 — replace pkg/goruntime with internal/sandbox
+
+Slice 2's wrap-up noted that we were tightly coupled to `gke-demos/go-runtime-sandbox` — a small upstream we extend, not a project we own. The risk was concrete: that team is one demo group's-worth of bus factor, and the constraints we kept blaming "upstream" for (60s cap, namespace-scoped router, schema drift) were mostly bleeding through from `sigs.k8s.io/agent-sandbox` *under* goruntime, not from goruntime itself.
+
+This slice removes the `pkg/goruntime` layer. We now own the equivalent code at `internal/sandbox/`.
+
+### Chose Option B (rewrite) over A (vendor) or C (replace agent-sandbox)
+Three plausible scopes were on the table — vendor the upstream code verbatim into our tree, rewrite a thin client of our own on `sigs.k8s.io/agent-sandbox/clients/go/sandbox` directly, or go further and replace agent-sandbox itself. Picked B because:
+- Cost is ~1-2 days (came in at ~half a day in practice — most of the heavy lifting was already done by the goruntime team and is recognizable in our wrapper).
+- We get a cleanly-shaped API surfaced to *our* needs from the start: e.g. exposed `Options.SandboxReadyTimeout` (the field goruntime didn't surface but the GKE Autopilot smoketest in slice 1.7 needed) is now a first-class option.
+- We don't take on the agent-sandbox project's surface area (C). The 60s cap and namespace-scoped router come from there — different fix, different slice if/when it matters.
+- A would have given us the same ownership without the API cleanup. B is barely more work for materially better fit.
+
+### What stayed the same
+- `Session.Open / Execute / Reset / Disconnect / Close / ClaimName` — same names, same semantics. `internal/executor` and `internal/mcp` and `cmd/kode-gopher` migrated with a search-replace of the import + type names; no logic changed.
+- The tar-packing heuristic — `needsTar` picks tar when any key has a `/`, otherwise individual writes. Same code path, same tradeoffs (the agent-sandbox client's `Write` doesn't accept path separators).
+- Truncation defaults — 8 KiB head + 8 KiB tail, same as goruntime.
+- The `.kg-upload.tar` staging filename for multi-file uploads (renamed from `.goruntime-upload.tar` for branding only; behavior identical).
+- Per-Execute timeout default of 5 min (capped by the agent-sandbox HTTP layer at ~60s regardless).
+
+### What's new
+- `Options.SandboxReadyTimeout` is now caller-controllable. Slice 1.7 noted the default 180 s is sometimes tight on cold Autopilot nodes pulling a 2.2 GB image; we now have a knob.
+
+### What we deliberately didn't pull through
+- `Options.Client` (BYO agent-sandbox client). Not needed today; can add when a real caller wants kubeconfig-context override.
+- The agent-sandbox `Files()` rich API (`Read`, `List`, `Exists`). Our executor uses `cat result.json` via `Run`; we don't need the typed file API. Add when slice 4's `lookup_package_docs` or multi-file work asks for it.
+- Gateway-mode connection (`GatewayName` / `APIURL` Options). All current deployments use port-forward; gateway mode is a slice 5 / production-deployment story.
+
+### Tests
+Added `internal/sandbox/{tar_test,truncate_test}.go` — pure-function coverage for the helpers we ported, since they're the failure-prone parts (tar header ordering, path validation, head+tail truncation arithmetic). The Session itself isn't unit-testable without a real cluster; the kind + GKE smoketests are its coverage.
+
+### What this didn't fix (and why that's fine)
+- **60s HTTP cap on a single Execute call.** That's an agent-sandbox in-pod server constraint, not a goruntime constraint. Our slice 0.5 prewarm + slice 0's tidy/build/run split are still the load-bearing workarounds. Option C would touch this; we explicitly chose not to.
+- **Namespace-scoped sandbox-router lookup.** Same — agent-sandbox client behavior. Slice 1.7's per-namespace router deployment is still the workaround. Could file an upstream issue, but not a kode-gopher fix.
+- **Multi-file support on the tool surface.** Folded into slice 4 (the agent-sandbox layer already materializes multi-file; what's missing is the `internal/normalize` + MCP-tool-args plumbing).
+
+### What this *does* set up
+- Bug-fix autonomy. If we hit a goruntime-shaped issue (tar handling, retry, truncation), we change it in our tree.
+- A clean place to add things slice 4 needs — like exposing `SandboxReadyTimeout` per-call (we already started), or wiring a `--context` flag through `Options` via a custom `*sb.Client`.
+- A test boundary. Adding pure-function coverage was trivial because we own the package; for goruntime we'd have had to upstream or fork.
+- Honest dep accounting. `go.mod` now says `sigs.k8s.io/agent-sandbox v0.4.6` directly (not as an indirect through goruntime). The relationship is visible.
+
+End-to-end verification: kind direct CLI ✅, kind MCP ✅, GKE MCP ✅ (~6 s warm wrapped on kind, ~30 s warm wrapped on GKE — identical to slice 2 numbers; pure refactor with no perf change).

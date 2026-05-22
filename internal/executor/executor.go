@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package executor drives the host side of the build/run/fetch loop
-// inside a goruntime.Session: ship Files, compile, execute the binary
+// inside a sandbox.Session: ship Files, compile, execute the binary
 // with the right env, and read back /app/.kode-gopher/result.json.
 //
 // All sandbox commands are kept under ~60s because the upstream
@@ -33,7 +33,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gke-demos/go-runtime-sandbox/pkg/goruntime"
+	"github.com/gke-demos/kode-gopher/internal/sandbox"
 )
 
 // Phase identifies the stage an Outcome reflects. PhaseBuild means we
@@ -78,8 +78,9 @@ type Request struct {
 	// business seeing GCP creds).
 	Env map[string]string
 	// Timeout bounds each individual sandbox /execute call. Zero means
-	// 90s. The upstream HTTP layer caps at ~60s regardless, so values
-	// >60s only affect goruntime's internal accounting.
+	// 90s. The agent-sandbox in-pod HTTP server caps at ~60s
+	// regardless, so values larger than that only affect our own
+	// internal accounting.
 	Timeout time.Duration
 }
 
@@ -93,14 +94,14 @@ const (
 // Run drives Build → Run → Fetch on sess. The session is reset to a
 // clean state by the caller (or not — Run is happy to reuse cached
 // build artifacts across invocations).
-func Run(ctx context.Context, sess *goruntime.Session, req Request) (*Outcome, error) {
+func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, error) {
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = 90 * time.Second
 	}
 
 	// Phase 1a: tidy (downloads any missing modules).
-	tidy, err := sess.Execute(ctx, goruntime.Request{
+	tidy, err := sess.Execute(ctx, sandbox.Request{
 		Files:   req.Files,
 		Command: "go mod tidy",
 		Timeout: timeout,
@@ -120,7 +121,7 @@ func Run(ctx context.Context, sess *goruntime.Session, req Request) (*Outcome, e
 
 	// Phase 1b: build into a stable path.
 	buildCmd := "mkdir -p " + binDir + " && go build -o " + binPath + " ."
-	build, err := sess.Execute(ctx, goruntime.Request{
+	build, err := sess.Execute(ctx, sandbox.Request{
 		Command: buildCmd,
 		Timeout: timeout,
 	})
@@ -139,7 +140,7 @@ func Run(ctx context.Context, sess *goruntime.Session, req Request) (*Outcome, e
 
 	// Phase 2: run the binary with the requested env.
 	runCmd := envPrefix(req.Env) + "./" + binPath
-	run, err := sess.Execute(ctx, goruntime.Request{
+	run, err := sess.Execute(ctx, sandbox.Request{
 		Command: runCmd,
 		Timeout: timeout,
 	})
@@ -151,7 +152,7 @@ func Run(ctx context.Context, sess *goruntime.Session, req Request) (*Outcome, e
 	// small file. We discard fetch errors from the protocol — the
 	// caller can tell "no result.json" from "non-nil Result" by the
 	// Outcome.Result pointer.
-	fetch, fetchErr := sess.Execute(ctx, goruntime.Request{
+	fetch, fetchErr := sess.Execute(ctx, sandbox.Request{
 		Command: "cat " + resultPath + " 2>/dev/null || true",
 		Timeout: 30 * time.Second,
 	})

@@ -74,12 +74,17 @@ gcloud storage buckets list --format=json | jq '[.[] | {name, timeCreated}] | so
 - `manifests/overlays/gke/networkpolicy.yaml` + `ipranges-refresh.yaml` (CronJob refreshes a ConfigMap of allowed CIDRs from `gstatic.com/ipranges/goog.json`).
 - `manifests/warmpool.yaml` (SandboxWarmPool, replicas=2, OnReplenish).
 - `internal/prompts/system.md` generated from `curated.Packages` at build time.
+- **Multi-file program support**: extend `internal/normalize` to accept a `map[string][]byte` of source files and detect which one declares `func main`/`func run`; add `files?: map[string]string` as an additive field on the MCP tool args (keep `code: string` for the common single-file case). Lets the model write helper packages instead of inlining everything into one `main.go`. The agent-sandbox layer already supports multi-file materialization — this is purely a tool-surface change. Deferred from slice 2 because no canonical workflow asked for it yet.
+- `cmd/kode-gopher serve --context` flag — construct the agent-sandbox client with an explicit kubeconfig context rather than inheriting ambient `kubectl config current-context`. Closes the slice-1.5 / slice-1.7 context-drift footgun.
+- `internal/sandbox` recreate-on-session-death: today a fatal Execute error propagates and the next call opens fresh. Add explicit close+reopen on the well-known fatal errors so a pod dying mid-call self-heals.
 
 **Pass criteria**:
 - Snippet doing `http.Get("https://example.com")` must fail (egress blocked).
 - Snippet calling `storage.NewClient`, `secretmanager.NewClient`, `aiplatform.NewClient` in one execution must succeed without re-downloading modules (verify via `Result.Duration`).
 - `gcp_auth_status` reports `mode=workload, identity=<GSA email>` in-cluster and `mode=forwarded, identity=<user email>` on desktop.
 - With forwarded mode, revoking the refresh token externally → next `execute_go_code` must fail fast with a clear `needs_relogin` error, not a deep SDK 401.
+- Multi-file snippet declaring a helper package and importing it from `main.go` round-trips end-to-end through both the CLI and the MCP tool.
+- Passing `--context=kind-other-cluster` to `serve` reaches the right cluster regardless of ambient `kubectl config current-context`.
 
 ## Slice 5 — HTTP / SSE transport
 

@@ -30,7 +30,7 @@ import (
 )
 
 // runServe is `kode-gopher serve`: starts the MCP server on stdio,
-// holding one goruntime.Session for the lifetime of the process.
+// holding one sandbox.Session for the lifetime of the process.
 func runServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	namespace := fs.String("namespace", "default", "Kubernetes namespace for the sandbox claim (must already exist)")

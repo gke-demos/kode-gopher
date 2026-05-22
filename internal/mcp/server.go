@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package mcp wraps github.com/modelcontextprotocol/go-sdk to expose
 // kode-gopher as an MCP server. One server process holds at most one
-// goruntime.Session for its lifetime, opens it lazily on the first
+// sandbox.Session for its lifetime, opens it lazily on the first
 // tool call, and serializes all tool invocations with a mutex.
 //
 // Today the server registers exactly one tool, execute_go_code; the
@@ -30,8 +30,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gke-demos/go-runtime-sandbox/pkg/goruntime"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/gke-demos/kode-gopher/internal/sandbox"
 )
 
 // Version is what the server advertises to clients.
@@ -47,7 +48,7 @@ const Version = "0.1.0"
 type CredentialHook func() (files map[string][]byte, env map[string]string)
 
 // Config is everything Server needs to know to open and drive a
-// goruntime.Session. Zero-value fields fall back to sensible defaults.
+// sandbox.Session. Zero-value fields fall back to sensible defaults.
 type Config struct {
 	// Namespace is the k8s namespace that holds the SandboxTemplate
 	// and where the SandboxClaim is created.
@@ -61,11 +62,11 @@ type Config struct {
 	// than Close (delete it). Useful for development across multiple
 	// server restarts.
 	Persistent bool
-	// OpenTimeout bounds the goruntime.Open call on first tool use.
+	// OpenTimeout bounds the sandbox.Open call on first tool use.
 	OpenTimeout time.Duration
 	// ExecTimeout bounds each individual sandbox /execute call. The
 	// upstream HTTP layer caps at ~60s regardless, so values >60s
-	// only affect goruntime's internal accounting.
+	// only affect our own internal accounting.
 	ExecTimeout time.Duration
 	// Credentials, if non-nil, is called on every tool invocation to
 	// fold ambient host credentials into the request.
@@ -94,7 +95,7 @@ type Server struct {
 	// mu guards session (and only session). Held briefly during
 	// lazy-open and shutdown.
 	mu      sync.Mutex
-	session *goruntime.Session
+	session *sandbox.Session
 
 	// execMu serializes Execute calls so concurrent tool invocations
 	// can't race on /app or clobber each other's build artifacts. The
@@ -137,9 +138,9 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// ensureSession lazy-opens the goruntime.Session on first use and
+// ensureSession lazy-opens the sandbox.Session on first use and
 // reuses it on subsequent calls.
-func (s *Server) ensureSession(ctx context.Context) (*goruntime.Session, error) {
+func (s *Server) ensureSession(ctx context.Context) (*sandbox.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.session != nil {
@@ -148,7 +149,7 @@ func (s *Server) ensureSession(ctx context.Context) (*goruntime.Session, error) 
 	openCtx, cancel := context.WithTimeout(ctx, s.cfg.OpenTimeout)
 	defer cancel()
 	log.Printf("opening sandbox (namespace=%s template=%s claim=%q)", s.cfg.Namespace, s.cfg.Template, s.cfg.Claim)
-	sess, err := goruntime.Open(openCtx, goruntime.Options{
+	sess, err := sandbox.Open(openCtx, sandbox.Options{
 		Namespace: s.cfg.Namespace,
 		Template:  s.cfg.Template,
 		ClaimName: s.cfg.Claim,

@@ -41,7 +41,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gke-demos/go-runtime-sandbox/pkg/goruntime"
+	"github.com/gke-demos/kode-gopher/internal/sandbox"
 
 	"github.com/gke-demos/kode-gopher/internal/executor"
 	"github.com/gke-demos/kode-gopher/internal/normalize"
@@ -169,7 +169,7 @@ func run(path, namespace string, openTimeout, execTimeout time.Duration, claim s
 	openCtx, cancelOpen := context.WithTimeout(ctx, openTimeout)
 	defer cancelOpen()
 	log.Printf("opening sandbox (namespace=%s template=%s claim=%q)", namespace, sandboxTemplate, claim)
-	sess, err := goruntime.Open(openCtx, goruntime.Options{
+	sess, err := sandbox.Open(openCtx, sandbox.Options{
 		Namespace: namespace,
 		Template:  sandboxTemplate,
 		ClaimName: claim,
