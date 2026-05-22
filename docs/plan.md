@@ -81,6 +81,37 @@ gcloud storage buckets list --format=json | jq '[.[] | {name, timeCreated}] | so
 - `gcp_auth_status` reports `mode=workload, identity=<GSA email>` in-cluster and `mode=forwarded, identity=<user email>` on desktop.
 - With forwarded mode, revoking the refresh token externally → next `execute_go_code` must fail fast with a clear `needs_relogin` error, not a deep SDK 401.
 
+## Slice 5 — HTTP / SSE transport
+
+Adds a second transport mode to `kode-gopher serve` so the MCP server can be reached over TCP from clients that aren't co-located. Significantly larger than the previous slices because several things that stdio sidesteps become real design questions.
+
+**Scope (to firm up before starting; the questions below are the gate):**
+- A second `--transport=http` flag on `kode-gopher serve` (default still `stdio`). Binds an `--addr` and serves the MCP streamable-HTTP endpoint via the SDK's HTTP handler.
+- Per-connection or per-request session topology, depending on the answers below.
+- Authentication on the HTTP listener (token, OIDC, IAP — depending on the topology).
+- SSE streaming variant of the executor's Run/Fetch loop so partial stdout can flow back during a long-running tool call (rather than landing only at the end as a single response).
+- GKE manifests for the HTTP path: a Service, an Ingress or Gateway, IAP or other front-end auth, NetworkPolicy ingress rules.
+
+**Open design questions (don't pick answers until we start):**
+1. **Session topology**. Three plausible shapes:
+   - *Per-connection* — one sandbox session per HTTP/SSE connection, lifetime tied to the connection. Mirrors stdio's "one client one session" semantics. Connections must be long-lived or session-open cost dominates.
+   - *Per-request* — sandbox claimed from a warmpool per tool call, released after. Simpler scaling. Loses the warm-`$GOCACHE` benefit between calls on the same session.
+   - *Per-end-user* — one session pinned to an authenticated identity, shared across that user's requests. Best UX for multi-tenant; needs the auth model from question 2.
+2. **Auth**. What identifies a caller?
+   - Static bearer token (operator-issued; deployment-wide trust).
+   - OIDC / IAP (per-end-user identity from the front-end; full multi-tenant).
+   - mTLS (in-cluster / service-to-service).
+3. **Per-end-user credentials**. If we go multi-tenant per-user, every tool call has to run under that user's GCP identity, not the server's. That's the deferred slice-1 3LO work, plus the storage layer (where do we keep per-user refresh tokens?), plus session-scoped GOOGLE_APPLICATION_CREDENTIALS injection.
+4. **Streaming**. SSE specifically buys progressive output. The current executor returns one final response; the wrapper writes one final result.json. Adding streaming likely means:
+   - Mid-call tool-progress events (stdout/stderr chunks as they happen).
+   - A streaming variant of the result protocol (or just stdout streaming with the structured result still landing once at the end).
+5. **Deployment topology**. In-cluster (a Service in `codemode` namespace), Cloud Run, both? Different auth front-ends, different NetworkPolicy ingress, different scaling.
+
+**Pass criteria (sketch, to be refined):**
+- `kode-gopher serve --transport=http --addr=:8080` accepts a connection from a stock MCP HTTP client (e.g. mcp-inspector against `http://localhost:8080/mcp`) and runs `execute_go_code` end-to-end against the same sandbox infra slice 3 uses.
+- A long-running snippet (e.g. one that `time.Sleep(20*time.Second)`s with periodic `fmt.Println`s) streams its stdout to the client during the call rather than buffering to the end.
+- Whatever auth model we pick is enforced: a request without valid credentials is rejected with the right MCP-level error.
+
 ## Critical files for MVP (slice 0 + slice 1)
 
 These are what to create first; everything else is dead weight until the loop works.
@@ -95,7 +126,7 @@ These are what to create first; everything else is dead weight until the loop wo
 
 - **Native 3LO OAuth flow** (`kode-gopher auth login`). Deferred until a use case requires it (e.g., headless server with no developer workstation).
 - **OAuth client distribution** if 3LO is added. Likely "BYO required, plus `--use-gcloud-adc` escape hatch".
-- **Multi-tenancy**. Current design is one MCP server process per credential context. A SaaS deployment would need per-request session pools and per-end-user credential plumbing.
+- **Multi-tenancy**. Current design is one MCP server process per credential context. A SaaS deployment would need per-request session pools and per-end-user credential plumbing. **Folded into slice 5** if/when HTTP transport gets a multi-tenant shape.
 - **`$GOCACHE` PVC** for cross-pod persistence. Prewarm covers most of the value; revisit if cold-start latency stays painful after slice 4.
 - **L7 egress filtering** (e.g., transparent proxy that allowlists by hostname). L3 IP allowlist is the v1 approximation.
 - **Non-GCP tool surface**. If we ever want to give the sandbox access to capabilities outside the GCP SDK (e.g., a "secrets" tool), we'll need to add the host↔sandbox RPC bridge we deliberately skipped. Add only when there's a real reason.

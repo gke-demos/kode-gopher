@@ -61,6 +61,21 @@ Three MCP tools, one execution backend, one credential abstraction.
 
 OAuth login is **not** exposed to the model — it's operator-driven (run `gcloud auth application-default login` on the host).
 
+## Transport modes
+
+The MCP server speaks the standard MCP wire protocol; the transport underneath is pluggable. Two modes:
+
+**stdio (today).** `kode-gopher serve` reads JSON-RPC frames on stdin and writes them on stdout. Spawning a `kode-gopher serve` subprocess is how MCP clients (Claude Desktop, Gemini CLI, the SDK's `CommandTransport`) connect. Point-to-point: one MCP client per server process; the server identity is the spawning user's identity. Every section below — authentication, session lifecycle, sandbox boundary — describes this mode.
+
+**HTTP / SSE (planned, slice 5).** Streamable HTTP transport per the MCP spec: clients connect over TCP, the server fans out to many clients, and tool results can stream back via SSE rather than landing as a single final response. Several things that are simple in stdio become design questions in HTTP mode — surfaced in [`plan.md`](./plan.md)'s slice 5 rather than answered here. The big ones:
+
+- **Session topology**: one sandbox per HTTP connection (mirrors stdio), per request (pooled, smaller blast radius but $GOCACHE benefit gone), or per authenticated end-user (multi-tenant)?
+- **Auth**: a TCP server can't inherit identity from a parent process. Bearer token? OIDC? GCP IAP if hosted behind an Ingress?
+- **Per-end-user credentials**: stdio sidesteps this (sandbox runs as whoever launched the server). HTTP multi-tenant deployments need per-request credential context — likely the 3LO flow we deferred in slice 1.
+- **Streaming**: SSE specifically enables progressive tool output. Wrapper / executor protocol would need a streaming variant of the result-fetch step.
+
+Until that slice lands, everything in this document assumes stdio.
+
 ## Authentication model
 
 Two modes resolved at server start from `--auth-mode={auto,forwarded,workload}` (default `auto`):
@@ -102,7 +117,9 @@ Splitting build from run separates compile errors from runtime errors at the pro
 
 ## Session lifecycle
 
-One `*goruntime.Session` per MCP server process for its entire lifetime. Serialized by `sync.Mutex` — concurrent tool calls are processed one at a time (an MCP server typically has one client anyway).
+**Applies to stdio mode.** HTTP/SSE mode introduces per-connection or per-request sessions; see the Transport modes section above.
+
+One `*goruntime.Session` per MCP server process for its entire lifetime. Serialized by `sync.Mutex` — concurrent tool calls are processed one at a time. In stdio mode, an MCP server has exactly one client (the spawning process), so this also means "one session per client."
 
 - **Lazy open** — first tool call triggers `goruntime.Open`. Subsequent calls reuse the session.
 - **Reset between calls** — ephemeral default. `Session.Reset` clears `/app` but preserves `$GOCACHE` / `$GOMODCACHE`, so the second call against the same packages reuses cached build artifacts.
@@ -191,10 +208,10 @@ kode-gopher/
 
 ## Non-goals (for v1)
 
-- A native `kode-gopher auth login` 3LO flow. We forward gcloud ADC.
-- Per-end-user credential isolation in multi-tenant SaaS deployments. The MCP server is single-tenant per process.
+- A native `kode-gopher auth login` 3LO flow. We forward gcloud ADC. (Multi-tenant HTTP mode in slice 5 may force revisiting this.)
+- Per-end-user credential isolation in multi-tenant SaaS deployments. The stdio MCP server is single-tenant per process; multi-tenancy belongs to slice 5's HTTP/SSE work.
 - L7 egress filtering. NetworkPolicy is L3 IP allowlist only.
 - cgo support. Upstream sandbox image deliberately excludes `gcc`.
 - Persistent `$GOCACHE` across pod lifetimes (e.g. PVC-backed). Prewarm covers most of the value.
 - Capabilities outside the GCP SDK. The model is told to use `cloud.google.com/go/*` only; we don't try to expose arbitrary tools through a host RPC bridge.
-- Streaming results. One `execute_go_code` call returns one final result; long programs should log progress to stdout.
+- Streaming results in stdio mode. One `execute_go_code` call returns one final response; long programs should log progress to stdout. Slice 5's SSE transport unlocks streaming.
