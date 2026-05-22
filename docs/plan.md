@@ -117,6 +117,56 @@ Adds a second transport mode to `kode-gopher serve` so the MCP server can be rea
 - A long-running snippet (e.g. one that `time.Sleep(20*time.Second)`s with periodic `fmt.Println`s) streams its stdout to the client during the call rather than buffering to the end.
 - Whatever auth model we pick is enforced: a request without valid credentials is rejected with the right MCP-level error.
 
+## Slice 6 — alternative Yaegi runtime
+
+Adds a second sandbox runtime backed by [Yaegi](https://github.com/traefik/yaegi) (Go interpreter from Traefik Labs) alongside the existing compile-and-run path. Driven by the `experiments/yaegi-poc/` results: stdlib-only snippets finish in **7 ms** end-to-end and a real GCS list-buckets call finishes in **~770 ms** through the interpreter, vs ~5-30 s warm / ~30-55 s cold on the compiled path. The compiled path stays the default; yaegi is opt-in.
+
+**Gating test (do this first, before anything else):** extract symbols for `cloud.google.com/go/compute/apiv1` (a true gRPC-only client — the PoC didn't reach this) and try a small call (e.g. `client.AggregatedList` for zones). The PoC validated REST and HTTP-mode `cloud.google.com/go/storage`; this is the missing data point. Three branches:
+- ✅ **It works**: the full scope below applies — yaegi backend covers most of our curated set.
+- ⚠ **It works partially** (e.g. simple calls work, streaming/AIP-160 filtering breaks): restrict the curated yaegi set to "REST or HTTP-mode only" packages and ship anyway. Still useful.
+- ❌ **It doesn't work**: scope shrinks dramatically — yaegi backend is only for REST clients (`google.golang.org/api/*`). May still be worth shipping for the fast-startup case, but the marketing changes from "alternate runtime" to "fast REST-only runtime."
+
+Don't build the image / manifests / smoketests until the gate is answered.
+
+**Scope (assuming the gate passes):**
+
+- `cmd/kg-yaegi-runner/main.go` — in-pod interpreter binary. Reads `main.go` from `/app`, evaluates it with `stdlib.Symbols` + the curated extracts, exits with the snippet's exit code. Pure passthrough of stdout/stderr. If the snippet writes `/app/.kode-gopher/result.json`, that file survives for the executor's Fetch phase.
+- `internal/yaegi/symbols/` — committed `yaegi extract` output for the curated set (storage/v1, cloud.google.com/go/storage, compute/apiv1 if it works, container/apiv1, bigquery, secretmanager/apiv1, iterator). Build tags so each can be excluded if one breaks.
+- `Makefile` (new) — `make extract` re-runs `yaegi extract` for everything in `internal/curated/packages.go`, refreshes `internal/yaegi/symbols/`. Documented in CONTRIBUTING.
+- `sandbox-yaegi/Dockerfile` — minimal image (distroless or alpine + `tar` + `ca-certificates`) layering the upstream agent-sandbox in-pod server + our `kg-yaegi-runner` binary. Target: <200 MB (vs current 2.2 GB).
+- `manifests/base/sandboxtemplate-yaegi.yaml` (Template name `go-runtime-yaegi-template`) + GKE overlay extension (same gVisor, securityContext, etc. as the compiled template).
+- `--runtime={compiled,yaegi}` flag on `kode-gopher exec` and `kode-gopher serve`. Default `compiled`. Selects which SandboxTemplate the session claims from. Stays at the CLI level — `internal/sandbox.Options.Template` is what changes downstream.
+- `runtime?: "compiled" | "yaegi"` field on the MCP `execute_go_code` tool arguments. Description explains the tradeoff (fast vs broader-package-support) and notes the curated set.
+- `internal/executor` runtime-aware command shape: when runtime=yaegi, the command is just `kg-yaegi-runner main.go` (no `go mod tidy`, no `go build`). One Execute call, not three.
+- `scripts/smoketest-yaegi.sh` — analog of smoketest-mcp.sh that spawns `kode-gopher serve --runtime=yaegi` and exercises both test snippets. Target: <2 s total per call.
+
+**Pass criteria:**
+
+- Stdlib snippet through the yaegi backend: end-to-end under 100 ms (vs ~5-15 s on compiled).
+- REST GCS list-buckets through the yaegi backend: matches gcloud chronologically; end-to-end under 2 s.
+- `cloud.google.com/go/storage` list-buckets through the yaegi backend: same.
+- (Gating-dependent) `compute/apiv1` zone-list through the yaegi backend: succeeds.
+- MCP tool with `runtime: "yaegi"` works on both kind and GKE; `runtime: "compiled"` (default) unchanged.
+- A snippet importing a non-curated package returns a clear kode-gopher-level error pointing at the curated list + the `--runtime=compiled` fallback, *not* a deep yaegi panic.
+- Image size measured + documented (target <200 MB).
+- `make extract` works as a one-step refresh.
+
+**Open design questions:**
+
+1. **Symbol staleness.** Extracted symbol files are committed; GCP SDK upgrades require re-extracting. How aggressive on freshness? (Probably: re-extract on every kode-gopher release; document the contract in CONTRIBUTING.)
+2. **Generics + edge-case compatibility.** Yaegi v0.16.1's generics support is incomplete and the PoC's surface was small. We'll discover edge cases by trying. Maintain a "known-broken patterns" list in the README rather than chasing upstream fixes mid-slice.
+3. **Default in MCP tool.** When the model doesn't specify `runtime`, default to `compiled` (broadest compatibility) — but the tool description should mention `yaegi` exists with its tradeoffs so the model can choose for fast-path use cases.
+4. **`extra_imports` semantics in yaegi mode.** Compiled mode synthesizes `kg_extra_imports.go` so `go mod tidy` resolves them. Yaegi doesn't do module resolution — extras must already be in the curated symbol set. Make `extra_imports` a no-op (or warning) under yaegi rather than failing silently.
+
+**Out of scope (explicit):**
+
+- Making yaegi the default. Compiled stays default — yaegi is the opt-in fast path.
+- Auto-selecting runtime based on snippet imports.
+- Allowing yaegi to compile-on-demand for non-curated packages.
+- Replacing the compiled path. Both ship.
+
+**Cost estimate:** 3-4 days of focused work assuming the gating test passes; up to 2x if compute/apiv1 needs workarounds. Larger than slice 2 was; smaller than slice 3 (which has Artifact Registry, Workload Identity binding, NetworkPolicy, etc.).
+
 ## Critical files for MVP (slice 0 + slice 1)
 
 These are what to create first; everything else is dead weight until the loop works.
@@ -132,6 +182,6 @@ These are what to create first; everything else is dead weight until the loop wo
 - **Native 3LO OAuth flow** (`kode-gopher auth login`). Deferred until a use case requires it (e.g., headless server with no developer workstation).
 - **OAuth client distribution** if 3LO is added. Likely "BYO required, plus `--use-gcloud-adc` escape hatch".
 - **Multi-tenancy**. Current design is one MCP server process per credential context. A SaaS deployment would need per-request session pools and per-end-user credential plumbing. **Folded into slice 5** if/when HTTP transport gets a multi-tenant shape.
-- **`$GOCACHE` PVC** for cross-pod persistence. Prewarm covers most of the value; revisit if cold-start latency stays painful after slice 4.
+- **`$GOCACHE` PVC** for cross-pod persistence. Prewarm covers most of the value; revisit if cold-start latency stays painful after slice 4. Slice 6's Yaegi backend, if shipped, makes this less urgent — the interpreter path doesn't have a $GOCACHE.
 - **L7 egress filtering** (e.g., transparent proxy that allowlists by hostname). L3 IP allowlist is the v1 approximation.
 - **Non-GCP tool surface**. If we ever want to give the sandbox access to capabilities outside the GCP SDK (e.g., a "secrets" tool), we'll need to add the host↔sandbox RPC bridge we deliberately skipped. Add only when there's a real reason.
