@@ -31,7 +31,7 @@ import "fmt"
 
 func main() { fmt.Println("hi") }
 `)
-	got, err := normalize.Normalize(src)
+	got, err := normalize.Normalize(src, normalize.Options{})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -55,7 +55,7 @@ func run(ctx context.Context) (any, error) {
 	return map[string]int{"answer": 42}, nil
 }
 `)
-	got, err := normalize.Normalize(src)
+	got, err := normalize.Normalize(src, normalize.Options{})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -88,7 +88,7 @@ import "context"
 
 func helper(ctx context.Context) error { return nil }
 `)
-	_, err := normalize.Normalize(src)
+	_, err := normalize.Normalize(src, normalize.Options{})
 	if err == nil {
 		t.Fatalf("expected error for missing run func, got nil")
 	}
@@ -99,7 +99,7 @@ func helper(ctx context.Context) error { return nil }
 
 func TestNormalize_ParseErrorSurfaces(t *testing.T) {
 	src := []byte(`this is not Go`)
-	_, err := normalize.Normalize(src)
+	_, err := normalize.Normalize(src, normalize.Options{})
 	if err == nil {
 		t.Fatalf("expected parse error, got nil")
 	}
@@ -118,7 +118,7 @@ import "context"
 func run(ctx context.Context) (any, error) { return nil, nil }
 func main() { _, _ = run(context.Background()) }
 `)
-	got, err := normalize.Normalize(src)
+	got, err := normalize.Normalize(src, normalize.Options{})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -127,6 +127,53 @@ func main() { _, _ = run(context.Background()) }
 	}
 	if _, ok := got.Files[wrapper.Filename]; ok {
 		t.Errorf("verbatim mode should not ship wrapper file")
+	}
+}
+
+func TestNormalize_ExtraImportsAddsCompanionFile(t *testing.T) {
+	src := []byte(`package kode_gopher_snippet
+
+import "context"
+
+func run(ctx context.Context) (any, error) { return nil, nil }
+`)
+	got, err := normalize.Normalize(src, normalize.Options{
+		ExtraImports: []string{"cloud.google.com/go/bigquery", "cloud.google.com/go/secretmanager/apiv1"},
+	})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	body, ok := got.Files["kg_extra_imports.go"]
+	if !ok {
+		t.Fatalf("expected kg_extra_imports.go, got keys %v", keys(got.Files))
+	}
+	s := string(body)
+	if !strings.HasPrefix(s, "// Code generated") {
+		t.Errorf("companion missing generated header:\n%s", s)
+	}
+	if !strings.Contains(s, "package main") {
+		t.Errorf("companion missing `package main`:\n%s", s)
+	}
+	for _, want := range []string{
+		`_ "cloud.google.com/go/bigquery"`,
+		`_ "cloud.google.com/go/secretmanager/apiv1"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("companion missing blank import %q:\n%s", want, s)
+		}
+	}
+}
+
+func TestNormalize_ExtraImportsEmptyOmitsFile(t *testing.T) {
+	src := []byte(`package main
+func main() {}
+`)
+	got, err := normalize.Normalize(src, normalize.Options{ExtraImports: nil})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if _, ok := got.Files["kg_extra_imports.go"]; ok {
+		t.Errorf("expected no kg_extra_imports.go when ExtraImports is empty; keys %v", keys(got.Files))
 	}
 }
 

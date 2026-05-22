@@ -72,6 +72,8 @@ func main() {
 	switch os.Args[1] {
 	case "exec":
 		os.Exit(runExec(os.Args[2:]))
+	case "serve":
+		os.Exit(runServe(os.Args[2:]))
 	case "-h", "--help", "help":
 		printRootUsage()
 		os.Exit(0)
@@ -83,7 +85,7 @@ func main() {
 }
 
 func printRootUsage() {
-	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n")
+	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n  serve           start the MCP server on stdio\n")
 }
 
 func runExec(args []string) int {
@@ -93,6 +95,7 @@ func runExec(args []string) int {
 	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (upstream caps at ~60s regardless)")
 	claim := fs.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one")
 	keep := fs.Bool("keep", false, "leave the sandbox alive on exit (Disconnect) instead of deleting it (Close)")
+	extraImports := fs.String("extra-imports", "", "comma-separated import paths to add as blank imports (forces `go mod tidy` to resolve them)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: kode-gopher exec [flags] <file.go>\n\n")
 		fs.PrintDefaults()
@@ -106,7 +109,7 @@ func runExec(args []string) int {
 	}
 	path := fs.Arg(0)
 
-	exitCode, err := run(path, *namespace, *openTO, *execTO, *claim, *keep)
+	exitCode, err := run(path, *namespace, *openTO, *execTO, *claim, *keep, splitCSV(*extraImports))
 	if err != nil {
 		log.Printf("%v", err)
 		return 1
@@ -114,13 +117,29 @@ func runExec(args []string) int {
 	return exitCode
 }
 
-func run(path, namespace string, openTimeout, execTimeout time.Duration, claim string, keep bool) (int, error) {
+// splitCSV turns "a, b,c " into ["a", "b", "c"]; empty input → nil.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func run(path, namespace string, openTimeout, execTimeout time.Duration, claim string, keep bool, extraImports []string) (int, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	norm, err := normalize.Normalize(src)
+	norm, err := normalize.Normalize(src, normalize.Options{ExtraImports: extraImports})
 	if err != nil {
 		return 0, fmt.Errorf("normalize %s: %w", path, err)
 	}

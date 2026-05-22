@@ -248,3 +248,47 @@ Upstream `pkg/goruntime` (via `sigs.k8s.io/agent-sandbox@v0.4.6` client) appears
 
 ### Decision deferred (again): `--context` flag and `--kubeconfig`
 The smoketest pins context via `kubectl config use-context` before invoking the binary. A proper `--context` flag on `kode-gopher exec` requires constructing the agent-sandbox `*sandbox.Client` explicitly (rather than letting it inherit ambient kubeconfig) and threading it into `goruntime.Options.Client`. Defer to Slice 2 along with `cobra` introduction.
+
+---
+
+## Slice 2 — 2026-05-22 — MCP server
+
+The MCP server is live. `kode-gopher serve` runs over stdio, advertises one tool (`execute_go_code`), and holds a long-lived `*goruntime.Session` for the lifetime of the process — exactly the design's "one server, one session, lazy-open, mutex-serialized" shape. Verified end-to-end against both kind (`scripts/smoketest-mcp.sh --target=kind --compare`) and the real GKE Autopilot cluster (`--target=gke --compare`); both diff cleanly against `gcloud storage buckets list`.
+
+### MCP SDK: `modelcontextprotocol/go-sdk`
+Already a transitive dep via `gke-demos/go-runtime-sandbox` (their `cmd/mcp-server` uses it). Promoted to a direct dep on `go mod tidy`. v1.6.0 currently. Same SDK that the user-side MCP clients (Claude Desktop, etc.) speak.
+
+### `CredentialHook` callback rather than baking gcloud paths into `internal/mcp`
+`internal/mcp` exposes a `Config.Credentials CredentialHook` that returns `(files, env)` to fold into every tool call. `cmd/kode-gopher/serve.go` wires in the same `readLocalADC` + `collectForwardedEnv` logic the `exec` subcommand uses. Keeps `internal/mcp` as a generic "compile + run Go in a goruntime sandbox" service with no host-OS coupling — when the slice-4 `internal/creds` package lands with the full `CredentialSource` interface, the hook signature stays.
+
+### `/app` is Reset between tool calls; `$GOCACHE` survives
+Mirrors upstream `cmd/mcp-server`'s ephemeral default. One snippet can't leak files into the next, but the per-package compile cache persists, so back-to-back calls against the same imports are near-instant. (Wrapped call in our smoketest landed at ~6s on kind, ~26s on GKE — vs the verbatim cold call's 15s / 40s.)
+
+### Wire-form `Result` decouples from the executor's `json.RawMessage`
+First MCP smoketest run failed with `validating /properties/result/properties/value/items: type "object", want "integer"`. Cause: the SDK auto-generates a JSON schema from the handler's Output type; `executor.Result.Value` is `json.RawMessage` which is `[]byte` which the schema generator describes as "array of integer". When the actual value (a bucket array) goes over the wire, it doesn't match.
+
+Fix: introduce `mcp.Result{Value any, ...}` as the wire form and `toWireResult(*executor.Result) *Result` that decodes the bytes via `json.Unmarshal(raw, &v)`. The executor keeps its raw-bytes-preserving shape (correct for "read user's exact bytes from sandbox"); the MCP layer presents a typed-any view (correct for "let the SDK schema-validate and let clients use it"). The handoff is one line of code and reads cleanly.
+
+### Tool semantics
+- `execute_go_code(code, extra_imports?)` → `{phase, mode, exit_code, duration_ms, stdout?, stderr?, result?}` as structured content, plus a human-readable text rendering for clients that only do text.
+- `IsError` is true iff `exit_code != 0` OR `result.kind != "ok"`. So a compile failure, a non-zero exit, an `error` return from `run()`, a panic, and a marshal failure all surface as tool errors to the LLM. An OK run with stdout but no structured result (verbatim mode) is *not* IsError.
+- Text body matches the CLI's `printOutcome` shape (the `── stdout ──` / `── stderr ──` / `── result ──` block markers) so existing extractors in our bash smoketests still work.
+
+### `--extra-imports` shipped as both an MCP tool arg and a CLI flag
+The normalizer gets an `Options{ExtraImports []string}`. Non-empty list emits a generated `kg_extra_imports.go` companion file that blank-imports each path, forcing `go mod tidy` to resolve them into the synthesized `go.mod`. Useful when the model knows it'll need a prewarmed package but hasn't declared the import in source yet. CLI surface: `kode-gopher exec --extra-imports='cloud.google.com/go/bigquery,cloud.google.com/go/secretmanager/apiv1' file.go`.
+
+### `cmd/mcp-smoketest` + `scripts/smoketest-mcp.sh`
+The smoketest is a Go binary that spawns `./bin/kode-gopher serve` as a subprocess, speaks MCP over its stdio via the SDK's `CommandTransport`, exercises both `testdata/list_buckets.go` (verbatim) and `testdata/list_buckets_snippet.go` (wrapped), and (with `--compare`) asserts the wrapped-mode `result.value` matches `gcloud storage buckets list` chronologically. No LLM, no `mcp-inspector` dependency — pure programmatic validation of the wire format AND the executor.
+
+The bash wrapper (`scripts/smoketest-mcp.sh --target={kind,gke}`) just builds the binaries, picks the right context + namespace, and invokes `mcp-smoketest`. Doesn't bootstrap a cluster — run `smoketest-kind.sh` or `smoketest-gke.sh` first.
+
+### Timings (steady state, second call onward)
+| substrate | first call (cold session open + run) | subsequent (warm session, wrapped) |
+|---|---|---|
+| kind     | ~15 s | ~6 s |
+| GKE Autopilot | ~40 s | ~26 s |
+
+GKE-warm slower than expected (vs kind-warm). Suspect: gVisor syscall-interception overhead + the `Reset` between calls forcing a re-tidy/re-build each time (the cache survives so it's incremental, but the linker re-runs). Worth investigating in slice 4 alongside the `$GOCACHE` PVC question.
+
+### Still deferred to slice 2+: `cobra`, `--context` flag
+Subcommand dispatch in `main.go` plus per-subcommand `flag.NewFlagSet` works cleanly enough that `cobra` would add weight without UX win. Revisit when `auth` / future subcommands land. The `--context` flag also still deferred — both kind and GKE smoketests pin context via `kubectl config use-context` before invoking, and the MCP server inherits that. A real `--context` requires constructing the agent-sandbox client with an explicit kubeconfig and threading it into `goruntime.Options.Client`. Slice 3 or 4.
