@@ -338,3 +338,94 @@ Added `internal/sandbox/{tar_test,truncate_test}.go` — pure-function coverage 
 - Honest dep accounting. `go.mod` now says `sigs.k8s.io/agent-sandbox v0.4.6` directly (not as an indirect through goruntime). The relationship is visible.
 
 End-to-end verification: kind direct CLI ✅, kind MCP ✅, GKE MCP ✅ (~6 s warm wrapped on kind, ~30 s warm wrapped on GKE — identical to slice 2 numbers; pure refactor with no perf change).
+
+## Curated-set expansion — 2026-07-04 — k8s.io/client-go
+
+Slice 0.5 shaped the curated set as "the GCP SDK packages the model will import." That framing was too narrow given the project's positioning as "awesome for GKE and Kubernetes." A snippet that lists GKE clusters via `container/apiv1` can't then reach into any of those clusters — there's no k8s client-go in the prewarm, so the snippet either pays a 60s+ cold compile (blowing the agent-sandbox HTTP cap) or fails outright.
+
+### What got added to `internal/curated/packages.go`
+Five entries, all under `k8s.io/...`:
+- `k8s.io/client-go/kubernetes` — typed clientset (Pods, Deployments, Services, …). Pulls most of client-go transitively.
+- `k8s.io/client-go/tools/clientcmd` — kubeconfig parsing (for snippets that receive one inline; no host-side kubeconfig plumbing today).
+- `k8s.io/client-go/dynamic` — CRD-aware dynamic client. Useful for third-party operators the model can't have compiled-in typed clients for.
+- `k8s.io/client-go/tools/watch` — watch helpers with retry-on-connection-reset semantics.
+- `k8s.io/apimachinery/pkg/apis/meta/v1` — `ListOptions`, `GetOptions`, `ObjectMeta`, needed by essentially every call.
+
+`k8s.io/client-go/rest` isn't listed explicitly because it comes along transitively — anything blank-importing `kubernetes` gets rest compiled and cached. The `list_k8s_version_snippet.go` smoketest imports it directly and compiles fine.
+
+### Image-size impact
+Measured on the local rebuild: **kode-gopher-sandbox went from 2.23 GB → 2.73 GB (+500 MB)**. Bigger than the "150-250 MB" estimate that got floated when scoping the change — the k8s.io module graph is heavier than typical GCP client trees (apimachinery, api, kube-openapi, structured-merge-diff, gnostic-models, cbor, cel-expr, all pulled in transitively). Uncompressed. Compressed layer for GHCR push is roughly half that.
+
+Prewarm `go build ./...` took 261 s on the first fresh build (whole prewarm, not just the delta). Not directly comparable to the previous baseline since versions have drifted, but in the same order of magnitude.
+
+Accepted as-is. The curated-set doc comment now says "Add sparingly; each entry adds image size + build time. The k8s.io/client-go tree in particular pulls a large transitive graph" — future curated-set additions from other ecosystems (e.g. `sigs.k8s.io/controller-runtime`) get evaluated against this new baseline.
+
+### Follow-ups that fell out
+1. **RBAC for typed calls.** Today the sandbox KSA has no bindings, so `ServerVersion()` works (unauthenticated `/version`) but `Pods("kube-system").List(...)` would 403. When a real use case appears, add a Role/RoleBinding in the manifests — per-namespace, not cluster-admin.
+2. **In-cluster vs remote-cluster reachability doc.** Added a "Kubernetes API access" section in `docs/design.md` covering `rest.InClusterConfig()` for the sandbox's own cluster and the `container/apiv1 GetCluster → build rest.Config` pattern for other GKE clusters.
+3. **The curated set is no longer "GCP packages"** — updated the `internal/curated/packages.go` package doc to say "GCP SDK and Kubernetes client packages". Slice 4's generated system prompt needs to reflect this too when it lands.
+4. **Smoketest coverage.** Two snippets added, covering the two branches of the design.md "Kubernetes API access" section:
+   - `testdata/list_k8s_version_snippet.go` — `rest.InClusterConfig()` → `Discovery().ServerVersion()`. Tests the sandbox's own cluster reachability. Unauthenticated `/version` endpoint, so no RBAC needed. Small footprint (just proves the wire works).
+   - `testdata/list_gke_pods_snippet.go` — the compose demo. `container/apiv1.ListClusters` picks the first GKE cluster in `$GOOGLE_CLOUD_PROJECT`, then builds a `rest.Config` from its endpoint + `MasterAuth.ClusterCaCertificate` + a `google.DefaultTokenSource`-backed `oauth2.Transport`, then `CoreV1().Pods("kube-system").List(...)`. Two GCP-adjacent APIs, one snippet, one round-trip. This is the wedge insight rendered as a test. Distinguishes Forbidden (RBAC gap) from other errors via `apierrors.IsForbidden`.
+   
+   Both wired into `smoketest-kind.sh`, `smoketest-gke.sh`, and `cmd/mcp-smoketest` (the latter with a `gke-compose` assertion: cluster field populated, ≥1 pod returned, first pod has non-empty name+namespace). The gcloud compare stays gated to `list_buckets*` files. Env forwarding remained the existing 2-var allowlist — no test-only var pollution.
+
+Not verified: end-to-end kind/GKE smoketest runs (needs `GOOGLE_CLOUD_PROJECT` + user's call on cluster). Local docker build succeeded, which is what proves the prewarm imports resolve and compile.
+
+## Version-pinning and PerAttemptTimeout — 2026-07-04
+
+The k8s.io curated-set expansion above shipped a working image, but the *first* run of `smoketest-kind.sh --compare` failed on `list_buckets.go` with `net/http: timeout awaiting response headers` inside the build phase — 65s to compile a snippet that historically took <10s. This entry documents diagnosis and fix.
+
+### Root cause: MVS drift between prewarm and snippet
+Adding `k8s.io/client-go` to `internal/prewarm` shifted Go's minimum-version-selected versions of shared transitive deps upward. The prewarm cached `google.golang.org/protobuf@v1.36.12-0.<pseudo>` (pulled up by a k8s.io requirement), but a GCP-only snippet's own `go mod tidy` on an empty go.mod resolved `v1.36.11` (what the storage client alone wants). Cache miss on protobuf → cascading cache miss on everything that transitively depends on it (grpc, otel, genproto, ...). Net: **full recompile from scratch on every snippet build**. Confirmed by timing `go build` inside a warm image: 57 s (empty snippet go.mod) vs 5 s (snippet go.mod pinned to prewarm versions).
+
+The problem is fundamentally that the prewarm's `$GOCACHE` is a *version-selection artifact* — its usefulness depends on the snippet's tidy resolving the *same* versions. That coupling was invisible before the k8s expansion because with only cloud.google.com/go/* in prewarm, MVS was a fixed point.
+
+### Fix 1: prewarm lockfile as source of truth for snippet versions
+- **Committed `internal/prewarm/{go.mod,go.sum}`** to git (previously gitignored / regenerated on every image build). Now versions are frozen; developers see exactly what the sandbox will use.
+- **`sandbox/Dockerfile`** drops `go mod tidy` (would drift from committed versions) and preserves `go.mod` + `go.sum` at `/opt/kode-gopher-base/` before deleting `/tmp/prewarm`.
+- **`internal/executor/executor.go`** bootstraps the snippet's `/app/go.mod` + `/app/go.sum` from `/opt/kode-gopher-base/` at tidy time (with `sed` rewriting the module line to `kode_gopher_user`). Gated on `[ ! -f go.mod ]` so a slice-4 multi-file snippet that ships its own go.mod overrides the pinning — the agent is signaling "I know what versions I want" and taking on the recompile cost.
+- **`cmd/kode-gopher/main.go`** and **`internal/mcp/execute_go_code.go`** stopped synthesizing `module kode_gopher_user\ngo 1.26\n` — the executor now owns that setup.
+
+Result: snippet `go build` after pinning: **~5 s** (list_buckets_snippet wrapped mode). 12x faster; well under any reasonable HTTP cap.
+
+### Fix 2: expose PerAttemptTimeout, default 3 min
+The "~60s per-call HTTP cap" quoted in slice 0/0.5 decisions is `sigs.k8s.io/agent-sandbox/clients/go/sandbox.defaultPerAttemptTimeout = 60 * time.Second`. Overridable via `sb.Options.PerAttemptTimeout`. Our `internal/sandbox.Options` didn't surface it, so we were stuck at the default.
+
+- Added `internal/sandbox.Options.PerAttemptTimeout`, plumbed to `sb.Options`.
+- Default 3 minutes — comfortably above any real prewarmed build but short enough to fail-fast on a truly hung pod.
+- Removed stale "~60s cap" language from `internal/sandbox`, `internal/executor`, and the MCP tool description.
+
+Even with the version fix (fast common case), the wider cap protects against unusual conditions (cold Autopilot node, snippet importing an uncurated package that needs to actually resolve on first use).
+
+### Smoketest results (kind, --compare)
+- `list_buckets.go` (verbatim): pass, 54s. First cold pod; subsequent snippets in warmed pods much faster.
+- `list_buckets_snippet.go` (wrapped): pass, **8.3s**. Steady-state number that validates the pinning worked.
+- `list_k8s_version_snippet.go`: **FAIL** at runtime — `rest.InClusterConfig: open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory`. Root cause: `sigs.k8s.io/agent-sandbox/extensions/controllers/utils.go:28` explicitly sets `AutomountServiceAccountToken = false` as its "secure by default" policy. Our `manifests/base/sandboxtemplate.yaml` doesn't override this. My `docs/design.md > Kubernetes API access` claim that in-cluster reachability "Just Works" was wrong. Requires a manifest change (opt-in, per-template) — deferred to a follow-up because it's a security-relevant decision, not a mechanical fix.
+- `list_gke_pods_snippet.go`: **FAIL** at runtime — `dial tcp 136.112.103.246:443: i/o timeout`. Snippet picked cluster `devops-bench-small`, whose control plane isn't reachable from a laptop kind (private endpoint or MasterAuthorizedNetworks restriction). Fix: filter for publicly-reachable clusters in the snippet — deferred.
+
+Both k8s failures are downstream of a working compile path. Task 9's fix (pinning + timeout) is complete; the k8s runtime issues are separate follow-ups.
+
+## k8s runtime fixes — 2026-07-04
+
+Two fixes for the runtime failures uncovered by the smoketest above.
+
+### 1. Enable KSA token mount in the SandboxTemplate
+`manifests/base/sandboxtemplate.yaml` now explicitly sets `automountServiceAccountToken: true` on the podTemplate. The agent-sandbox extensions controller's secure-by-default policy (`extensions/controllers/utils.go:28`) sets it to false unless overridden. Without the override, `rest.InClusterConfig()` fails at `open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file`.
+
+**Security tradeoff acknowledged**: the sandbox pod can now read its KSA token and (if any RBAC is bound) call the API server it runs on. Defense-in-depth is still there: the KSA has no RBAC by default (no Role or ClusterRoleBinding), so a snippet that tries typed calls gets Forbidden. That layer is where we'd control blast radius in a real deployment — grant sparingly, per-namespace, never `cluster-admin`. For the smoketest, `Discovery().ServerVersion()` needs no RBAC.
+
+### 2. Prefer the GKE DNS endpoint in the compose snippet
+`testdata/list_gke_pods_snippet.go` now uses `c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint` (`uid.<region>.gke.goog`) when available. This is always publicly reachable via Google's control-plane routing regardless of private-cluster or MasterAuthorizedNetworks configuration, and uses Google-managed TLS (system trust store, no per-cluster CA needed). Falls back to `c.Endpoint` + `MasterAuth.ClusterCaCertificate` if DNS endpoint is unset.
+
+Before this change, the snippet was picking `devops-bench-small` (first alphabetical) whose IP endpoint isn't reachable from a laptop kind. Post-fix: same cluster picked, but via DNS endpoint `gke-4b65741b887e41a7b879d75923e4d629e98f-...us-central1-a.gke.goog` — 20 pods listed from kube-system in 10.6s. Result includes `endpoint_kind: "dns" | "ip"` for observability.
+
+Updated `docs/design.md > Kubernetes API access` to correct both mistakes (in-cluster "Just Works" claim and IP-endpoint-first recipe).
+
+### Smoketest results (kind, --compare, after both fixes)
+- `list_buckets.go` verbatim: 27s ✅
+- `list_buckets_snippet.go` wrapped: **8.2s** ✅
+- `list_k8s_version_snippet.go`: 13.5s ✅ (kind=ok, server v1.35.0)
+- `list_gke_pods_snippet.go`: 10.6s ✅ (kind=ok, cluster=devops-bench-small via DNS endpoint, 20 pods)
+
+MCP smoketest (`smoketest-mcp.sh --target=kind --compare`) also passes end-to-end: all four `execute_go_code` calls return `structuredContent` with `result.kind=ok` and the snippet's data.

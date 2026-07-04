@@ -115,6 +115,29 @@ No credentials are materialized into the sandbox. The pod is bound to a GSA via 
 ### Why not 3LO in our own binary?
 A native `kode-gopher auth login` flow would require us to either embed an OAuth client ID/secret (which means we own a GCP project and assume any operational responsibility that comes with it) or require every user to register their own client. Forwarding ADC sidesteps both: `gcloud` already solved this. We can add our own flow later if a real use case demands it (e.g., headless server deployment without a developer workstation).
 
+## Kubernetes API access
+
+`k8s.io/client-go` (typed `kubernetes` clientset, `dynamic`, `tools/clientcmd`, `tools/watch`, and `apimachinery/pkg/apis/meta/v1`) is in the curated prewarmed set. The reachability story splits by *which* cluster a snippet is trying to talk to.
+
+### The sandbox's own cluster (the common case)
+`rest.InClusterConfig()` works when the pod's KSA token is mounted. Note: the agent-sandbox extensions controller (`extensions/controllers/utils.go`) applies a "secure by default" that sets `automountServiceAccountToken=false` unless the template overrides it. Our `manifests/base/sandboxtemplate.yaml` explicitly sets it to `true` — we accept mounting the token as the cost of the "own cluster access" capability. Without that override, the snippet would fail at `open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory`.
+
+`client.Discovery().ServerVersion()` needs no RBAC (the `/version` endpoint is unauthenticated). Anything typed — `Pods().List(...)`, `Deployments().Get(...)`, `.Watch(...)` — additionally needs a Role/RoleBinding (or ClusterRole/ClusterRoleBinding) granted to the sandbox KSA. Today the manifests grant nothing beyond the KSA's default. Grant sparingly, per-namespace when possible; a blanket `cluster-admin` binding would erase the sandbox boundary.
+
+### Other GKE clusters
+The snippet builds a `rest.Config` manually. Recommended pattern:
+
+1. Use `cloud.google.com/go/container/apiv1` (curated) to `GetCluster` (or `ListClusters` + pick) on the target — this returns endpoint metadata under `ControlPlaneEndpointsConfig`, plus `MasterAuth.ClusterCaCertificate` and location.
+2. **Prefer the DNS endpoint** at `c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint` (`uid.<region>.gke.goog`). It's always publicly reachable via Google's control-plane routing regardless of private-cluster or MasterAuthorizedNetworks configuration; TLS is Google-managed (system trust store; no per-cluster CA). Only fall back to `c.Endpoint` (IP) + `MasterAuth.ClusterCaCertificate` if the DNS endpoint is empty on the cluster.
+3. Wrap a Google-authenticated `http.RoundTripper` (`oauth2.Transport{Source: google.DefaultTokenSource(ctx, cloud-platform)}`).
+4. Feed into `rest.Config{Host, [TLSClientConfig], WrapTransport}` and `kubernetes.NewForConfig`.
+
+Which identity actually authenticates to the remote cluster is determined by the same axis as GCP auth: `workload` mode uses the sandbox pod's GSA (which must have `container.clusters.get` on the target's project *and* be granted RBAC in the target cluster), `forwarded` mode uses the desktop user's identity. On GKE with the Google auth webhook, Kubernetes Engine Developer on the project usually maps to sufficient k8s RBAC.
+
+See `testdata/list_gke_pods_snippet.go` for a worked example that composes both APIs.
+
+**Not supported (out of scope):** kubeconfig files. `tools/clientcmd` is curated for parsing snippets the model might paste in, but there's no host-side plumbing to inject `~/.kube/config` into the sandbox.
+
 ## Result protocol
 
 User code (or the wrapper, when wrapping a snippet) writes a JSON document to `/app/.kode-gopher/result.json`. The host fetches it via a second, cheap `Execute` with `cat`.
