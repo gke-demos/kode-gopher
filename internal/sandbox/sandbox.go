@@ -56,6 +56,15 @@ type Options struct {
 	// tight on cold GKE Autopilot nodes — bump to 5min there.
 	SandboxReadyTimeout time.Duration
 
+	// PerAttemptTimeout is the ResponseHeaderTimeout on the HTTP client
+	// used to POST /execute against the in-pod sandbox server. The
+	// upstream default is 60s, which the in-pod server treats as an
+	// effective total-exec cap (it buffers response and writes headers
+	// only when the command exits). Zero uses defaultPerAttemptTimeout
+	// (3min) — comfortably above any real prewarmed build/run cycle
+	// but still short enough that a truly hung pod fails fast.
+	PerAttemptTimeout time.Duration
+
 	// Truncate controls LLM-friendly head+tail truncation of Execute
 	// stdout/stderr. Zero value applies defaults (8 KiB each).
 	Truncate TruncateConfig
@@ -73,8 +82,8 @@ type Request struct {
 	Command string
 
 	// Timeout bounds this single Execute call. Zero = defaultTimeout
-	// (5min). The agent-sandbox HTTP layer caps at ~60s regardless,
-	// so values larger than that only affect our own accounting.
+	// (5min). The upstream agent-sandbox HTTP layer's own cap comes
+	// from Options.PerAttemptTimeout — we default that to 3min.
 	Timeout time.Duration
 }
 
@@ -97,8 +106,9 @@ type Session struct {
 }
 
 const (
-	defaultTimeout = 5 * time.Minute
-	tarUploadName  = ".kg-upload.tar"
+	defaultTimeout           = 5 * time.Minute
+	defaultPerAttemptTimeout = 3 * time.Minute
+	tarUploadName            = ".kg-upload.tar"
 )
 
 // Open creates a Session either by creating a new sandbox (ClaimName
@@ -111,9 +121,14 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		opts.Namespace = "default"
 	}
 
+	perAttempt := opts.PerAttemptTimeout
+	if perAttempt == 0 {
+		perAttempt = defaultPerAttemptTimeout
+	}
 	clientOpts := sb.Options{
-		TemplateName: opts.Template,
-		Namespace:    opts.Namespace,
+		TemplateName:      opts.Template,
+		Namespace:         opts.Namespace,
+		PerAttemptTimeout: perAttempt,
 	}
 	if opts.SandboxReadyTimeout > 0 {
 		clientOpts.SandboxReadyTimeout = opts.SandboxReadyTimeout
