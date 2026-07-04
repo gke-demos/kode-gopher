@@ -35,6 +35,11 @@ import (
 	_ "cloud.google.com/go/secretmanager/apiv1"
 	_ "cloud.google.com/go/storage"
 	_ "google.golang.org/api/option"
+	_ "k8s.io/apimachinery/pkg/apis/meta/v1"
+	_ "k8s.io/client-go/dynamic"
+	_ "k8s.io/client-go/kubernetes"
+	_ "k8s.io/client-go/tools/clientcmd"
+	_ "k8s.io/client-go/tools/watch"
 )
 
 func main() {}

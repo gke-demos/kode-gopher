@@ -36,16 +36,29 @@ USER root
 COPY --chown=1000:1000 internal/prewarm /tmp/prewarm
 USER 1000
 
-# `go mod tidy` populates $GOMODCACHE; `go build ./...` populates
-# $GOCACHE with compiled artifacts for every transitive package.
-# `/dev/null` output: we don't keep the binary itself.
+# The committed go.mod + go.sum in internal/prewarm/ lock the exact
+# versions we want in $GOMODCACHE. `go build ./...` respects them (no
+# tidy — that would allow the proxy to drift versions upward from
+# what we committed). This is the version-selection artifact that
+# snippet builds inherit at runtime; see /opt/kode-gopher-base/
+# preservation below.
 RUN cd /tmp/prewarm \
- && go mod tidy \
  && go build -o /dev/null ./...
 
-# Clean the sources (caches at $GOCACHE/$GOMODCACHE persist).
+# Preserve prewarm's tidied go.mod + go.sum at a well-known path so
+# the executor can bootstrap each snippet's /app/go.mod from them.
+# This is what makes snippet builds cache-hit consistently: the
+# snippet inherits the exact MVS-selected versions of every shared
+# transitive dep (protobuf, grpc, otel, ...) that prewarm compiled
+# against. Without this bootstrap, snippet-time `go mod tidy` on an
+# empty go.mod resolves DIFFERENT versions from proxy, invalidating
+# the compile cache; see docs/decisions.md.
 USER root
-RUN rm -rf /tmp/prewarm
+RUN mkdir -p /opt/kode-gopher-base \
+ && cp /tmp/prewarm/go.mod /opt/kode-gopher-base/go.mod \
+ && cp /tmp/prewarm/go.sum /opt/kode-gopher-base/go.sum \
+ && chmod 0444 /opt/kode-gopher-base/go.mod /opt/kode-gopher-base/go.sum \
+ && rm -rf /tmp/prewarm
 USER 1000
 
 # Inherit everything else (CMD, EXPOSE, WORKDIR, env) from upstream.

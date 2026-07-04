@@ -105,11 +105,10 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 	}
 	log.Printf("execute_go_code: mode=%s files=%v extra_imports=%d", norm.Mode, fileKeys(norm.Files), len(args.ExtraImports))
 
-	// Build the full file set: normalize output + synthesized go.mod
-	// + forwarded credentials.
-	files := map[string][]byte{
-		"go.mod": []byte("module kode_gopher_user\n\ngo 1.26\n"),
-	}
+	// Build the full file set: normalize output + forwarded credentials.
+	// go.mod is bootstrapped from the sandbox image's prewarm lockfile
+	// by internal/executor at tidy time — not synthesized here.
+	files := map[string][]byte{}
 	for k, v := range norm.Files {
 		files[k] = v
 	}
@@ -217,7 +216,7 @@ func toolError(msg string) *sdk.CallToolResult {
 	}
 }
 
-const executeGoCodeDescription = `Build and run Go code in a sandboxed Kubernetes pod (gVisor-isolated on GKE, runsc-free on local kind). The pod has the Go toolchain plus a prewarmed cache of the curated Google Cloud SDK packages:
+const executeGoCodeDescription = `Build and run Go code in a sandboxed Kubernetes pod (gVisor-isolated on GKE, runsc-free on local kind). The pod has the Go toolchain plus a prewarmed cache of curated Google Cloud SDK + Kubernetes client packages:
 
   cloud.google.com/go/storage
   cloud.google.com/go/bigquery
@@ -225,8 +224,13 @@ const executeGoCodeDescription = `Build and run Go code in a sandboxed Kubernete
   cloud.google.com/go/container/apiv1
   cloud.google.com/go/secretmanager/apiv1
   google.golang.org/api/option
+  k8s.io/client-go/kubernetes
+  k8s.io/client-go/tools/clientcmd
+  k8s.io/client-go/dynamic
+  k8s.io/client-go/tools/watch
+  k8s.io/apimachinery/pkg/apis/meta/v1
 
-Anything else is fetched on demand via go mod tidy (slower; may hit the agent-sandbox ~60s per-call HTTP cap).
+The snippet's go.mod is inherited from the prewarm lockfile so builds cache-hit. Anything not covered above is resolved on demand via go mod tidy (slower; may re-tidy shared transitives and cache-miss).
 
 Two input modes for the 'code' field:
 

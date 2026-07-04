@@ -18,11 +18,10 @@ limitations under the License.
 // inside a sandbox.Session: ship Files, compile, execute the binary
 // with the right env, and read back /app/.kode-gopher/result.json.
 //
-// All sandbox commands are kept under ~60s because the upstream
-// agent-sandbox HTTP layer caps a single /execute call at that mark
-// (see docs/decisions.md). Splitting tidy / build / run from each
-// other also gives the caller unambiguous error attribution via the
-// Outcome.Phase field.
+// Splitting tidy / build / run from each other gives the caller
+// unambiguous error attribution via the Outcome.Phase field. The
+// upstream agent-sandbox HTTP layer's per-call cap is bounded by
+// internal/sandbox.Options.PerAttemptTimeout (default 3min).
 package executor
 
 import (
@@ -71,16 +70,19 @@ type Outcome struct {
 // Request is the input to Run.
 type Request struct {
 	// Files is the file set to materialize under /app before building.
-	// At minimum should include main.go and go.mod.
+	// At minimum should include main.go. go.mod / go.sum are optional:
+	// if absent, the executor bootstraps them from the sandbox image's
+	// preserved prewarm lockfile (baseGoModPath / baseGoSumPath) so
+	// the snippet inherits the prewarm's pinned versions and hits the
+	// $GOCACHE / $GOMODCACHE consistently.
 	Files map[string][]byte
 	// Env is a set of environment variables to apply to the user
 	// binary at run time. Not applied to tidy or build (they have no
 	// business seeing GCP creds).
 	Env map[string]string
 	// Timeout bounds each individual sandbox /execute call. Zero means
-	// 90s. The agent-sandbox in-pod HTTP server caps at ~60s
-	// regardless, so values larger than that only affect our own
-	// internal accounting.
+	// 90s. The upstream agent-sandbox HTTP cap is governed by
+	// internal/sandbox.Options.PerAttemptTimeout (default 3min).
 	Timeout time.Duration
 }
 
@@ -89,7 +91,30 @@ const (
 	binName    = "run"
 	binPath    = binDir + "/" + binName
 	resultPath = ".kode-gopher/result.json"
+
+	// baseGoModPath / baseGoSumPath are where sandbox/Dockerfile
+	// preserves the prewarm module's tidied lockfile. The executor
+	// copies them into /app/{go.mod,go.sum} at tidy time (unless the
+	// caller shipped their own go.mod, in which case theirs wins).
+	baseGoModPath = "/opt/kode-gopher-base/go.mod"
+	baseGoSumPath = "/opt/kode-gopher-base/go.sum"
 )
+
+// tidyCmd bootstraps go.mod / go.sum from the prewarm lockfile
+// baked into the sandbox image, then runs tidy. Skipping the
+// bootstrap when the caller shipped their own go.mod means slice-4
+// multi-file snippets can override version selection at their own
+// risk (build may cache-miss). The module line in the prewarm's
+// go.mod is rewritten to kode_gopher_user so the snippet compiles.
+const tidyCmd = `set -e
+if [ ! -f go.mod ]; then
+  cp ` + baseGoModPath + ` go.mod
+  sed -i 's|^module .*|module kode_gopher_user|' go.mod
+  cp ` + baseGoSumPath + ` go.sum
+  chmod u+w go.mod go.sum
+fi
+go mod tidy
+`
 
 // Run drives Build → Run → Fetch on sess. The session is reset to a
 // clean state by the caller (or not — Run is happy to reuse cached
@@ -100,10 +125,11 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 		timeout = 90 * time.Second
 	}
 
-	// Phase 1a: tidy (downloads any missing modules).
+	// Phase 1a: bootstrap go.mod/go.sum from the sandbox image's
+	// prewarm lockfile (unless caller shipped their own), then tidy.
 	tidy, err := sess.Execute(ctx, sandbox.Request{
 		Files:   req.Files,
-		Command: "go mod tidy",
+		Command: tidyCmd,
 		Timeout: timeout,
 	})
 	if err != nil {

@@ -145,11 +145,11 @@ func run(path, namespace string, openTimeout, execTimeout time.Duration, claim s
 	}
 	log.Printf("normalize: mode=%s files=%v", norm.Mode, fileKeys(norm.Files))
 
-	// Add go.mod (synthesized; sandbox runs `go mod tidy` to resolve
-	// the user's imports) and forwarded credentials.
-	files := map[string][]byte{
-		"go.mod": []byte("module kode_gopher_user\n\ngo 1.26\n"),
-	}
+	// go.mod is bootstrapped from the sandbox image's prewarm lockfile
+	// inside internal/executor (baseGoModPath). Not synthesized here.
+	// If normalize provides its own go.mod (multi-file, slice-4), that
+	// wins — the executor's cp is gated on `[ ! -f go.mod ]`.
+	files := map[string][]byte{}
 	for k, v := range norm.Files {
 		files[k] = v
 	}

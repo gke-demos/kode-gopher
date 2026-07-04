@@ -34,6 +34,14 @@ spec:
       labels:
         sandbox: kode-gopher-sandbox
     spec:
+      # The agent-sandbox extensions controller's "secure by default"
+      # policy (extensions/controllers/utils.go:28) sets this to false
+      # unless overridden. Explicitly opting in mounts the sandbox
+      # KSA's token + cluster CA at /var/run/secrets/kubernetes.io/
+      # serviceaccount/, letting snippets call rest.InClusterConfig()
+      # against the API server the sandbox itself runs on. Snippets
+      # still need k8s RBAC for typed calls; the default KSA has none.
+      automountServiceAccountToken: true
       containers:
         - name: go-runtime
           image: kode-gopher-sandbox:latest

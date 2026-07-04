@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package curated is the canonical list of GCP packages whose build
-// artifacts are pre-cached in the sandbox image's $GOCACHE and whose
-// module sources are pre-downloaded into $GOMODCACHE.
+// Package curated is the canonical list of GCP SDK and Kubernetes
+// client packages whose build artifacts are pre-cached in the sandbox
+// image's $GOCACHE and whose module sources are pre-downloaded into
+// $GOMODCACHE.
 //
 // Anything in this list compiles "instantly" inside the sandbox (no
 // network for module fetch, no compile time for the package + transitive
@@ -32,9 +33,10 @@ limitations under the License.
 //     list, and lookup_package_docs uses it as an allow-list.
 package curated
 
-// Packages is the set of GCP SDK packages baked into the kode-gopher
-// sandbox image. Add sparingly; each entry adds image size + build
-// time.
+// Packages is the set of GCP SDK and Kubernetes client-go packages
+// baked into the kode-gopher sandbox image. Add sparingly; each entry
+// adds image size + build time. The k8s.io/client-go tree in
+// particular pulls a large transitive graph (apimachinery, api, ...).
 var Packages = []string{
 	"cloud.google.com/go/storage",
 	"cloud.google.com/go/compute/apiv1",
@@ -42,4 +44,9 @@ var Packages = []string{
 	"cloud.google.com/go/bigquery",
 	"cloud.google.com/go/secretmanager/apiv1",
 	"google.golang.org/api/option",
+	"k8s.io/apimachinery/pkg/apis/meta/v1",
+	"k8s.io/client-go/kubernetes",
+	"k8s.io/client-go/tools/clientcmd",
+	"k8s.io/client-go/dynamic",
+	"k8s.io/client-go/tools/watch",
 }
