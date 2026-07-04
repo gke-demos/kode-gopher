@@ -63,7 +63,13 @@ step "preflight"
 for bin in kubectl go gcloud; do
   command -v "$bin" >/dev/null 2>&1 || die "missing prerequisite: $bin"
 done
-: "${GOOGLE_CLOUD_PROJECT:?GOOGLE_CLOUD_PROJECT must be set in env}"
+if [[ -z "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+  GOOGLE_CLOUD_PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+  [[ -n "$GOOGLE_CLOUD_PROJECT" ]] \
+    || die "GOOGLE_CLOUD_PROJECT unset and 'gcloud config get-value project' returned nothing — export the var or run 'gcloud config set project <ID>'"
+  export GOOGLE_CLOUD_PROJECT
+  echo "GOOGLE_CLOUD_PROJECT unset; using gcloud active project: $GOOGLE_CLOUD_PROJECT"
+fi
 kubectl --context "$CONTEXT" get ns "$NS" >/dev/null \
   || die "namespace '$NS' not found in context '$CONTEXT' (run smoketest-${TARGET}.sh first)"
 kubectl --context "$CONTEXT" -n "$NS" get sandboxtemplate go-runtime-template >/dev/null \

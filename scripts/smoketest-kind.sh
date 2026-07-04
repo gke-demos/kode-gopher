@@ -55,7 +55,12 @@ ROUTER_YAML_URL="https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-DEFAULT_FILES=("testdata/list_buckets.go" "testdata/list_buckets_snippet.go")
+DEFAULT_FILES=(
+  "testdata/list_buckets.go"
+  "testdata/list_buckets_snippet.go"
+  "testdata/list_k8s_version_snippet.go"
+  "testdata/list_gke_pods_snippet.go"
+)
 TEST_FILES=("${DEFAULT_FILES[@]}")
 CLEAN=0
 COMPARE=0
@@ -81,7 +86,13 @@ step "preflight"
 for bin in kind kubectl docker go gcloud jq curl awk diff python3; do
   command -v "$bin" >/dev/null 2>&1 || die "missing prerequisite: $bin"
 done
-: "${GOOGLE_CLOUD_PROJECT:?GOOGLE_CLOUD_PROJECT must be set in env}"
+if [[ -z "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+  GOOGLE_CLOUD_PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+  [[ -n "$GOOGLE_CLOUD_PROJECT" ]] \
+    || die "GOOGLE_CLOUD_PROJECT unset and 'gcloud config get-value project' returned nothing — export the var or run 'gcloud config set project <ID>'"
+  export GOOGLE_CLOUD_PROJECT
+  echo "GOOGLE_CLOUD_PROJECT unset; using gcloud active project: $GOOGLE_CLOUD_PROJECT"
+fi
 ADC="$HOME/.config/gcloud/application_default_credentials.json"
 [[ -f "$ADC" ]] || die "no ADC at $ADC — run: gcloud auth application-default login"
 for f in "${TEST_FILES[@]}"; do
@@ -209,15 +220,23 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
   fi
 
   if [[ $COMPARE -eq 1 ]]; then
-    step "compare against gcloud: $TEST_FILE"
-    extract_data "$out" \
-      | jq '[.[] | {name, t: .timeCreated}] | sort_by(.t) | [.[].name]' \
-      > "${out%.out}.names"
-    if diff -u "${out%.out}.names" "$GCLOUD_NAMES"; then
-      printf '\n\033[1;32m✅ %s: match\033[0m\n' "$TEST_FILE"
+    # The gcloud diff only applies to bucket-listing snippets. Other
+    # test files (e.g. list_k8s_version_snippet.go) still run for the
+    # compile+execute proof but have no gcloud reference to check
+    # against.
+    if [[ "$base" == list_buckets* ]]; then
+      step "compare against gcloud: $TEST_FILE"
+      extract_data "$out" \
+        | jq '[.[] | {name, t: .timeCreated}] | sort_by(.t) | [.[].name]' \
+        > "${out%.out}.names"
+      if diff -u "${out%.out}.names" "$GCLOUD_NAMES"; then
+        printf '\n\033[1;32m✅ %s: match\033[0m\n' "$TEST_FILE"
+      else
+        warn "$TEST_FILE outputs differ from gcloud"
+        overall_ok=0
+      fi
     else
-      warn "$TEST_FILE outputs differ from gcloud"
-      overall_ok=0
+      echo "  (skipping gcloud compare for $base — not a bucket-listing snippet)"
     fi
   fi
 done

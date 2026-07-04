@@ -79,12 +79,17 @@ func main() {
 		log.Fatal("execute_go_code not advertised by server")
 	}
 
-	// 2. Exercise both test files (verbatim + wrapped) and parse the
-	// structured output from each.
+	// 2. Exercise the test files (verbatim GCS + wrapped GCS + wrapped
+	// k8s) and parse the structured output from each. The wrapped-k8s
+	// case is what proves the k8s.io/client-go additions to the
+	// curated set are prewarmed AND that in-cluster auth works from
+	// the sandbox pod.
 	var snippetResult []map[string]any
 	for _, tc := range []struct{ label, path string }{
 		{"verbatim", "testdata/list_buckets.go"},
 		{"wrapped", "testdata/list_buckets_snippet.go"},
+		{"k8s", "testdata/list_k8s_version_snippet.go"},
+		{"gke-compose", "testdata/list_gke_pods_snippet.go"},
 	} {
 		out, err := callExecuteGoCode(ctx, session, tc.path)
 		if err != nil {
@@ -95,7 +100,8 @@ func main() {
 		if out.ExitCode != 0 {
 			log.Fatalf("[%s] exit=%d (expected 0). stderr:\n%s", tc.label, out.ExitCode, out.Stderr)
 		}
-		if tc.label == "wrapped" {
+		switch tc.label {
+		case "wrapped":
 			// Wrapper produces a structured result; assert kind=ok
 			// and extract the bucket list for the compare step.
 			if out.Result == nil {
@@ -108,7 +114,7 @@ func main() {
 				log.Fatalf("[%s] decode result.value as []bucket: %v", tc.label, err)
 			}
 			fmt.Printf("  result.kind=ok  value has %d buckets\n", len(snippetResult))
-		} else {
+		case "verbatim":
 			// Verbatim mode: user code prints JSON to stdout, no
 			// structured result (the test program doesn't write
 			// result.json). Parse stdout directly to assert it
@@ -118,6 +124,61 @@ func main() {
 				log.Fatalf("[%s] decode stdout as []bucket: %v\nstdout:\n%s", tc.label, err, out.Stdout)
 			}
 			fmt.Printf("  stdout has %d buckets\n", len(stdoutResult))
+		case "k8s":
+			// Wrapped snippet returning k8s *version.Info. Assert
+			// result.kind=ok and that a couple of stable fields
+			// (major, gitVersion) are populated — proves the
+			// discovery client round-tripped to the API server.
+			if out.Result == nil {
+				log.Fatalf("[%s] expected non-nil result", tc.label)
+			}
+			if out.Result.Kind != "ok" {
+				log.Fatalf("[%s] expected result.kind=ok, got %q (message=%q)", tc.label, out.Result.Kind, out.Result.Message)
+			}
+			var info map[string]any
+			if err := json.Unmarshal(out.Result.Value, &info); err != nil {
+				log.Fatalf("[%s] decode result.value as version.Info: %v", tc.label, err)
+			}
+			major, _ := info["major"].(string)
+			git, _ := info["gitVersion"].(string)
+			if major == "" || git == "" {
+				log.Fatalf("[%s] version.Info missing expected fields (major=%q, gitVersion=%q); full=%v", tc.label, major, git, info)
+			}
+			fmt.Printf("  result.kind=ok  server major=%s gitVersion=%s\n", major, git)
+		case "gke-compose":
+			// The cross-API composition demo: container/apiv1
+			// ListClusters + client-go pods.List in one snippet.
+			// Assert result.kind=ok, cluster field populated, and
+			// >=1 pod returned with non-empty namespace+name.
+			if out.Result == nil {
+				log.Fatalf("[%s] expected non-nil result", tc.label)
+			}
+			if out.Result.Kind != "ok" {
+				log.Fatalf("[%s] expected result.kind=ok, got %q (message=%q)", tc.label, out.Result.Kind, out.Result.Message)
+			}
+			var res struct {
+				Cluster      string           `json:"cluster"`
+				Location     string           `json:"location"`
+				Endpoint     string           `json:"endpoint"`
+				EndpointKind string           `json:"endpoint_kind"`
+				Pods         []map[string]any `json:"pods"`
+			}
+			if err := json.Unmarshal(out.Result.Value, &res); err != nil {
+				log.Fatalf("[%s] decode result.value: %v", tc.label, err)
+			}
+			if res.Cluster == "" {
+				log.Fatalf("[%s] cluster field empty in result: %s", tc.label, string(out.Result.Value))
+			}
+			if len(res.Pods) == 0 {
+				log.Fatalf("[%s] expected >=1 pod in kube-system on cluster %s (result: %s)", tc.label, res.Cluster, string(out.Result.Value))
+			}
+			firstName, _ := res.Pods[0]["name"].(string)
+			firstNS, _ := res.Pods[0]["namespace"].(string)
+			if firstName == "" || firstNS == "" {
+				log.Fatalf("[%s] first pod missing name/namespace: %v", tc.label, res.Pods[0])
+			}
+			fmt.Printf("  result.kind=ok  cluster=%s (%s) endpoint=%s (%s) pods_in_kube_system=%d first=%s/%s\n",
+				res.Cluster, res.Location, res.Endpoint, res.EndpointKind, len(res.Pods), firstNS, firstName)
 		}
 	}
 
