@@ -6,17 +6,22 @@ The wedge: in Go, the LLM's "tool surface" already exists as importable packages
 
 ## Status
 
-Pre-alpha. Shipped through Slice 2.5 of [`docs/plan.md`](./docs/plan.md):
+Pre-alpha. Shipped through Slice 4 of [`docs/plan.md`](./docs/plan.md):
 
-- **CLI** (`kode-gopher exec <file.go>`) accepts either a full `package main` program (verbatim mode) or a snippet declaring `func run(ctx context.Context) (any, error)` (wrapped mode). Wrapper captures error / panic / json-marshal failure into a discriminated `result.json`. Build vs runtime errors are unambiguously attributable via `Outcome.Phase`.
-- **MCP server** (`kode-gopher serve`) over stdio using `github.com/modelcontextprotocol/go-sdk`. One tool: `execute_go_code(code, extra_imports?, [runtime?])`. One long-lived `sandbox.Session` per server process, mutex-serialized tool calls, `/app` reset between calls (caches survive).
-- **Sandbox backend**: own thin wrapper at `internal/sandbox/` over `sigs.k8s.io/agent-sandbox/clients/go/sandbox` directly (Slice 2.5 ownership move). Prewarmed image (`ghcr.io/gke-demos/kode-gopher-sandbox:latest`) bakes the curated GCP SDK packages into `$GOCACHE`/`$GOMODCACHE`.
-- **Substrates**: verified end-to-end on local `kind` and on a real GKE Autopilot cluster with the agent-sandbox addon + gVisor isolation. Both the direct-CLI and the MCP paths diff cleanly against `gcloud storage buckets list`.
+- **CLI** (`kode-gopher {exec,serve,auth status}`). `exec <file.go>` and `serve` accept a snippet declaring `func run(ctx context.Context) (any, error)` (wrapped mode) or a full `package main` program (verbatim). Wrapper captures error / panic / json-marshal failure into a discriminated `result.json`. `auth status` reports the ambient identity kode-gopher will forward. `--context` flag on both `exec` and `serve` pins a kubeconfig context instead of inheriting ambient `kubectl config current-context`.
+- **MCP server** (`kode-gopher serve`) over stdio using `github.com/modelcontextprotocol/go-sdk`. Three tools:
+  - `execute_go_code(code | files, extra_imports?)` — build+run Go in the sandbox. `code` is single-file; `files` is `map[path -> source]` for multi-file snippets with helper subpackages.
+  - `gcp_auth_status()` — report the sandbox's credential identity (mode, credential type, email, project).
+  - `lookup_package_docs(package, symbol?)` — `go doc` for curated packages against the prewarmed cache, subsecond.
+  One long-lived `sandbox.Session` per server process; mutex-serialized tool calls; `/app` reset between calls (caches survive); retry-once on `ErrSessionDead` so a pod eviction mid-call self-heals.
+- **Sandbox backend**: own thin wrapper at `internal/sandbox/` over `sigs.k8s.io/agent-sandbox/clients/go/sandbox`. Prewarmed image (`ghcr.io/gke-demos/kode-gopher-sandbox:latest`) bakes GCP SDK + `k8s.io/client-go` into `$GOCACHE`/`$GOMODCACHE`; the tidied prewarm `go.mod` is preserved at `/opt/kode-gopher-base/` and the executor bootstraps each snippet's `/app/go.mod` from it so version selection is reproducible and builds cache-hit. `PerAttemptTimeout` is 3 minutes (was implicit 60 s from the upstream default).
+- **Credentials** unified as `creds.Source` — Materialize forwards ADC + env into the sandbox; Identity parses ADC and calls the OAuth2 userinfo endpoint for `authorized_user` creds (cached). `Workload` implementation is stubbed until we run in-cluster.
+- **Substrates**: verified end-to-end on local `kind` and on a real GKE Autopilot cluster with the agent-sandbox addon + gVisor isolation. Both the direct-CLI and the MCP paths diff cleanly against `gcloud storage buckets list`; the MCP smoketest also exercises the k8s and multi-file paths.
+- **Generated LLM prompt**: `make prompts` regenerates `internal/prompts/{system.md,description.go}` from `internal/curated.Packages`, keeping the LLM system prompt and the `execute_go_code` tool description in lockstep with the curated set.
 
 Planned slices in [`docs/plan.md`](./docs/plan.md):
 
-- **Slice 3** — full GKE deployment story (Artifact Registry push, Workload Identity binding documentation, etc.).
-- **Slice 4** — production hardening: `lookup_package_docs` + `gcp_auth_status` tools, `internal/creds` interface, NetworkPolicy + IP ranges CronJob, multi-file snippets, `--context` flag.
+- **Slice 3** — full GKE deployment story (formalize Artifact Registry push, Workload Identity binding docs; largely done opportunistically).
 - **Slice 5** — HTTP/SSE transport. Scope gated on five explicit design questions (session topology, auth, per-end-user creds, streaming, deployment topology).
 - **Slice 6** — alternative Yaegi (interpreter) runtime as opt-in second backend. PoC in `experiments/yaegi-poc/` shows ~700ms end-to-end for a real GCS list vs ~5-30s through the compiled path; full slice gated on testing `cloud.google.com/go/compute/apiv1` (true gRPC) under Yaegi.
 
@@ -67,17 +72,19 @@ All smoketests are idempotent and reuse infra across runs.
 | path | what |
 | --- | --- |
 | [`docs/design.md`](./docs/design.md) | architecture, transport + runtime modes, auth, result protocol, sandbox boundary |
-| [`docs/plan.md`](./docs/plan.md) | slice-by-slice build sequence (0-6, with 3-6 still ahead) |
+| [`docs/plan.md`](./docs/plan.md) | slice-by-slice build sequence (0-6; 0-4 shipped, 5-6 planned) |
 | [`docs/decisions.md`](./docs/decisions.md) | append-only log of judgment calls per slice |
 | [`cmd/kode-gopher`](./cmd/kode-gopher) | the CLI binary — subcommands `exec` and `serve` |
 | [`cmd/mcp-smoketest`](./cmd/mcp-smoketest) | programmatic MCP client; spawns `kode-gopher serve` and exercises `execute_go_code` end-to-end |
-| [`internal/mcp`](./internal/mcp) | MCP server + tool registration over `github.com/modelcontextprotocol/go-sdk` |
-| [`internal/executor`](./internal/executor) | Build/Run/Fetch phases over a `sandbox.Session` |
-| [`internal/sandbox`](./internal/sandbox) | our thin client over `sigs.k8s.io/agent-sandbox` (replaces the previous `pkg/goruntime` dependency, Slice 2.5) |
-| [`internal/normalize`](./internal/normalize) | snippet vs full-main detection; AST-based package rewrite; optional `extra_imports` companion file |
+| [`internal/mcp`](./internal/mcp) | MCP server + tool handlers (execute_go_code, gcp_auth_status, lookup_package_docs) |
+| [`internal/executor`](./internal/executor) | Build/Run/Fetch phases over a `sandbox.Session`; bootstraps `/app/go.mod` from the prewarm lockfile |
+| [`internal/sandbox`](./internal/sandbox) | our thin client over `sigs.k8s.io/agent-sandbox`; `KubeContext` + `PerAttemptTimeout` options; typed `ErrSessionDead` for retry-once at MCP layer |
+| [`internal/creds`](./internal/creds) | unified `Source` interface: Materialize (files+env for the executor) + Identity (mode/type/email/project for gcp_auth_status), Forwarded + Workload impls |
+| [`internal/normalize`](./internal/normalize) | multi-file input; root vs subdirectory partitioning; same-package rewrite; optional `extra_imports` companion file |
 | [`internal/wrapper`](./internal/wrapper) | the generated `func main()` shipped alongside snippets |
-| [`internal/curated`](./internal/curated) | canonical list of GCP packages prewarmed in the sandbox image |
-| [`internal/prewarm`](./internal/prewarm) | standalone Go module imported at image build to populate `$GOCACHE` |
+| [`internal/curated`](./internal/curated) | canonical list of GCP + k8s.io/client-go packages prewarmed in the sandbox image; `go:generate` drives prompts regen |
+| [`internal/prewarm`](./internal/prewarm) | standalone Go module imported at image build to populate `$GOCACHE`; committed `go.mod`+`go.sum` pin versions |
+| [`internal/prompts`](./internal/prompts) | generated `system.md` (LLM system prompt) + `description.go` (execute_go_code tool description); regenerate via `make prompts` |
 | [`sandbox/Dockerfile`](./sandbox/Dockerfile) | extends `ghcr.io/gke-demos/go-runtime-sandbox:latest` with the prewarmed cache |
 | [`manifests/base`](./manifests/base) | SandboxTemplate kustomize base (kind-compatible) |
 | [`manifests/overlays/gke`](./manifests/overlays/gke) | GKE Autopilot overlay: gVisor + securityContext + Workload Identity + SandboxWarmPool + per-namespace sandbox-router |

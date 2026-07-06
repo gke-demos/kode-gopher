@@ -429,3 +429,54 @@ Updated `docs/design.md > Kubernetes API access` to correct both mistakes (in-cl
 - `list_gke_pods_snippet.go`: 10.6s ✅ (kind=ok, cluster=devops-bench-small via DNS endpoint, 20 pods)
 
 MCP smoketest (`smoketest-mcp.sh --target=kind --compare`) also passes end-to-end: all four `execute_go_code` calls return `structuredContent` with `result.kind=ok` and the snippet's data.
+
+## Slice 4 — 2026-07-04 — production hardening
+
+Landed as five commits. Motivating question: what turns "demo works if you're careful" into "works predictably for a real user"? The below closes visible UX and reliability gaps without adding a slice's worth of new surface area — most of it is filling in what the earlier slices deferred.
+
+### Scope pruned before starting
+Dropped `manifests/overlays/gke/networkpolicy.yaml` + `ipranges-refresh.yaml` from the plan. Rationale: agent-sandbox already exposes `SandboxTemplate.spec.networkPolicy` for declarative egress, and on GKE Autopilot's Dataplane V2 (Cilium) FQDN egress is native — writing our own IP-list refresh CronJob would reinvent what the CNI does better. Non-Cilium CNIs get CIDR-only rules; that's a doc concern, not a kode-gopher feature. Also retired the "http.Get must fail" pass criterion since we no longer own the enforcement layer.
+
+### 4a — `--context` flag + typed `ErrSessionDead` + retry-once
+`internal/sandbox.Options.KubeContext` builds a `*rest.Config` via `clientcmd.NewNonInteractiveDeferredLoadingClientConfig` with an explicit `CurrentContext` override, passed as `sb.Options.RestConfig`. `--context` on both `exec` and `serve`. Closes the slice-1.5 / slice-1.7 context-drift footgun.
+
+Session self-heal introduces `internal/sandbox.ErrSessionDead` sentinel + `classifySessionErr` string-corpus classifier. Classification lives in ONE place (with unit tests against a hand-curated corpus of realistic upstream errors — drift breaks tests instead of silently disabling retry). At the MCP layer, `handleExecuteGoCode` wraps Reset+Run in a `runOnce` closure; on `errors.Is(err, sandbox.ErrSessionDead)` + non-cancelled context, closes the session, opens a fresh one, retries once. On retry failure returns the ORIGINAL error so diagnostics point at the real cause. `execMu` held across both attempts so a concurrent tool call can't steal the fresh session.
+
+### 4b — `internal/creds` unified `Source` interface
+Replaces `CredentialHook func() (files, env)` with a `Source` interface that answers two questions instead of one: `Materialize(ctx)` for the executor and `Identity(ctx)` for `gcp_auth_status`. `Forwarded` implementation reads ADC JSON, dispatches on the `type` field: `service_account` returns `client_email` directly; `authorized_user` uses `google.CredentialsFromJSON` + hits `oauth2.googleapis.com/oauth2/v3/userinfo`. Identity cached via `sync.Once` (~200 ms first call, <1 ms subsequent). `Workload` is a stub until we run in-cluster. Both `serve` and `exec` refactored — behavioral no-op for Materialize.
+
+### 4c — `gcp_auth_status` + `lookup_package_docs` tools; `auth status` subcommand
+`gcp_auth_status` is a zero-arg MCP tool that reads `s.cfg.Credentials.Identity(ctx)` and returns Mode/CredType/Email/ProjectID. Returns `IsError` with partial data when identity lookup fails.
+
+`lookup_package_docs` validates its `package` arg against `internal/curated.Packages` and its `symbol` arg against a Go-identifier regex (blocks shell metacharacters — the value flows into `sh -c`). Grabs `execMu` to serialize with `execute_go_code`. Command: `cd /opt/kode-gopher-base && go doc <pkg> [symbol]`. The `cd` is critical — `go doc` in module mode requires a `go.mod` in CWD that requires the target module; `/app` is empty post-Reset, but `/opt/kode-gopher-base/go.mod` is the prewarm's tidied lockfile with every curated package as a require. Subsecond at steady state (module cache pre-populated, no build, no network).
+
+`kode-gopher auth status` mirrors `gcp_auth_status` on the CLI — constructs the same `creds.NewForwarded` `serve` uses and prints identity in human-readable form.
+
+### 4d — Multi-file snippet support
+`internal/normalize.Normalize` signature changed from `(src []byte, opts) → (*Result, error)` to `(files map[string][]byte, opts) → (*Result, error)`. Root files (no `/` in key) are the entry-point package; subdirectory files pass through as separate helper packages. Root files must share a package name (Go's same-directory rule) — caught with a legible error instead of a "found packages main and X" from `go build`. Verbatim mode requires exactly one root file with `func main`; wrapped mode requires exactly one root file with `func run(ctx context.Context) (any, error)` and rewrites ALL root files' package decls to `main` together (rewriting only the run-file would produce the same "found packages" error).
+
+MCP tool arg additive: `ExecuteGoCodeArgs.Files map[string]string` alongside `Code string`. Exactly one must be set. If `files` contains a `go.mod`, the executor's `[ ! -f go.mod ]` gate lets it pass through unchanged — the caller inherits their own version pins (and any recompile cost). Documented in the tool description.
+
+CLI unchanged: `kode-gopher exec <file.go>` stays single-file, wraps in `{"main.go": src}` at the call site. Multi-file lives on the MCP tool surface only for this slice.
+
+Multi-file test snippet at `testdata/multi_file_helper_snippet/` — root `snippet` package imports helper subpackage `kode_gopher_user/formatter`. mcp-smoketest asserts result.kind=ok, buckets > 0, and every bucket's description carries the formatter's "d old)" suffix (proves the helper subpackage actually shipped).
+
+### 4e — Generated system prompt + tool description
+`internal/prompts/gen/main.go` reads `internal/curated.Packages` and emits both `internal/prompts/system.md` (LLM-facing) and `internal/prompts/description.go` (`const ExecuteGoCodeDescription`). `execute_go_code.go` aliases `prompts.ExecuteGoCodeDescription` instead of inlining. `//go:generate` directive on `internal/curated/packages.go`; `make prompts` is `go generate ./internal/curated` in disguise; `make prompts-check` catches drift for a future CI. Removes the two-file update risk when the curated set changes.
+
+### Not shipped (deferred within slice-4 scope)
+- **Automated smoketest for session self-heal.** Needs orchestrated mid-call `kubectl delete pod`. Manual verification for now; unit-test corpus covers the classifier.
+- **Multi-file on the CLI** (`kode-gopher exec dir/`). MCP-only for slice 4.
+- **Workload metadata-server lookup.** Stub until we run in-cluster.
+- **Serving `system.md` as an MCP resource.** Generated file is enough for now — clients paste it into their system prompt.
+
+### Verification numbers (kind smoketest --compare, after full slice)
+- verbatim buckets: ~20-30s cold
+- wrapped buckets: **8s** steady state
+- k8s ServerVersion snippet: 10-15s
+- GKE-compose snippet (list clusters → list pods via DNS endpoint): 10-15s
+- multi-file snippet (root + formatter subpackage): ~10s
+- `gcp_auth_status`: ~200ms first call, <1ms cached
+- `lookup_package_docs` (storage.Client): subsecond
+
+All six MCP tool paths return `result.kind=ok` / non-empty structured content.
