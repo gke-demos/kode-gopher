@@ -64,10 +64,15 @@ type Config struct {
 	Persistent bool
 	// OpenTimeout bounds the sandbox.Open call on first tool use.
 	OpenTimeout time.Duration
-	// ExecTimeout bounds each individual sandbox /execute call. The
-	// upstream HTTP layer caps at ~60s regardless, so values >60s
-	// only affect our own internal accounting.
+	// ExecTimeout bounds each individual sandbox /execute call. Its
+	// upstream HTTP layer cap comes from internal/sandbox.Options
+	// PerAttemptTimeout (default 3min).
 	ExecTimeout time.Duration
+	// KubeContext, if non-empty, forwards to sandbox.Options.KubeContext
+	// so the server can pin a kubeconfig context rather than inheriting
+	// ambient `kubectl config current-context`. Empty preserves
+	// previous behavior.
+	KubeContext string
 	// Credentials, if non-nil, is called on every tool invocation to
 	// fold ambient host credentials into the request.
 	Credentials CredentialHook
@@ -148,11 +153,12 @@ func (s *Server) ensureSession(ctx context.Context) (*sandbox.Session, error) {
 	}
 	openCtx, cancel := context.WithTimeout(ctx, s.cfg.OpenTimeout)
 	defer cancel()
-	log.Printf("opening sandbox (namespace=%s template=%s claim=%q)", s.cfg.Namespace, s.cfg.Template, s.cfg.Claim)
+	log.Printf("opening sandbox (namespace=%s template=%s claim=%q context=%q)", s.cfg.Namespace, s.cfg.Template, s.cfg.Claim, s.cfg.KubeContext)
 	sess, err := sandbox.Open(openCtx, sandbox.Options{
-		Namespace: s.cfg.Namespace,
-		Template:  s.cfg.Template,
-		ClaimName: s.cfg.Claim,
+		Namespace:   s.cfg.Namespace,
+		Template:    s.cfg.Template,
+		ClaimName:   s.cfg.Claim,
+		KubeContext: s.cfg.KubeContext,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open sandbox: %w", err)

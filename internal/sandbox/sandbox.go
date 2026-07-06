@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/client-go/tools/clientcmd"
 	sb "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
@@ -64,6 +65,15 @@ type Options struct {
 	// (3min) — comfortably above any real prewarmed build/run cycle
 	// but still short enough that a truly hung pod fails fast.
 	PerAttemptTimeout time.Duration
+
+	// KubeContext, if non-empty, selects a specific kubeconfig context
+	// rather than inheriting ambient `kubectl config current-context`.
+	// Closes the slice-1.5 / slice-1.7 context-drift footgun: the
+	// server + smoketest scripts can now pin the cluster explicitly
+	// without relying on out-of-process kubectl state. Empty preserves
+	// the previous behavior (upstream client uses InClusterConfig →
+	// default kubeconfig with no context override).
+	KubeContext string
 
 	// Truncate controls LLM-friendly head+tail truncation of Execute
 	// stdout/stderr. Zero value applies defaults (8 KiB each).
@@ -133,6 +143,18 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 	if opts.SandboxReadyTimeout > 0 {
 		clientOpts.SandboxReadyTimeout = opts.SandboxReadyTimeout
 	}
+	if opts.KubeContext != "" {
+		// Upstream's default kubeconfig loader uses empty ConfigOverrides
+		// and ignores context selection. To honor --context we build a
+		// *rest.Config here with an explicit CurrentContext override.
+		rules := clientcmd.NewDefaultClientConfigLoadingRules()
+		overrides := &clientcmd.ConfigOverrides{CurrentContext: opts.KubeContext}
+		rc, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: build rest.Config for context %q: %w", opts.KubeContext, err)
+		}
+		clientOpts.RestConfig = rc
+	}
 
 	client, err := sb.NewClient(ctx, clientOpts)
 	if err != nil {
@@ -201,7 +223,7 @@ func (s *Session) Execute(ctx context.Context, req Request) (*Result, error) {
 
 	raw, err := s.box.Run(callCtx, req.Command, sb.WithTimeout(timeout))
 	if err != nil {
-		return nil, fmt.Errorf("sandbox: run: %w", err)
+		return nil, fmt.Errorf("sandbox: run: %w", classifySessionErr(err))
 	}
 	stdout, outTrunc := truncate(raw.Stdout, s.truncate)
 	stderr, errTrunc := truncate(raw.Stderr, s.truncate)
@@ -244,7 +266,7 @@ func (s *Session) materialize(ctx context.Context, files map[string][]byte) erro
 	cmd := fmt.Sprintf("tar -xf %s && rm -f %s", tarUploadName, tarUploadName)
 	res, err := s.box.Run(ctx, cmd, sb.WithTimeout(60*time.Second))
 	if err != nil {
-		return fmt.Errorf("sandbox: tar extract: %w", err)
+		return fmt.Errorf("sandbox: tar extract: %w", classifySessionErr(err))
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("sandbox: tar extract failed (exit %d): %s", res.ExitCode, res.Stderr)
@@ -262,7 +284,7 @@ func (s *Session) materialize(ctx context.Context, files map[string][]byte) erro
 // treated as success.
 func (s *Session) Reset(ctx context.Context) error {
 	if _, err := s.box.Run(ctx, "rm -rf -- * .[!.]* 2>/dev/null; true"); err != nil {
-		return fmt.Errorf("sandbox: reset: %w", err)
+		return fmt.Errorf("sandbox: reset: %w", classifySessionErr(err))
 	}
 	return nil
 }

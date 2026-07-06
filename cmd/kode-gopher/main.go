@@ -91,8 +91,9 @@ func printRootUsage() {
 func runExec(args []string) int {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	namespace := fs.String("namespace", "default", "Kubernetes namespace for the sandbox claim (must already exist)")
+	kubeCtx := fs.String("context", "", "kubeconfig context for the sandbox cluster (empty = ambient `kubectl config current-context`)")
 	openTO := fs.Duration("open-timeout", 5*time.Minute, "max time spent opening the sandbox")
-	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (upstream caps at ~60s regardless)")
+	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (bounded upstream by PerAttemptTimeout, default 3min)")
 	claim := fs.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one")
 	keep := fs.Bool("keep", false, "leave the sandbox alive on exit (Disconnect) instead of deleting it (Close)")
 	extraImports := fs.String("extra-imports", "", "comma-separated import paths to add as blank imports (forces `go mod tidy` to resolve them)")
@@ -109,7 +110,7 @@ func runExec(args []string) int {
 	}
 	path := fs.Arg(0)
 
-	exitCode, err := run(path, *namespace, *openTO, *execTO, *claim, *keep, splitCSV(*extraImports))
+	exitCode, err := run(path, *namespace, *kubeCtx, *openTO, *execTO, *claim, *keep, splitCSV(*extraImports))
 	if err != nil {
 		log.Printf("%v", err)
 		return 1
@@ -133,7 +134,7 @@ func splitCSV(s string) []string {
 	return out
 }
 
-func run(path, namespace string, openTimeout, execTimeout time.Duration, claim string, keep bool, extraImports []string) (int, error) {
+func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Duration, claim string, keep bool, extraImports []string) (int, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", path, err)
@@ -168,10 +169,11 @@ func run(path, namespace string, openTimeout, execTimeout time.Duration, claim s
 
 	openCtx, cancelOpen := context.WithTimeout(ctx, openTimeout)
 	defer cancelOpen()
-	log.Printf("opening sandbox (namespace=%s template=%s claim=%q)", namespace, sandboxTemplate, claim)
+	log.Printf("opening sandbox (namespace=%s template=%s claim=%q context=%q)", namespace, sandboxTemplate, claim, kubeContext)
 	sess, err := sandbox.Open(openCtx, sandbox.Options{
-		Namespace: namespace,
-		Template:  sandboxTemplate,
+		Namespace:   namespace,
+		Template:    sandboxTemplate,
+		KubeContext: kubeContext,
 		ClaimName: claim,
 	})
 	if err != nil {

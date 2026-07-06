@@ -71,7 +71,6 @@ gcloud storage buckets list --format=json | jq '[.[] | {name, timeCreated}] | so
 **Scope**:
 - `internal/mcp/lookup_package_docs.go` and `internal/mcp/gcp_auth_status.go` tools.
 - `internal/creds/` formalized as the unified `CredentialSource` interface; `cmd/kode-gopher/auth status` subcommand.
-- `manifests/overlays/gke/networkpolicy.yaml` + `ipranges-refresh.yaml` (CronJob refreshes a ConfigMap of allowed CIDRs from `gstatic.com/ipranges/goog.json`).
 - `manifests/warmpool.yaml` (SandboxWarmPool, replicas=2, OnReplenish).
 - `internal/prompts/system.md` generated from `curated.Packages` at build time.
 - **Multi-file program support**: extend `internal/normalize` to accept a `map[string][]byte` of source files and detect which one declares `func main`/`func run`; add `files?: map[string]string` as an additive field on the MCP tool args (keep `code: string` for the common single-file case). Lets the model write helper packages instead of inlining everything into one `main.go`. The agent-sandbox layer already supports multi-file materialization — this is purely a tool-surface change. Deferred from slice 2 because no canonical workflow asked for it yet.
@@ -79,7 +78,6 @@ gcloud storage buckets list --format=json | jq '[.[] | {name, timeCreated}] | so
 - `internal/sandbox` recreate-on-session-death: today a fatal Execute error propagates and the next call opens fresh. Add explicit close+reopen on the well-known fatal errors so a pod dying mid-call self-heals.
 
 **Pass criteria**:
-- Snippet doing `http.Get("https://example.com")` must fail (egress blocked).
 - Snippet calling `storage.NewClient`, `secretmanager.NewClient`, `aiplatform.NewClient` in one execution must succeed without re-downloading modules (verify via `Result.Duration`).
 - `gcp_auth_status` reports `mode=workload, identity=<GSA email>` in-cluster and `mode=forwarded, identity=<user email>` on desktop.
 - With forwarded mode, revoking the refresh token externally → next `execute_go_code` must fail fast with a clear `needs_relogin` error, not a deep SDK 401.
@@ -183,5 +181,5 @@ These are what to create first; everything else is dead weight until the loop wo
 - **OAuth client distribution** if 3LO is added. Likely "BYO required, plus `--use-gcloud-adc` escape hatch".
 - **Multi-tenancy**. Current design is one MCP server process per credential context. A SaaS deployment would need per-request session pools and per-end-user credential plumbing. **Folded into slice 5** if/when HTTP transport gets a multi-tenant shape.
 - **`$GOCACHE` PVC** for cross-pod persistence. Prewarm covers most of the value; revisit if cold-start latency stays painful after slice 4. Slice 6's Yaegi backend, if shipped, makes this less urgent — the interpreter path doesn't have a $GOCACHE.
-- **L7 egress filtering** (e.g., transparent proxy that allowlists by hostname). L3 IP allowlist is the v1 approximation.
+- **Sandbox egress filtering**. Delegated to the agent-sandbox controller: `SandboxTemplate.spec.networkPolicy` (with `networkPolicyManagement: Managed`) generates a shared NetworkPolicy per template. On GKE Autopilot's Dataplane V2 (Cilium), FQDN-based egress rules are natively supported — no ipranges-refresh CronJob needed. Non-Cilium CNIs get CIDR-only rules; document CNI requirements in README rather than shipping our own filtering layer.
 - **Non-GCP tool surface**. If we ever want to give the sandbox access to capabilities outside the GCP SDK (e.g., a "secrets" tool), we'll need to add the host↔sandbox RPC bridge we deliberately skipped. Add only when there's a real reason.

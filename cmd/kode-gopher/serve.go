@@ -34,10 +34,11 @@ import (
 func runServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	namespace := fs.String("namespace", "default", "Kubernetes namespace for the sandbox claim (must already exist)")
+	kubeCtx := fs.String("context", "", "kubeconfig context for the sandbox cluster (empty = ambient `kubectl config current-context`)")
 	claim := fs.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one on first tool call")
 	persistent := fs.Bool("persistent", false, "on shutdown, Disconnect from the sandbox (preserve for reattach) instead of Close (delete it)")
 	openTO := fs.Duration("open-timeout", 5*time.Minute, "max time spent opening the sandbox on first tool call")
-	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (upstream caps at ~60s regardless)")
+	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (bounded upstream by PerAttemptTimeout, default 3min)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: kode-gopher serve [flags]\n\nMCP server over stdio. Registers one tool: execute_go_code.\n\n")
 		fs.PrintDefaults()
@@ -57,6 +58,7 @@ func runServe(args []string) int {
 		Persistent:  *persistent,
 		OpenTimeout: *openTO,
 		ExecTimeout: *execTO,
+		KubeContext: *kubeCtx,
 		Credentials: forwardCreds,
 	})
 

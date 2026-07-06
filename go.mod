@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
+	k8s.io/client-go v0.35.4
 	sigs.k8s.io/agent-sandbox v0.4.6
 )
 
@@ -69,7 +70,6 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	k8s.io/api v0.35.4 // indirect
 	k8s.io/apimachinery v0.35.4 // indirect
-	k8s.io/client-go v0.35.4 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
