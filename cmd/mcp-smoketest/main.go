@@ -62,21 +62,25 @@ func main() {
 	}
 	defer func() { _ = session.Close() }()
 
-	// 1. Tool discovery — must advertise execute_go_code.
+	// 1. Tool discovery — must advertise execute_go_code, gcp_auth_status,
+	// and lookup_package_docs (slice 4 registers the latter two alongside
+	// the original).
 	tools, err := session.ListTools(ctx, &sdk.ListToolsParams{})
 	if err != nil {
 		log.Fatalf("list tools: %v", err)
 	}
 	fmt.Printf("tools advertised: %d\n", len(tools.Tools))
-	var foundExec bool
+	expected := map[string]bool{"execute_go_code": false, "gcp_auth_status": false, "lookup_package_docs": false}
 	for _, t := range tools.Tools {
 		fmt.Printf("  - %s — %s\n", t.Name, firstLine(t.Description))
-		if t.Name == "execute_go_code" {
-			foundExec = true
+		if _, ok := expected[t.Name]; ok {
+			expected[t.Name] = true
 		}
 	}
-	if !foundExec {
-		log.Fatal("execute_go_code not advertised by server")
+	for name, seen := range expected {
+		if !seen {
+			log.Fatalf("%s not advertised by server", name)
+		}
 	}
 
 	// 2. Exercise the test files (verbatim GCS + wrapped GCS + wrapped
@@ -200,7 +204,81 @@ func main() {
 		fmt.Printf("✅ match: %d buckets in same chronological order as gcloud\n", len(ours))
 	}
 
+	// 4. gcp_auth_status — proves creds.Source.Identity plumbing works
+	// end-to-end (JSON parse, userinfo lookup, structured output).
+	fmt.Println("\n========== gcp_auth_status ==========")
+	authRes, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "gcp_auth_status",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		log.Fatalf("gcp_auth_status call: %v", err)
+	}
+	var auth struct {
+		Mode      string `json:"mode"`
+		CredType  string `json:"credential_type"`
+		Email     string `json:"email"`
+		ProjectID string `json:"project_id"`
+	}
+	if authRes.StructuredContent == nil {
+		log.Fatal("gcp_auth_status: missing structuredContent")
+	}
+	if raw, e := json.Marshal(authRes.StructuredContent); e == nil {
+		_ = json.Unmarshal(raw, &auth)
+	}
+	if auth.Mode == "" {
+		log.Fatalf("gcp_auth_status: mode empty (structured=%v)", authRes.StructuredContent)
+	}
+	if auth.Email == "" {
+		log.Fatalf("gcp_auth_status: email empty — expected userinfo lookup to succeed for authorized_user creds (structured=%v)", authRes.StructuredContent)
+	}
+	fmt.Printf("  mode=%s credential_type=%s email=%s project_id=%s\n", auth.Mode, auth.CredType, auth.Email, auth.ProjectID)
+
+	// 5. lookup_package_docs — proves the tool registers, args validate,
+	// and `go doc` inside the sandbox against /opt/kode-gopher-base
+	// returns non-empty output for a curated package.
+	fmt.Println("\n========== lookup_package_docs ==========")
+	docsRes, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "lookup_package_docs",
+		Arguments: map[string]any{
+			"package": "cloud.google.com/go/storage",
+			"symbol":  "Client",
+		},
+	})
+	if err != nil {
+		log.Fatalf("lookup_package_docs call: %v", err)
+	}
+	if docsRes.IsError {
+		log.Fatalf("lookup_package_docs returned IsError: %v", contentText(docsRes.Content))
+	}
+	var docs struct {
+		Package string `json:"package"`
+		Symbol  string `json:"symbol"`
+		Docs    string `json:"docs"`
+	}
+	if raw, e := json.Marshal(docsRes.StructuredContent); e == nil {
+		_ = json.Unmarshal(raw, &docs)
+	}
+	if !strings.Contains(docs.Docs, "type Client struct") {
+		log.Fatalf("lookup_package_docs: expected Docs to contain 'type Client struct'; got:\n%s", docs.Docs)
+	}
+	// Terse: first 3 lines is enough to confirm we got real godoc output.
+	summary := docs.Docs
+	if lines := strings.SplitN(summary, "\n", 4); len(lines) > 3 {
+		summary = strings.Join(lines[:3], "\n") + "\n  [...]"
+	}
+	fmt.Printf("  package=%s symbol=%s docs=\n    %s\n", docs.Package, docs.Symbol, strings.ReplaceAll(summary, "\n", "\n    "))
+
 	fmt.Println("\n✅ MCP smoketest complete")
+}
+
+func contentText(c []sdk.Content) string {
+	for _, item := range c {
+		if t, ok := item.(*sdk.TextContent); ok {
+			return t.Text
+		}
+	}
+	return ""
 }
 
 // connect spawns `kode-gopher serve --namespace=NS` and brings up an

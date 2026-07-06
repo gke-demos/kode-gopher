@@ -123,6 +123,14 @@ func (s *Server) Run(ctx context.Context) error {
 		Name:        "execute_go_code",
 		Description: executeGoCodeDescription,
 	}, s.handleExecuteGoCode)
+	sdk.AddTool(srv, &sdk.Tool{
+		Name:        "gcp_auth_status",
+		Description: gcpAuthStatusDescription,
+	}, s.handleGCPAuthStatus)
+	sdk.AddTool(srv, &sdk.Tool{
+		Name:        "lookup_package_docs",
+		Description: lookupPackageDocsDescription,
+	}, s.handleLookupPackageDocs)
 
 	runErr := srv.Run(ctx, &sdk.StdioTransport{})
 

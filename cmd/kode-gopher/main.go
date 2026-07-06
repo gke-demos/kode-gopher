@@ -68,6 +68,8 @@ func main() {
 		os.Exit(runExec(os.Args[2:]))
 	case "serve":
 		os.Exit(runServe(os.Args[2:]))
+	case "auth":
+		os.Exit(runAuth(os.Args[2:]))
 	case "-h", "--help", "help":
 		printRootUsage()
 		os.Exit(0)
@@ -79,7 +81,7 @@ func main() {
 }
 
 func printRootUsage() {
-	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n  serve           start the MCP server on stdio\n")
+	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n  serve           start the MCP server on stdio\n  auth <verb>     inspect ambient credentials (verb: status)\n")
 }
 
 func runExec(args []string) int {
