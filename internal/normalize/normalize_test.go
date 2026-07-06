@@ -24,6 +24,8 @@ import (
 	"github.com/gke-demos/kode-gopher/internal/wrapper"
 )
 
+func single(src []byte) map[string][]byte { return map[string][]byte{"main.go": src} }
+
 func TestNormalize_VerbatimPassesThrough(t *testing.T) {
 	src := []byte(`package main
 
@@ -31,7 +33,7 @@ import "fmt"
 
 func main() { fmt.Println("hi") }
 `)
-	got, err := normalize.Normalize(src, normalize.Options{})
+	got, err := normalize.Normalize(single(src), normalize.Options{})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -55,7 +57,7 @@ func run(ctx context.Context) (any, error) {
 	return map[string]int{"answer": 42}, nil
 }
 `)
-	got, err := normalize.Normalize(src, normalize.Options{})
+	got, err := normalize.Normalize(single(src), normalize.Options{})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -88,7 +90,7 @@ import "context"
 
 func helper(ctx context.Context) error { return nil }
 `)
-	_, err := normalize.Normalize(src, normalize.Options{})
+	_, err := normalize.Normalize(single(src), normalize.Options{})
 	if err == nil {
 		t.Fatalf("expected error for missing run func, got nil")
 	}
@@ -99,7 +101,7 @@ func helper(ctx context.Context) error { return nil }
 
 func TestNormalize_ParseErrorSurfaces(t *testing.T) {
 	src := []byte(`this is not Go`)
-	_, err := normalize.Normalize(src, normalize.Options{})
+	_, err := normalize.Normalize(single(src), normalize.Options{})
 	if err == nil {
 		t.Fatalf("expected parse error, got nil")
 	}
@@ -118,7 +120,7 @@ import "context"
 func run(ctx context.Context) (any, error) { return nil, nil }
 func main() { _, _ = run(context.Background()) }
 `)
-	got, err := normalize.Normalize(src, normalize.Options{})
+	got, err := normalize.Normalize(single(src), normalize.Options{})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -137,7 +139,7 @@ import "context"
 
 func run(ctx context.Context) (any, error) { return nil, nil }
 `)
-	got, err := normalize.Normalize(src, normalize.Options{
+	got, err := normalize.Normalize(single(src), normalize.Options{
 		ExtraImports: []string{"cloud.google.com/go/bigquery", "cloud.google.com/go/secretmanager/apiv1"},
 	})
 	if err != nil {
@@ -168,12 +170,149 @@ func TestNormalize_ExtraImportsEmptyOmitsFile(t *testing.T) {
 	src := []byte(`package main
 func main() {}
 `)
-	got, err := normalize.Normalize(src, normalize.Options{ExtraImports: nil})
+	got, err := normalize.Normalize(single(src), normalize.Options{ExtraImports: nil})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
 	if _, ok := got.Files["kg_extra_imports.go"]; ok {
 		t.Errorf("expected no kg_extra_imports.go when ExtraImports is empty; keys %v", keys(got.Files))
+	}
+}
+
+// --- Multi-file test cases (slice 4) ---
+
+func TestNormalize_MultiFile_WrappedRewritesAllRoot(t *testing.T) {
+	// Two root files sharing package `snippet`; one has run, one has
+	// a helper. Both must have their package decl rewritten to `main`
+	// (Go same-package rule), and the wrapper must land at root.
+	files := map[string][]byte{
+		"main.go": []byte(`package snippet
+
+import "context"
+
+func run(ctx context.Context) (any, error) {
+	return helper(), nil
+}
+`),
+		"util.go": []byte(`package snippet
+
+func helper() int { return 42 }
+`),
+	}
+	got, err := normalize.Normalize(files, normalize.Options{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if got.Mode != normalize.ModeWrapped {
+		t.Errorf("Mode = %s, want wrapped", got.Mode)
+	}
+	// Both root files present, both rewritten.
+	for _, name := range []string{"main.go", "util.go"} {
+		body := string(got.Files[name])
+		if !strings.HasPrefix(body, "package main") {
+			t.Errorf("%s not rewritten to `package main`:\n%s", name, body)
+		}
+	}
+	if _, ok := got.Files[wrapper.Filename]; !ok {
+		t.Errorf("wrapper missing; keys %v", keys(got.Files))
+	}
+}
+
+func TestNormalize_MultiFile_SubdirPackagesPassThrough(t *testing.T) {
+	// Root wraps to main; a helper package lives in a subdirectory.
+	// Subdir file must pass through UNCHANGED (still `package helper`).
+	files := map[string][]byte{
+		"main.go": []byte(`package snippet
+
+import (
+	"context"
+	"u/helper"
+)
+
+func run(ctx context.Context) (any, error) { return helper.Answer(), nil }
+`),
+		"helper/util.go": []byte(`package helper
+
+func Answer() int { return 42 }
+`),
+	}
+	got, err := normalize.Normalize(files, normalize.Options{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	// Root is rewritten.
+	if !strings.HasPrefix(string(got.Files["main.go"]), "package main") {
+		t.Errorf("root main.go not rewritten to `package main`:\n%s", got.Files["main.go"])
+	}
+	// Subdir passes through UNCHANGED.
+	sub, ok := got.Files["helper/util.go"]
+	if !ok {
+		t.Fatalf("subdir file dropped; keys %v", keys(got.Files))
+	}
+	if !strings.HasPrefix(string(sub), "package helper") {
+		t.Errorf("subdir file's package decl mutated:\n%s", sub)
+	}
+}
+
+func TestNormalize_MultiFile_MixedRootPackagesRejected(t *testing.T) {
+	files := map[string][]byte{
+		"main.go":  []byte(`package snippet` + "\n" + `import "context"` + "\n" + `func run(ctx context.Context) (any, error) { return nil, nil }`),
+		"other.go": []byte(`package different` + "\n" + `func Ignored() {}`),
+	}
+	_, err := normalize.Normalize(files, normalize.Options{})
+	if err == nil {
+		t.Fatal("expected error for mixed root package names, got nil")
+	}
+	if !strings.Contains(err.Error(), "share a package name") {
+		t.Errorf("error should mention shared package name, got: %v", err)
+	}
+}
+
+func TestNormalize_MultiFile_MultipleRunRejected(t *testing.T) {
+	files := map[string][]byte{
+		"a.go": []byte(`package snippet` + "\n" + `import "context"` + "\n" + `func run(ctx context.Context) (any, error) { return 1, nil }`),
+		"b.go": []byte(`package snippet` + "\n" + `import "context"` + "\n" + `func run(ctx context.Context) (any, error) { return 2, nil }`),
+	}
+	_, err := normalize.Normalize(files, normalize.Options{})
+	if err == nil {
+		t.Fatal("expected error for multiple run funcs, got nil")
+	}
+	if !strings.Contains(err.Error(), "run") {
+		t.Errorf("error should mention run, got: %v", err)
+	}
+}
+
+func TestNormalize_MultiFile_VerbatimMultipleMainRejected(t *testing.T) {
+	files := map[string][]byte{
+		"a.go": []byte(`package main` + "\n" + `func main() {}`),
+		"b.go": []byte(`package main` + "\n" + `func main() {}`),
+	}
+	_, err := normalize.Normalize(files, normalize.Options{})
+	if err == nil {
+		t.Fatal("expected error for multiple main funcs, got nil")
+	}
+	if !strings.Contains(err.Error(), "main") {
+		t.Errorf("error should mention main, got: %v", err)
+	}
+}
+
+func TestNormalize_MultiFile_NoRootFilesRejected(t *testing.T) {
+	files := map[string][]byte{
+		"helper/util.go": []byte(`package helper` + "\n" + `func Hi() {}`),
+	}
+	_, err := normalize.Normalize(files, normalize.Options{})
+	if err == nil {
+		t.Fatal("expected error for no root files, got nil")
+	}
+	if !strings.Contains(err.Error(), "root") {
+		t.Errorf("error should mention root, got: %v", err)
+	}
+}
+
+func TestNormalize_EmptyInputRejected(t *testing.T) {
+	_, err := normalize.Normalize(nil, normalize.Options{})
+	if err == nil {
+		t.Fatal("expected error for empty input, got nil")
 	}
 }
 

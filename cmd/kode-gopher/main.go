@@ -136,7 +136,7 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 		return 0, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	norm, err := normalize.Normalize(src, normalize.Options{ExtraImports: extraImports})
+	norm, err := normalize.Normalize(map[string][]byte{"main.go": src}, normalize.Options{ExtraImports: extraImports})
 	if err != nil {
 		return 0, fmt.Errorf("normalize %s: %w", path, err)
 	}

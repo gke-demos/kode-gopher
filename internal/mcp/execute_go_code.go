@@ -35,9 +35,13 @@ import (
 // ExecuteGoCodeArgs is the input schema for execute_go_code. The
 // `jsonschema:` tag values become the per-field descriptions the LLM
 // sees when picking arguments.
+//
+// Callers set EXACTLY ONE of Code (single-file snippet) or Files
+// (multi-file snippet with optional helper subpackages).
 type ExecuteGoCodeArgs struct {
-	Code         string   `json:"code" jsonschema:"The Go source to ship into the sandbox. EITHER a snippet declaring 'func run(ctx context.Context) (any, error)' (the value run returns is JSON-marshaled and surfaced as result.value; the wrapper provides func main()), OR a complete 'package main' program (your code owns stdout/stderr; if you want a structured result write it to /app/.kode-gopher/result.json yourself)."`
-	ExtraImports []string `json:"extra_imports,omitempty" jsonschema:"Optional list of import paths to add via a generated blank-import companion file. Use to nudge go mod tidy when you know your snippet needs a package the prewarmed image has cached but you haven't declared the import in source yet. Prewarmed set: cloud.google.com/go/{storage,bigquery,compute/apiv1,container/apiv1,secretmanager/apiv1} + google.golang.org/api/option."`
+	Code         string            `json:"code,omitempty" jsonschema:"Single-file Go source to ship into the sandbox. EITHER a snippet declaring 'func run(ctx context.Context) (any, error)' (the value run returns is JSON-marshaled and surfaced as result.value; the wrapper provides func main()), OR a complete 'package main' program (your code owns stdout/stderr; if you want a structured result write it to /app/.kode-gopher/result.json yourself). Mutually exclusive with 'files'."`
+	Files        map[string]string `json:"files,omitempty" jsonschema:"Multi-file Go source. Keys are paths relative to /app (e.g. 'main.go', 'util.go', 'helper/mypkg.go'). Root files (no '/' in key) must share a package name; wrapped mode requires exactly one root file with 'func run(ctx context.Context) (any, error)'. Subdirectory files pass through unchanged as separate packages. If a key equals 'go.mod' the executor uses your version pins instead of the prewarm lockfile — you own version selection (and any recompile cost) in that case. Mutually exclusive with 'code'."`
+	ExtraImports []string          `json:"extra_imports,omitempty" jsonschema:"Optional list of import paths to add via a generated blank-import companion file. Use to nudge go mod tidy when you know your snippet needs a package the prewarmed image has cached but you haven't declared the import in source yet."`
 }
 
 // ExecuteGoCodeOutput is the structured response. Clients that can
@@ -95,11 +99,27 @@ func toWireResult(r *executor.Result) *Result {
 
 func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest, args ExecuteGoCodeArgs) (*sdk.CallToolResult, *ExecuteGoCodeOutput, error) {
 	start := time.Now()
-	if strings.TrimSpace(args.Code) == "" {
-		return toolError("`code` field is required and must not be empty"), nil, nil
+
+	// Exactly one of code/files must be set.
+	hasCode := strings.TrimSpace(args.Code) != ""
+	hasFiles := len(args.Files) > 0
+	if hasCode && hasFiles {
+		return toolError("provide either `code` (single-file) or `files` (multi-file), not both"), nil, nil
+	}
+	if !hasCode && !hasFiles {
+		return toolError("either `code` or `files` is required"), nil, nil
 	}
 
-	norm, err := normalize.Normalize([]byte(args.Code), normalize.Options{
+	inputFiles := map[string][]byte{}
+	if hasCode {
+		inputFiles["main.go"] = []byte(args.Code)
+	} else {
+		for k, v := range args.Files {
+			inputFiles[k] = []byte(v)
+		}
+	}
+
+	norm, err := normalize.Normalize(inputFiles, normalize.Options{
 		ExtraImports: args.ExtraImports,
 	})
 	if err != nil {

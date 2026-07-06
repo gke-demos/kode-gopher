@@ -14,21 +14,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package normalize turns user-supplied Go source into the file set
+// Package normalize turns user-supplied Go source(s) into the file set
 // that gets shipped to the sandbox.
 //
 // Two modes:
 //
-//   - Verbatim: input declares `package main`. Shipped as-is. The
-//     user owns the whole contract, including writing
+//   - Verbatim: the root package is `main`. Root files ship as-is; the
+//     user owns the whole contract (including writing
 //     /app/.kode-gopher/result.json themselves if they want a
-//     structured result.
+//     structured result). Exactly one root file must declare
+//     `func main`.
 //
-//   - Wrapped: input declares any other package and a
-//     `func run(ctx context.Context) (any, error)`. We rewrite the
-//     package declaration to `main` and add the wrapper file
-//     (internal/wrapper) which provides `func main()` and the result
-//     protocol.
+//   - Wrapped: the root package is anything BUT `main`, and exactly
+//     one root file declares
+//     `func run(ctx context.Context) (any, error)`. We rewrite ALL
+//     root files' package declarations to `main` (Go requires all
+//     files in a directory to share a package name — rewriting only
+//     the run-file would produce a "found packages main and X" build
+//     error) and add the wrapper file that supplies func main().
+//
+// Multi-file: callers pass a map keyed by relative path. Keys without
+// a slash are "root" (the entry-point package); keys with a slash are
+// subdirectory helper packages and pass through unchanged regardless
+// of mode — their package declarations aren't rewritten and their
+// contents aren't inspected. Root-file same-package rules apply only
+// to the root.
 package normalize
 
 import (
@@ -38,6 +48,8 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"sort"
+	"strings"
 
 	"github.com/gke-demos/kode-gopher/internal/wrapper"
 )
@@ -77,12 +89,9 @@ type Options struct {
 	// ExtraImports is an optional list of package import paths that
 	// the snippet should pull in even if its own source doesn't
 	// declare them. Translated to a generated companion file
-	// (kg_extra_imports.go) of blank imports, which makes
-	// `go mod tidy` add them to the synthesized go.mod's require
-	// list. Useful when the MCP caller knows the snippet will need
-	// a package but the model hasn't declared the import yet, or
-	// when nudging the toolchain toward a specific prewarmed
-	// package set without editing user source.
+	// (kg_extra_imports.go) of blank imports in the root package,
+	// which makes `go mod tidy` add them to the synthesized go.mod's
+	// require list.
 	ExtraImports []string
 }
 
@@ -91,61 +100,157 @@ type Options struct {
 // collide.
 const extraImportsFilename = "kg_extra_imports.go"
 
-// Normalize parses src and returns the file set for the sandbox.
+// Normalize partitions input into root files (entry-point package)
+// and subdirectory files (helper packages), determines the mode from
+// the root, and produces the sandbox file set.
 //
-//   - If src declares `package main`, Result.Mode is ModeVerbatim and
-//     Files["main.go"] is the unmodified src.
-//   - Otherwise, src must declare `func run(ctx context.Context) (any, error)`.
-//     We rewrite the package declaration to `main`, format the AST
-//     back out, and add wrapper.Filename to Files.
+// Root-file rules:
+//   - All root files must declare the same package name.
+//   - Verbatim mode (root package "main"): exactly one root file
+//     declares `func main`. Root files pass through unchanged.
+//   - Wrapped mode (root package other than "main"): exactly one root
+//     file declares `func run(ctx context.Context) (any, error)`. All
+//     root files' package decls are rewritten to `main`, and the
+//     wrapper file is added at the root.
 //
-// If opts.ExtraImports is non-empty, a generated kg_extra_imports.go
-// is also added to Files regardless of mode.
+// Subdirectory files (keys containing "/") pass through unchanged
+// regardless of mode.
 //
-// Returns an error on parse failure or, in wrapped mode, on a missing
-// `run` function declaration. Signature validation beyond the name is
-// deferred — a signature mismatch fails fast at sandbox compile time
-// with a clear Go error.
-func Normalize(src []byte, opts Options) (*Result, error) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", src, parser.ParseComments)
-	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+// If opts.ExtraImports is non-empty, kg_extra_imports.go is added at
+// the root as a blank-import companion. Emitted with `package main`
+// so it slots into either mode.
+func Normalize(files map[string][]byte, opts Options) (*Result, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no files provided")
 	}
 
-	files := map[string][]byte{}
-	var mode Mode
+	root, subdir := partition(files)
+	if len(root) == 0 {
+		return nil, fmt.Errorf("no root files (all keys contain '/'); at least one entry-point file must live at the root")
+	}
 
-	if f.Name.Name == "main" {
-		// Copy src so the caller can mutate its slice without
-		// affecting our output.
-		out := make([]byte, len(src))
-		copy(out, src)
-		files["main.go"] = out
+	// Parse root files, collect their package names + function decls.
+	fset := token.NewFileSet()
+	type parsed struct {
+		name string
+		src  []byte
+		ast  *ast.File
+	}
+	parsedRoot := make([]parsed, 0, len(root))
+	for _, name := range sortedKeys(root) {
+		src := root[name]
+		f, err := parser.ParseFile(fset, name, src, parser.ParseComments)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", name, err)
+		}
+		parsedRoot = append(parsedRoot, parsed{name: name, src: src, ast: f})
+	}
+
+	// All root files must share the same package name (Go language
+	// rule). If they don't, the sandbox `go build` would fail with
+	// "found packages main and X"; catch it here with a legible message
+	// instead.
+	pkg := parsedRoot[0].ast.Name.Name
+	for _, p := range parsedRoot[1:] {
+		if p.ast.Name.Name != pkg {
+			return nil, fmt.Errorf(
+				"root files must share a package name, but %s is `package %s` and %s is `package %s`",
+				parsedRoot[0].name, pkg, p.name, p.ast.Name.Name,
+			)
+		}
+	}
+
+	out := map[string][]byte{}
+	// Subdirectory files pass through unchanged in all modes.
+	for k, v := range subdir {
+		out[k] = v
+	}
+
+	var mode Mode
+	if pkg == "main" {
 		mode = ModeVerbatim
+		mainCount := 0
+		for _, p := range parsedRoot {
+			if declaresFunc(p.ast, "main") {
+				mainCount++
+			}
+			// Verbatim: copy so caller mutations don't leak.
+			buf := make([]byte, len(p.src))
+			copy(buf, p.src)
+			out[p.name] = buf
+		}
+		if mainCount == 0 {
+			return nil, fmt.Errorf("verbatim mode (`package main`): no root file declares `func main`")
+		}
+		if mainCount > 1 {
+			return nil, fmt.Errorf("verbatim mode (`package main`): %d root files declare `func main` (must be exactly one)", mainCount)
+		}
 	} else {
-		if !declaresRun(f) {
-			return nil, fmt.Errorf("snippet must declare 'func run(ctx context.Context) (any, error)' (package=%s)", f.Name.Name)
-		}
-		f.Name.Name = "main"
-		var buf bytes.Buffer
-		if err := printer.Fprint(&buf, fset, f); err != nil {
-			return nil, fmt.Errorf("format: %w", err)
-		}
-		files["main.go"] = buf.Bytes()
-		files[wrapper.Filename] = wrapper.Source()
 		mode = ModeWrapped
+		runCount := 0
+		for _, p := range parsedRoot {
+			if declaresFunc(p.ast, "run") {
+				runCount++
+			}
+		}
+		if runCount == 0 {
+			return nil, fmt.Errorf("wrapped mode (`package %s`): no root file declares `func run(ctx context.Context) (any, error)`", pkg)
+		}
+		if runCount > 1 {
+			return nil, fmt.Errorf("wrapped mode (`package %s`): %d root files declare `func run` (must be exactly one)", pkg, runCount)
+		}
+		// Rewrite ALL root files' package decl to main together, so
+		// Go's same-package rule holds after rewrite.
+		for _, p := range parsedRoot {
+			p.ast.Name.Name = "main"
+			var buf bytes.Buffer
+			if err := printer.Fprint(&buf, fset, p.ast); err != nil {
+				return nil, fmt.Errorf("format %s: %w", p.name, err)
+			}
+			out[p.name] = buf.Bytes()
+		}
+		out[wrapper.Filename] = wrapper.Source()
 	}
 
 	if len(opts.ExtraImports) > 0 {
-		files[extraImportsFilename] = renderExtraImports(opts.ExtraImports)
+		out[extraImportsFilename] = renderExtraImports(opts.ExtraImports)
 	}
 
-	return &Result{Mode: mode, Files: files}, nil
+	return &Result{Mode: mode, Files: out}, nil
+}
+
+// partition splits files by whether the key contains a "/". Keys with
+// no slash are "root" (the entry-point package's directory).
+func partition(files map[string][]byte) (root, sub map[string][]byte) {
+	root = map[string][]byte{}
+	sub = map[string][]byte{}
+	for k, v := range files {
+		if strings.Contains(k, "/") {
+			sub[k] = v
+		} else {
+			root[k] = v
+		}
+	}
+	return
+}
+
+// sortedKeys returns m's keys in lexicographic order so parse order
+// (and thus error-message deterministic-ness) doesn't depend on Go's
+// randomized map iteration.
+func sortedKeys(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // renderExtraImports emits a Go source file that blank-imports each
 // path so `go mod tidy` resolves them into the synthesized go.mod.
+// Emitted with `package main` — after Normalize's rewrite, the root
+// is always `package main` (verbatim requires it; wrapped rewrites
+// to it), so this slots in unambiguously.
 func renderExtraImports(paths []string) []byte {
 	var b bytes.Buffer
 	b.WriteString("// Code generated by kode-gopher; DO NOT EDIT.\n")
@@ -160,11 +265,11 @@ func renderExtraImports(paths []string) []byte {
 	return b.Bytes()
 }
 
-// declaresRun returns true if f has a top-level `func run(...)`. We
-// don't validate the full signature here — a mismatch will surface as
-// a clear compile error from the sandbox ("undefined: run" or "too
-// many arguments"), which is more actionable than anything we'd say.
-func declaresRun(f *ast.File) bool {
+// declaresFunc returns true if f has a top-level `func name(...)` (a
+// free function, not a method). Signature validation is deferred to
+// the sandbox `go build` — a mismatch there produces a clearer error
+// than anything we'd say here.
+func declaresFunc(f *ast.File, name string) bool {
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok {
@@ -173,7 +278,7 @@ func declaresRun(f *ast.File) bool {
 		if fn.Recv != nil {
 			continue // method, not a free function
 		}
-		if fn.Name.Name == "run" {
+		if fn.Name.Name == name {
 			return true
 		}
 	}

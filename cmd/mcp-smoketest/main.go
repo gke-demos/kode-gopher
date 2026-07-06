@@ -269,7 +269,75 @@ func main() {
 	}
 	fmt.Printf("  package=%s symbol=%s docs=\n    %s\n", docs.Package, docs.Symbol, strings.ReplaceAll(summary, "\n", "\n    "))
 
+	// 6. Multi-file snippet — the `files` MCP arg with a root file +
+	// helper subpackage. Proves normalize's multi-file plumbing works
+	// end-to-end and that helper subpackages resolve under the
+	// kode_gopher_user module name the executor synthesizes.
+	fmt.Println("\n========== multi-file snippet ==========")
+	multiFiles := map[string]any{
+		"main.go":             readSnippet("testdata/multi_file_helper_snippet/main.go"),
+		"formatter/format.go": readSnippet("testdata/multi_file_helper_snippet/formatter/format.go"),
+	}
+	mfRes, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "execute_go_code",
+		Arguments: map[string]any{
+			"files": multiFiles,
+		},
+	})
+	if err != nil {
+		log.Fatalf("multi-file call: %v", err)
+	}
+	if mfRes.StructuredContent == nil {
+		log.Fatal("multi-file: missing structuredContent")
+	}
+	var mfOut executeGoCodeOutput
+	if raw, e := json.Marshal(mfRes.StructuredContent); e == nil {
+		if e2 := json.Unmarshal(raw, &mfOut); e2 != nil {
+			log.Fatalf("multi-file: decode structured: %v", e2)
+		}
+	}
+	if mfOut.ExitCode != 0 {
+		log.Fatalf("multi-file: exit=%d stderr=\n%s", mfOut.ExitCode, mfOut.Stderr)
+	}
+	if mfOut.Result == nil || mfOut.Result.Kind != "ok" {
+		log.Fatalf("multi-file: expected result.kind=ok, got %+v", mfOut.Result)
+	}
+	var mfVal struct {
+		Count   int      `json:"count"`
+		Buckets []string `json:"buckets"`
+	}
+	if err := json.Unmarshal(mfOut.Result.Value, &mfVal); err != nil {
+		log.Fatalf("multi-file: decode result.value: %v", err)
+	}
+	if mfVal.Count == 0 {
+		log.Fatalf("multi-file: expected >=1 bucket (project has none?); result=%s", string(mfOut.Result.Value))
+	}
+	// Formatter contract: each description must contain "d old)" — a signal
+	// the helper subpackage actually ran (not just the root file).
+	found := 0
+	for _, d := range mfVal.Buckets {
+		if strings.Contains(d, "d old)") {
+			found++
+		}
+	}
+	if found == 0 {
+		log.Fatalf("multi-file: no bucket description carries the formatter's 'd old)' suffix — helper subpackage may not have shipped (result: %s)", string(mfOut.Result.Value))
+	}
+	fmt.Printf("  result.kind=ok  buckets=%d formatter_applied=%d/%d first=%s\n",
+		mfVal.Count, found, mfVal.Count, mfVal.Buckets[0])
+
 	fmt.Println("\n✅ MCP smoketest complete")
+}
+
+// readSnippet reads a testdata source into a string for the
+// multi-file `files` MCP arg. Fatal on error — smoketest bugs out
+// immediately if testdata is missing.
+func readSnippet(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
 }
 
 func contentText(c []sdk.Content) string {
