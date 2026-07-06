@@ -33,10 +33,16 @@ limitations under the License.
 //     list, and lookup_package_docs uses it as an allow-list.
 package curated
 
+//go:generate go run ../prompts/gen
+
 // Packages is the set of GCP SDK and Kubernetes client-go packages
 // baked into the kode-gopher sandbox image. Add sparingly; each entry
 // adds image size + build time. The k8s.io/client-go tree in
 // particular pulls a large transitive graph (apimachinery, api, ...).
+//
+// When this list changes, run `make prompts` to regenerate
+// internal/prompts/{system.md,description.go} so the LLM-facing
+// prompt and the execute_go_code tool description stay in sync.
 var Packages = []string{
 	"cloud.google.com/go/storage",
 	"cloud.google.com/go/compute/apiv1",

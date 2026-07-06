@@ -29,6 +29,7 @@ import (
 
 	"github.com/gke-demos/kode-gopher/internal/executor"
 	"github.com/gke-demos/kode-gopher/internal/normalize"
+	"github.com/gke-demos/kode-gopher/internal/prompts"
 	"github.com/gke-demos/kode-gopher/internal/sandbox"
 )
 
@@ -270,62 +271,7 @@ func toolError(msg string) *sdk.CallToolResult {
 	}
 }
 
-const executeGoCodeDescription = `Build and run Go code in a sandboxed Kubernetes pod (gVisor-isolated on GKE, runsc-free on local kind). The pod has the Go toolchain plus a prewarmed cache of curated Google Cloud SDK + Kubernetes client packages:
-
-  cloud.google.com/go/storage
-  cloud.google.com/go/bigquery
-  cloud.google.com/go/compute/apiv1
-  cloud.google.com/go/container/apiv1
-  cloud.google.com/go/secretmanager/apiv1
-  google.golang.org/api/option
-  k8s.io/client-go/kubernetes
-  k8s.io/client-go/tools/clientcmd
-  k8s.io/client-go/dynamic
-  k8s.io/client-go/tools/watch
-  k8s.io/apimachinery/pkg/apis/meta/v1
-
-The snippet's go.mod is inherited from the prewarm lockfile so builds cache-hit. Anything not covered above is resolved on demand via go mod tidy (slower; may re-tidy shared transitives and cache-miss).
-
-Two input modes for the 'code' field:
-
-1) SNIPPET (recommended): a Go file declaring ANY package other than "main", containing a function with EXACTLY this signature:
-     func run(ctx context.Context) (any, error)
-   Your return value is JSON-marshaled and surfaced as result.value. Errors and panics are captured into result.kind=error/panic. The kode-gopher wrapper provides func main() — do not write one.
-
-2) FULL PROGRAM: a complete "package main" file. Your code owns stdout/stderr. If you want a structured result, write JSON to /app/.kode-gopher/result.json before exiting.
-
-The host forwards ambient Google Cloud credentials (gcloud Application Default Credentials, plus GOOGLE_CLOUD_PROJECT if set) into the sandbox, so cloud.google.com/go/* calls work without additional setup. ADC lands at /app/.kode-gopher/creds/adc.json and GOOGLE_APPLICATION_CREDENTIALS is set for the run phase.
-
-State semantics: /app is RESET between tool calls (so one program's files can't leak into the next). $GOCACHE and $GOMODCACHE PERSIST (so repeated builds against the same imports are near-instant).
-
-Response shape: {phase, mode, exit_code, duration_ms, stdout?, stderr?, result?}. phase=build means the program never ran (tidy or compile failed). phase=run means the program executed; exit_code tells you whether it succeeded, and result (when present) is the structured payload your snippet returned.
-
-Snippet example:
-
-  package kode_gopher_snippet
-
-  import (
-      "context"
-      "errors"
-      "os"
-
-      "cloud.google.com/go/storage"
-      "google.golang.org/api/iterator"
-  )
-
-  func run(ctx context.Context) (any, error) {
-      project := os.Getenv("GOOGLE_CLOUD_PROJECT")
-      c, err := storage.NewClient(ctx)
-      if err != nil { return nil, err }
-      defer c.Close()
-      var names []string
-      it := c.Buckets(ctx, project)
-      for {
-          attrs, err := it.Next()
-          if errors.Is(err, iterator.Done) { break }
-          if err != nil { return nil, err }
-          names = append(names, attrs.Name)
-      }
-      return names, nil
-  }
-`
+// executeGoCodeDescription now lives in internal/prompts, generated
+// from internal/curated.Packages via `make prompts`. Aliased here so
+// server.go's tool registration doesn't need to import prompts.
+var executeGoCodeDescription = prompts.ExecuteGoCodeDescription
