@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/mcp"
 )
 
@@ -59,7 +60,7 @@ func runServe(args []string) int {
 		OpenTimeout: *openTO,
 		ExecTimeout: *execTO,
 		KubeContext: *kubeCtx,
-		Credentials: forwardCreds,
+		Credentials: creds.NewForwarded(localADCPath(), forwardedEnv),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -72,15 +73,3 @@ func runServe(args []string) int {
 	return 0
 }
 
-// forwardCreds is the CredentialHook bridging host state into the
-// sandbox: reads local ADC if present and forwards a small env
-// allow-list. Same policy as `kode-gopher exec`.
-func forwardCreds() (map[string][]byte, map[string]string) {
-	files := map[string][]byte{}
-	envs := collectForwardedEnv()
-	if adc, ok := readLocalADC(); ok {
-		files[".kode-gopher/creds/adc.json"] = adc
-		envs["GOOGLE_APPLICATION_CREDENTIALS"] = adcInSandbox
-	}
-	return files, envs
-}

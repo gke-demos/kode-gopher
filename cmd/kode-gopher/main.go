@@ -29,10 +29,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"os/signal"
@@ -41,20 +39,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gke-demos/kode-gopher/internal/sandbox"
-
+	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/executor"
 	"github.com/gke-demos/kode-gopher/internal/normalize"
+	"github.com/gke-demos/kode-gopher/internal/sandbox"
 )
 
-const (
-	sandboxTemplate = "go-runtime-template"
-	adcInSandbox    = "/app/.kode-gopher/creds/adc.json"
-)
+const sandboxTemplate = "go-runtime-template"
 
 // forwardedEnv lists host env vars copied into the sandbox if set.
-// Same explicit allow-list as slice 0; a real forwarding policy is
-// slice-4 work.
+// The unified creds.NewForwarded takes this as its EnvAllowList.
 var forwardedEnv = []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT"}
 
 func main() {
@@ -155,17 +149,22 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 		files[k] = v
 	}
 
-	envs := collectForwardedEnv()
-	if adc, ok := readLocalADC(); ok {
-		files[".kode-gopher/creds/adc.json"] = adc
-		envs["GOOGLE_APPLICATION_CREDENTIALS"] = adcInSandbox
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	credSrc := creds.NewForwarded(localADCPath(), forwardedEnv)
+	credFiles, envs, err := credSrc.Materialize(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("materialize credentials: %w", err)
+	}
+	for k, v := range credFiles {
+		files[k] = v
+	}
+	if _, ok := credFiles[".kode-gopher/creds/adc.json"]; ok {
 		log.Printf("forwarding ADC from %s", localADCPath())
 	} else {
 		log.Printf("no local ADC at %s — GCP calls will fail unless the sandbox has its own creds", localADCPath())
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	openCtx, cancelOpen := context.WithTimeout(ctx, openTimeout)
 	defer cancelOpen()
@@ -240,37 +239,12 @@ func ensureNewline(s string) string {
 	return s + "\n"
 }
 
-func collectForwardedEnv() map[string]string {
-	out := map[string]string{}
-	for _, k := range forwardedEnv {
-		if v := os.Getenv(k); v != "" {
-			out[k] = v
-		}
-	}
-	return out
-}
-
 func localADCPath() string {
 	h, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
 	return filepath.Join(h, ".config", "gcloud", "application_default_credentials.json")
-}
-
-func readLocalADC() ([]byte, bool) {
-	p := localADCPath()
-	if p == "" {
-		return nil, false
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			log.Printf("read ADC at %s: %v", p, err)
-		}
-		return nil, false
-	}
-	return b, true
 }
 
 func fileKeys(m map[string][]byte) []string {

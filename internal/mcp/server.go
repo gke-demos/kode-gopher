@@ -32,20 +32,12 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/sandbox"
 )
 
 // Version is what the server advertises to clients.
 const Version = "0.1.0"
-
-// CredentialHook returns extra files + env vars to inject on every
-// tool call. Files are merged into the sandbox file map (typically a
-// forwarded ADC json under .kode-gopher/creds/); env vars apply only
-// to the user binary's run phase (executor.Request.Env).
-//
-// Returning nil maps is fine. A nil hook means "no creds forwarding"
-// — the sandbox runs without GOOGLE_APPLICATION_CREDENTIALS.
-type CredentialHook func() (files map[string][]byte, env map[string]string)
 
 // Config is everything Server needs to know to open and drive a
 // sandbox.Session. Zero-value fields fall back to sensible defaults.
@@ -74,8 +66,11 @@ type Config struct {
 	// previous behavior.
 	KubeContext string
 	// Credentials, if non-nil, is called on every tool invocation to
-	// fold ambient host credentials into the request.
-	Credentials CredentialHook
+	// materialize credential files/env into the request, and by
+	// gcp_auth_status to report the sandbox's identity. A nil Source
+	// means "no creds forwarding" — the sandbox runs without
+	// GOOGLE_APPLICATION_CREDENTIALS.
+	Credentials creds.Source
 }
 
 func (c *Config) applyDefaults() {

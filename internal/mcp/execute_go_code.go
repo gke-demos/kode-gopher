@@ -116,7 +116,10 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 	}
 	envs := map[string]string{}
 	if s.cfg.Credentials != nil {
-		credFiles, credEnv := s.cfg.Credentials()
+		credFiles, credEnv, cErr := s.cfg.Credentials.Materialize(ctx)
+		if cErr != nil {
+			return toolError(fmt.Sprintf("materialize credentials: %v", cErr)), nil, nil
+		}
 		for k, v := range credFiles {
 			files[k] = v
 		}
