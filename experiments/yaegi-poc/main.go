@@ -35,6 +35,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/traefik/yaegi/interp"
@@ -61,6 +62,19 @@ func main() {
 			die("Use(extras): %v", err)
 		}
 	}
+
+	// Symbols mounted alongside the binary rather than linked into it.
+	plugged, loaded, err := loadPluginSymbols()
+	if err != nil {
+		die("plugin symbols: %v", err)
+	}
+	if len(plugged) > 0 {
+		if err := i.Use(plugged); err != nil {
+			die("Use(plugin symbols): %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "[poc] loaded %d package(s) from plugins: %s\n",
+			len(plugged), strings.Join(loaded, ", "))
+	}
 	setupMS := time.Since(startSetup).Milliseconds()
 	fmt.Fprintf(os.Stderr, "[poc] interpreter ready in %dms (stdlib + %d extra packages)\n", setupMS, len(extras))
 
@@ -68,7 +82,7 @@ func main() {
 	// main() to completion (or panic). All snippet output goes to
 	// stdout/stderr as normal.
 	startRun := time.Now()
-	_, err := i.EvalPath(path)
+	_, err = i.EvalPath(path)
 	runMS := time.Since(startRun).Milliseconds()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[poc] EvalPath failed in %dms: %v\n", runMS, err)

@@ -480,3 +480,160 @@ Multi-file test snippet at `testdata/multi_file_helper_snippet/` — root `snipp
 - `lookup_package_docs` (storage.Client): subsecond
 
 All six MCP tool paths return `result.kind=ok` / non-empty structured content.
+
+## Slice 6 gating test — 2026-09-20 — yaegi vs. gRPC
+
+`docs/plan.md` gated the whole yaegi slice on one question: does a "true gRPC-only" client work under the interpreter? Answer: **yes — ✅ branch**. But the gate's framing was wrong in two ways, and the corrections matter more than the verdict.
+
+### Premise error 1 — `compute/apiv1` is not a gRPC client
+
+The plan named `cloud.google.com/go/compute/apiv1` as the missing gRPC data point. It isn't one. `go doc` shows the package exposes **only** `New*RESTClient` constructors — the Compute API has no gRPC surface at all, so the GAPIC client is REST with protobuf message types. Testing it would never have answered the question the gate was asking.
+
+The actual gRPC client in our curated set is `cloud.google.com/go/container/apiv1`, which offers both `NewClusterManagerClient` (gRPC, the default) and `NewClusterManagerRESTClient`. That's what the gate needed.
+
+### Premise error 2 — the `unsafe` fear was misplaced
+
+The PoC README worried that gRPC would break because "yaegi can't `unsafe`" and grpc-go uses it internally. That reasoning doesn't apply to this architecture. Yaegi interprets **only the snippet**; every symbol reached through a `yaegi extract` file is ordinary compiled code linked into the runner binary. `unsafe`, reflection, generics and assembly *inside a dependency* are irrelevant — they already compiled.
+
+What would actually break is the inverse: interpreted code that must *satisfy* an interface consumed by reflection-heavy compiled code, or interpreted types that protobuf/grpc needs to reflect over. Our snippet shape (call the SDK, marshal the result) rarely does either. This reframes the compatibility risk for the rest of the slice: stop auditing dependencies for `unsafe`, start auditing for callbacks and user-defined types crossing back into compiled code.
+
+### Results (live, project `gke-demos-345619`)
+
+| test | client kind | yaegi total | vs. gcloud |
+|---|---|---|---|
+| `compute/apiv1` zones list | REST + protobuf | **410 ms** (setup 8, eval+run 402) | 130 zones, **identical**; gcloud itself took 1.56 s |
+| `container/apiv1` cluster list | **true gRPC** | **446 ms** (setup 6, eval+run 440) | 10 clusters, name/location/version **identical** |
+
+Interpreter setup stays in single-digit ms even with the large extracts loaded. Snippets at `testdata/list_zones_compute.go` and `testdata/list_clusters_container.go`.
+
+### Cost signals for the slice (these are the real constraint, not compatibility)
+
+| package | extract time | generated size |
+|---|---|---|
+| `compute/apiv1` | 52 s | 69 KB (605 lines) |
+| `compute/apiv1/computepb` | 22 s | **2.3 MB** (18,671 lines) |
+| `container/apiv1` | 48 s | 909 B |
+| `container/apiv1/containerpb` | 18 s | 163 KB |
+| `k8s.io/client-go/kubernetes` | 24 min, then **failed** (see below) | — |
+
+Runner binary: **96 MB** with compute+storage+iterator symbols; 40 MB with container only. The plan's "<200 MB image" target is at risk once the full curated set is linked in — still a 10-20x win over the current 2.2 GB image, but the target number should be re-derived rather than assumed.
+
+`k8s.io/client-go/kubernetes` extraction spent **24 minutes type-checking** and then failed — but not for the interesting reason. The error was a missing `go.sum` entry:
+
+```
+could not import k8s.io/api/apidiscovery/v2 (missing go.sum entry for module
+providing package k8s.io/api/apidiscovery/v2)
+```
+
+Nothing in the PoC module imports client-go, so `go get k8s.io/client-go` never recorded its transitive sums; `yaegi extract` type-checks the real package graph and hit the gap. **A setup problem, not a verdict on client-go.** Retrying with the sums present.
+
+What the run *does* establish regardless of outcome: client-go's type-check alone costs ~24 min of wall time (37 min user, 40 min sys — it's parallel and CPU-bound). Even on success that's a different order of magnitude from the 18-52 s GCP extracts, which shapes what `make extract` can reasonably do in CI.
+
+### Symbol staleness stopped being hypothetical
+
+Pulling `compute/apiv1` into the PoC module upgraded `google.golang.org/api` v0.280.0 → v0.287.1, which deleted `storage.ObjectsWatchAllCall`. The committed `google_golang_org-api-storage-v1.go` extract still referenced it, and the runner **failed to compile**:
+
+```
+./google_golang_org-api-storage-v1.go:188:79: undefined: storage.ObjectsWatchAllCall
+```
+
+Re-extracting (35 s) fixed it. Two things worth keeping from this:
+
+- **The failure mode is build-time, not runtime.** A stale extract can't ship silently — the runner binary won't link. That's the safe direction, and it means `make extract` drift can be caught by simply building in CI, without needing a separate `prompts-check`-style comparison.
+- **The blast radius of a dependency bump is every extract in the set**, not just the bumped package's. Plan open question 1 ("how aggressive on freshness?") now has a concrete answer: re-extract the whole set on any dependency upgrade, and let the build gate it.
+
+### client-go extraction: the bottleneck is yaegi's importer, and it's a one-line fix — 2026-09-21
+
+**`yaegi extract k8s.io/client-go/kubernetes` does not terminate.** Left running 12 hours: 10.9 GB RSS, only 16% average CPU (1h56m CPU over 12h elapsed), no output. The earlier "24 min" figure was the *failure* time of a run that died on a missing `go.sum` entry, not a completion time. There is no completion time.
+
+**Root cause** — `yaegi/extract/extract.go:450`:
+
+```go
+pkg, err := importer.ForCompiler(token.NewFileSet(), "source", nil).Import(pkgIdent)
+```
+
+The **source importer** parses and type-checks the entire transitive dependency graph from source, in-process, on every invocation. It uses none of the Go build cache. For client-go's graph (60 direct imports, hundreds transitively, every group/version) that is effectively unbounded. This also kills the obvious optimisation: warming `GOCACHE` does nothing, so **every extract is a cold extract** — a client-go version bump would cost the same as the first run. There is no cheap update path today.
+
+**The fix**: load types from compiled export data via `go/packages` instead. Benchmarked in an isolated module (`/tmp/benchimp`, `benchimporter/main.go` in the PoC):
+
+| package | `go/packages` + export data | yaegi source importer |
+|---|---|---|
+| `k8s.io/client-go/kubernetes` | **2.0 s** | **>12 h, never completed** |
+| `k8s.io/client-go/dynamic` | 1.0 s | not attempted |
+| `cloud.google.com/go/container/apiv1` | 1.2 s | 48 s |
+| `cloud.google.com/go/compute/apiv1` | 2.4 s | 52 s |
+
+Compiling every one of those deps from scratch first (`go build ./...`) takes **41 s**, and is cached thereafter. So the whole cold path is ~43 s against >12 h, and the GCP packages get ~20-40x faster as a side effect. Second passes are flat (1.6-2.5 s), confirming the build cache does the heavy lifting once.
+
+**Why this is small to adopt**: `genContent(importPath string, p *types.Package)` takes a plain `*types.Package`, so the swap is mechanical. `Extractor` exposes no importer hook and `genContent` is unexported, so it means copying `extract.go` (509 lines, yaegi is Apache-2.0 like this repo) to `internal/yaegi/extract/` and changing the one importer line. Worth upstreaming as an `Importer` field on `Extractor` afterwards.
+
+**Consequence for the curated set**: client-go's exclusion was being argued on extraction cost. That argument is gone — 2 s.
+
+### The forked extractor, built and verified end-to-end — 2026-09-21
+
+`experiments/yaegi-poc/fastextract/` (copy of upstream `extract.go` + `loadpackage.go`) and `cmd/kg-extract/` (drop-in `yaegi extract` CLI).
+
+**Equivalence.** All seven packages we had yaegi-generated baselines for re-extract **byte-identical**, including the 2.3 MB `computepb`: `container/apiv1`, `containerpb`, `compute/apiv1`, `computepb`, `cloud.google.com/go/storage`, `api/iterator`, `api/storage/v1`. Speed: `container/apiv1` 48 s → **1.3 s**, `compute/apiv1` 52 s → **3.1 s**.
+
+**client-go extracts in 2.0 s** (vs >12 h, never completing). The full k8s set — `kubernetes`, `dynamic`, `rest`, `tools/clientcmd`, `apimachinery/.../meta/v1` — takes **~6 s** total.
+
+**Second upstream bug, found only because we got past the first.** Generated output didn't compile:
+
+```
+k8s_io-client-go-kubernetes.go:12:2: v1alpha1 redeclared in this block
+```
+
+`genContent`'s `qualify` returns the bare `pkg.Name()` and the template emits unaliased imports. `k8s.io/client-go/kubernetes` imports 60 packages, a dozen of them named `v1`/`v1beta1`/`v1alpha1`. Nobody upstream ever saw this because the source importer never produced the file. Fixed by assigning aliases **only on collision** (sanitised full path), pre-assigned over direct imports in path order so output doesn't depend on symbol walk order. The seven baselines above are byte-identical *after* this change, which is the regression test.
+
+**End-to-end.** `testdata/list_nodes_k8s.go` calls `clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})` — the typed clientset, interpreted:
+
+| runner | pack | result |
+|---|---|---|
+| no k8s symbols linked | none | fails cleanly: `unable to find source related to: "k8s.io/apimachinery/pkg/apis/meta/v1"` |
+| same binary | `k8ssyms.so` (90 MB) | **3 nodes, matches `kubectl get nodes` exactly, 61 ms total** (setup 48 ms, eval+run 13 ms) |
+
+Verified against a live kind cluster (`kind-lookout-examples`, v1.36.1) since `ap-gke-sandbox` is gone.
+
+So: client-go belongs in the yaegi curated set, the typed clientset works under the interpreter, and symbols ship as mountable packs. Plan open question 5 resolves to **include the full typed clientset**.
+
+**Caveat on coverage.** The snippet names only `kubernetes`, `clientcmd` and `metav1` types. A snippet naming e.g. `corev1.Pod` needs `k8s.io/api/core/v1` extracted too — the curated k8s pack will need the common `k8s.io/api/*` group/versions, not just the clientset. Unmeasured, but they're small and fast now.
+
+**Upstream.** Both fixes are worth PRs to yaegi: an `Importer` field on `Extractor`, and the import-alias fix (which is a plain bug, independent of the importer).
+
+### Symbols can live outside the runner binary — verified
+
+Question raised mid-gate: must every symbol set be linked into `kg-yaegi-runner` at build time, or can symbol sets be mounted in (OCI image volume, say) and updated on their own schedule? **They can be mounted.** Tested with Go plugins (`-buildmode=plugin`) in the PoC:
+
+- `pluginload.go` reads `KG_SYMBOL_PLUGINS` (colon-separated dirs), `plugin.Open`s every `*.so`, looks up an exported `Symbols interp.Exports`, merges them, and hands the result to `i.Use()`.
+- `plugins/containersyms/` and `plugins/computesyms/` are the same generated extract files with their build tags stripped, plus a three-line `var Symbols = interp.Exports{}`.
+
+| build | size | result |
+|---|---|---|
+| runner, no SDK symbols linked | **34 MB** | control: container snippet fails with a clear "unable to find source related to cloud.google.com/go/container/apiv1" |
+| `containersyms.so` | 41 MB | mounted → gRPC GKE call works, 10 clusters, 476 ms |
+| `computesyms.so` (compute + computepb + iterator) | 83 MB | mounted → 130 zones, 416 ms |
+| both mounted at once | 124 MB | **both snippets work**, 5 packages from 2 `.so`, setup 99-116 ms |
+
+dlopen costs ~100 ms of interpreter setup vs ~6 ms fully-linked — irrelevant next to the 5-30 s the compiled path pays.
+
+**What this buys.** The runner stops being a function of the curated set. Symbol packs become independently published artifacts, and the 24-minute `client-go` extraction becomes a deliberate, occasional, offline publish step rather than a cost on every runner build or CI run. That removes the main argument for excluding client-go from the yaegi set.
+
+**Constraints, honestly.** Go plugins are strict about build compatibility, and this cuts both ways:
+
+- Host and plugin must share identical versions of every package they *both* link, plus an identical toolchain. Here the runner links only stdlib + yaegi, and packs link the SDKs, so the shared surface is small: **bumping an SDK rebuilds one pack; bumping Go or yaegi rebuilds everything.** That asymmetry is what makes independent pack updates viable.
+- Packs that share transitive deps (protobuf, grpc — GCP and k8s packs both will) must be built from **one common module graph**. The two-pack test passes because both came from the same `go.mod`. Packs are individually *regenerable*, not individually *pinnable*.
+- `-buildmode=plugin` requires CGO, so the yaegi image needs a glibc base (`distroless/base`, not `static` or alpine/musl). Rules out the smallest possible image but stays far under 2.2 GB.
+- **Untested:** dlopen under gVisor, and the mismatch failure mode (expected: loud error at `plugin.Open`, not silent corruption). Both need checking on a real sandbox before committing to this design.
+- **Untested:** Kubernetes `image:` volume sources on our clusters — the `ap-gke-sandbox` cluster is gone (see below), so this wasn't verifiable. Fallback that needs no new API surface: an initContainer that copies `.so` files out of a symbol image into an `emptyDir`.
+
+Non-plugin alternative if plugins prove unworkable under gVisor: ship **several runner binaries**, one per symbol profile, and select by image/template. No CGO, no dlopen, but combinatorial and coarse.
+
+### Substrate drift during the idle period
+
+`ap-gke-sandbox` — the GKE Autopilot cluster slices 1.7/3/4 were verified against — no longer exists. It's absent from `gcloud container clusters list` for `gke-demos-345619` and its kubeconfig context times out. The kubeconfig entry is stale. Slice 6's GKE smoketests will need a new cluster (and `scripts/smoketest-gke.sh` re-pointed) before anything can be verified on a real sandbox; the kind path is unaffected.
+
+### Consequences for the plan
+
+- Slice 6 proceeds on the full-scope ✅ branch for GCP packages, **as an opt-in second runtime — the compiled path stays the default and is not touched**.
+- Replace the plan's `compute/apiv1` gating language with `container/apiv1`; keep compute in the curated yaegi set on its own merits.
+- Add a curated-set decision for `k8s.io/client-go` before building the image.
