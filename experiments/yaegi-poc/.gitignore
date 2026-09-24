@@ -1,0 +1,5 @@
+# Generated `yaegi extract` output for protobuf message packages. Large
+# (computepb alone is 2.3 MB / 18k lines) and mechanically reproducible —
+# see README.md > Setup for the regeneration commands.
+*computepb.go
+*containerpb.go

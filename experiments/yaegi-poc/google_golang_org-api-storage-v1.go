@@ -185,7 +185,6 @@ func init() {
 		"ObjectsSetIamPolicyCall":                        reflect.ValueOf((*storage.ObjectsSetIamPolicyCall)(nil)),
 		"ObjectsTestIamPermissionsCall":                  reflect.ValueOf((*storage.ObjectsTestIamPermissionsCall)(nil)),
 		"ObjectsUpdateCall":                              reflect.ValueOf((*storage.ObjectsUpdateCall)(nil)),
-		"ObjectsWatchAllCall":                            reflect.ValueOf((*storage.ObjectsWatchAllCall)(nil)),
 		"OperationsAdvanceRelocateBucketCall":            reflect.ValueOf((*storage.OperationsAdvanceRelocateBucketCall)(nil)),
 		"OperationsCancelCall":                           reflect.ValueOf((*storage.OperationsCancelCall)(nil)),
 		"OperationsGetCall":                              reflect.ValueOf((*storage.OperationsGetCall)(nil)),
