@@ -637,3 +637,99 @@ Non-plugin alternative if plugins prove unworkable under gVisor: ship **several 
 - Slice 6 proceeds on the full-scope ✅ branch for GCP packages, **as an opt-in second runtime — the compiled path stays the default and is not touched**.
 - Replace the plan's `compute/apiv1` gating language with `container/apiv1`; keep compute in the curated yaegi set on its own merits.
 - Add a curated-set decision for `k8s.io/client-go` before building the image.
+
+## k8s.io/api types, and a yaegi named-result bug that returns wrong answers — 2026-09-24
+
+### k8s.io/api extracts
+`core/v1`, `apps/v1`, `batch/v1`, `networking/v1` and `apimachinery/pkg/api/resource` extract in 0.9–3.2 s each (`core/v1` is the largest at 78 KB). Added to `plugins/k8ssyms` and pinned in `symboldeps.go`. **The pack stays 90 MB** — client-go already linked the compiled `k8s.io/api` code; these files only add symbol tables. `testdata/k8s_api_types.go` names `corev1.Pod`, `appsv1.Deployment` and `resource.Quantity` directly and runs in 78 ms. Without the pack it fails cleanly on `import "k8s.io/api/apps/v1"`.
+
+### Silent wrong results: named results persist across calls
+That snippet's pod count and deployments matched `kubectl`, but it reported **9550m CPU / 4400Mi memory requests; the truth is 1250m / 590Mi**. 9550 is exactly the sum of the running totals of the per-pod values: the named results `(cpu, mem resource.Quantity)` of a helper called in a loop were never reset between calls.
+
+Minimal repro, no SDK involved (`testdata/broken/named_result_int.go`):
+
+```go
+func f() (n int) { n++; return }
+// called in a loop: go prints 1 1 1, yaegi prints 1 2 3
+```
+
+- Reproduces on stock yaegi v0.16.1 (the latest release, April 2024) and on `master` (Feb 2026). Not reported upstream as far as a search of the issue tracker shows.
+- Straight-line calls are fine because each call site gets its own frame slot. Calls from the same site (loops) reuse the slot.
+- `return g(n)` with a named result is wrong **even without a loop** (`named_result_forward.go`: `g(1)` returns 3, not 2).
+
+**Cause**: `interp/run.go` `call()`, "Init return values": the callee's result slots are aliased to the caller's destination slots (`nf.data[i] = v(f)`) to avoid a copy on return, so a named result starts out holding whatever that slot already held.
+
+**Fix** (tested on a patched copy of v0.16.1, not yet applied to the PoC): after the parameter copy, zero every aliased result slot. It must come after the copy, not at slot setup, because with `return g(n)` the aliased slot is also where the argument is read from. All six `testdata/broken/` repros then match `go run`, and yaegi's own `interp` test suite shows the identical 44 failures with and without the patch (all pre-existing on Go 1.26: loop-variable closure semantics and vendor-path tests), so no regressions.
+
+**Consequence**: this is the first compatibility finding that produces a plausible wrong answer rather than an error, and named results in small helpers are a common Go idiom. The yaegi runtime can't ship on stock v0.16.1. Options: carry the one-hunk patch via a `replace` to a fork (and upstream it), or reject named results at snippet-validation time. The fork is the better answer; the validator is a cheap belt-and-braces check either way. It also puts yaegi's maintenance state on the record: no release in 2.5 years and 186 open issues, so we should expect to carry patches.
+
+### In-cluster test on GKE Autopilot + gVisor: symbol packs work
+New cluster `kg-sandbox` (GKE Autopilot, us-central1, rapid channel, 1.36.4, labeled `purpose=kode-gopher-slice6`) and a private Artifact Registry repo `kode-gopher-dev`. `Dockerfile.packs` builds the runner and packs in one stage, as the plugin ABI requires. **Runner image 55.9 MB** (vs 2.2 GB for the compiled sandbox image); k8s pack 93.7 MB.
+
+- **`image:` volumes: rejected by Autopilot** at admission (`autopilot-volume-type-limitation`: allowed types are configMap/csi/downwardAPI/emptyDir/gcePersistentDisk/hostPath/nfs/persistentVolumeClaim/projected/secret/ephemeral; not bypassable via allowlist). So on Autopilot the pack ships as an initContainer image (`k8s-pack-init`, busybox + the `.so`) that copies into an `emptyDir`. Image volumes remain an option for Standard clusters only.
+- **dlopen under gVisor: works.** `manifests/pack-test.yaml` runs `k8s_api_types.go` with in-cluster credentials in a gVisor pod (`runtimeClassName: gvisor`, landed on a `sandbox.gke.io/runtime: gvisor` node) and a runc control pod. Both load `k8ssyms.so (10 pkgs)` and produce identical output; the pod count (51) matches `kubectl`.
+
+| runtime | setup (dlopen + interp) | eval+run+API | total |
+|---|---|---|---|
+| runc | 187 ms | 234 ms | 421 ms |
+| gVisor | 398 ms | 273 ms | 671 ms |
+
+gVisor roughly doubles pack load time (~200 ms extra for the 90 MB `.so`). Still sub-second end to end, against ~26–40 s for the compiled path on Autopilot.
+
+Both pods ran stock yaegi, so both reported the same wrong CPU/memory totals from the named-result bug above: a consistent reproduction on real infra, not a gVisor effect.
+
+## Differential corpus: yaegi is wrong on half of idiomatic Go — 2026-09-24
+
+The named-result bug was found by accident, so we built a systematic check. `experiments/yaegi-poc/cmd/kg-difftest` builds each snippet in `testdata/diff/` with the Go toolchain (the oracle), runs it, then runs it under each interpreter and compares stdout and exit code. The corpus is 32 stdlib-only snippets, each targeting an idiom models write: named results, defer/recover, closures, generics, embedding, fmt/json over user types, errors.As, type switches, sort/io interfaces, goroutines, context, templates, time, local HTTP, a paging loop, panics and os.Exit.
+
+| interpreter | wrong or failing (of 32) |
+|---|---|
+| yaegi v0.16.1 stock | 18 |
+| yaegi `master` (Feb 2026) | 17 (fixes only Go 1.22 loop-var semantics) |
+| **yaegi v0.16.1 + our named-results patch** | **16** |
+
+The patch fixes three snippets: named results, the paging loop and local HTTP. Upgrading to `master` fixes one. Everything else fails identically on all three builds.
+
+**Silent wrong output** (runs, exits 0, prints something plausible), with the patch applied:
+
+| snippet | what goes wrong |
+|---|---|
+| 12 json_marshal | `encoding/json` on interpreted structs: **unexported fields are emitted** (as `"Xinternal"`), **embedded structs aren't flattened** (`"Meta":{...}`), **custom `MarshalJSON` is ignored** |
+| 01 named_results | `%+v` prints unexported fields as `Xsum`, `Xn`. yaegi exports them under an `X` prefix in the reflect types it builds, which is also the root of the JSON leak |
+| 10 stringer_fmt | `String()` on an interpreted type isn't called for slice elements: `[0 2]` instead of the names |
+| 15 type_switch | a concrete `case Rect` listed before `case Shape` loses to the interface case |
+| 02 defer_recover | deferred call arguments aren't evaluated at the `defer` statement: `2 1 0` prints as `3 3 3` |
+| 03 loopvar | pre-Go 1.22 loop-variable capture: `3 3 3` instead of `0 1 2` (fixed on `master`) |
+| 11 type_names | `%T` shows `struct { Name string; CPU int }` instead of `main.Pod` |
+
+**Loud failures** (error, non-zero exit):
+- generic funcs with two type parameters (`undefined type for U`);
+- generic stdlib (`slices.Sort`, `iter`). This one is structural: generic functions can't be exported as symbols at all;
+- `errors.As` with an interpreted pointer error type;
+- typed `iota` expressions (`constant definition loop`);
+- method values;
+- `text/template` calling a method on an interpreted type;
+- interface embedding.
+
+`os.Exit(3)` also comes out as exit 1, but that one is in our runner and ours to fix.
+
+What passes: closures with state, generic types, embedding and promotion, `json.Unmarshal`, snippet-implemented `sort`/`io` interfaces, goroutines and channels, context, value and reference semantics, control flow, strings, `time`, struct literals, unrecovered panics, the paging loop and local `net/http`.
+
+### Other results from the same session
+- **Pack/runner version mismatch fails loudly**: `plugin.Open(...): plugin was built with a different version of package github.com/traefik/yaegi/internal/unsafe2`, exit 1. That was the expected behavior; now confirmed.
+- **How the patch is carried**:
+  - the fix lives in `experiments/yaegi-poc/patches/yaegi-v0.16.1-named-results.patch`;
+  - `yaegi-patch.sh` applies it into a gitignored `third_party/yaegi`;
+  - a `go.mod` replace points yaegi at that copy.
+
+  A pack rebuilt against it gives the right k8s totals (1250m / 590Mi, matching `kubectl`) in 116 ms. `Dockerfile.packs` doesn't apply the patch yet. The images pushed to `kode-gopher-dev` use stock yaegi.
+
+### Consequence
+This reverses the slice-6 premise. The packaging questions all came out well: extraction, packs, gVisor, and Autopilot delivery. But the interpreter is the product, and it emits wrong JSON for ordinary structs, and printing a JSON result is kode-gopher's output contract. A static validator can't realistically catch several of the silent classes (JSON of user structs, Stringer in collections, type-switch ordering, defer arguments) without rejecting most non-trivial snippets. Upstream isn't moving either: `master` fixes one of these relative to a 2.5-year-old release.
+
+Options, pending decision:
+1. **Drop yaegi and make the compiled path fast instead.** The compiled path's latency is build time, and the curated package set is fixed and known. That is the ideal case for a pre-warmed `GOCACHE` of precompiled curated packages shipped with the image. Most of slice 6's infra findings carry over: gVisor, Autopilot initContainer delivery, the image-size budget.
+2. **Keep yaegi as a narrow, validated fast path.** This means a validator that rejects the known-bad patterns, with the difftest corpus in CI. The risk is that the validator either rejects most snippets or misses a silent class.
+3. **Fix yaegi.** The X-prefix field export is architectural: it's how yaegi builds reflect types at runtime. High effort on a lightly maintained codebase.
+
+Recommendation: 1, measuring the warm-cache compile latency first. If it gets to a few seconds, yaegi's remaining speed advantage doesn't justify its correctness risk.

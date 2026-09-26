@@ -3,3 +3,6 @@
 # see README.md > Setup for the regeneration commands.
 *computepb.go
 *containerpb.go
+
+# Patched yaegi, materialized by yaegi-patch.sh
+third_party/

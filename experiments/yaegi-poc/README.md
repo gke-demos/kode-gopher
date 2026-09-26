@@ -1,5 +1,7 @@
 # yaegi-poc — can we use a Go interpreter instead of compile-and-run?
 
+> **Shelved 2026-09-24.** Packaging all worked: extraction, symbol packs, gVisor, and GKE Autopilot delivery. The interpreter did not. The differential corpus below finds silent wrong output in 7 of 32 idiomatic snippets, including `json.Marshal` of snippet-defined structs. This directory is kept as the record and as a quick recheck (`kg-difftest`) if yaegi improves. Decision and details: `docs/decisions.md > Differential corpus`. Next step: slice 7, a fast compiled path, in `docs/plan.md`.
+
 Local-only proof of concept exploring an alternative sandbox backend that uses [Yaegi](https://github.com/traefik/yaegi) (a Go interpreter from Traefik Labs) instead of the Go toolchain.
 
 The compiled path that ships in kode-gopher today pays a ~25–30s `go build` per cold call and lives under the agent-sandbox HTTP layer's 60s per-call cap — both of which our slice 0.5 prewarmed image is structured around. Yaegi promises to make both moot: no compile step, ms startup, smaller image (no toolchain, no `$GOCACHE`).
@@ -282,3 +284,14 @@ compatibility question but a packaging one:
    re-pointing `scripts/smoketest-gke.sh` is a prerequisite for the slice.
 4. **Plugin version-mismatch failure mode is unverified.** Expected: a loud error at
    `plugin.Open`. Worth confirming, since it's the pack design's main operational risk.
+
+### Differential corpus ❌ 2026-09-24
+
+`cmd/kg-difftest` checks each snippet in `testdata/diff/` against real Go as the oracle:
+
+```sh
+./yaegi-patch.sh && go build -o /tmp/yaegi-poc-plugin . && go build -o /tmp/kg-difftest ./cmd/kg-difftest
+/tmp/kg-difftest -interp 'patched=/tmp/yaegi-poc-plugin' -interp 'stock=/tmp/yaegi-bin/yaegi run' testdata/diff
+```
+
+16 of 32 fail even with the named-result patch, and 7 of those are **silent wrong output**, including `json.Marshal` of interpreted structs, which leaks unexported fields, ignores `MarshalJSON` and doesn't flatten embedded structs. `testdata/broken/` holds the named-result repros. Full results and the options that follow are in `docs/decisions.md` ("Differential corpus").

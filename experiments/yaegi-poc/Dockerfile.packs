@@ -1,0 +1,33 @@
+# Runner image + symbol-pack images for the in-cluster symbol-pack test.
+#
+# The runner and every pack are built in the same stage on purpose: a Go
+# plugin only loads into a host built with the identical toolchain and
+# identical versions of every package they share.
+#
+#   docker build -f Dockerfile.packs --target runner   -t .../yaegi-runner .
+#   docker build -f Dockerfile.packs --target k8s-pack -t .../k8s-pack .
+#
+# The runner needs a glibc base: plugin.Open is dlopen, so CGO is on.
+FROM golang:1.26.3-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=1 go build -o /out/yaegi-runner . \
+ && CGO_ENABLED=1 go build -buildmode=plugin -o /out/packs/k8ssyms.so ./plugins/k8ssyms
+
+FROM gcr.io/distroless/base-debian12:nonroot AS runner
+COPY --from=build /out/yaegi-runner /usr/local/bin/yaegi-runner
+COPY testdata/ /testdata/
+ENTRYPOINT ["/usr/local/bin/yaegi-runner"]
+
+# Pack images carry only the .so, at the image root, so an image volume
+# mounted at /symbols exposes /symbols/k8ssyms.so.
+FROM scratch AS k8s-pack
+COPY --from=build /out/packs/k8ssyms.so /k8ssyms.so
+
+# initContainer variant for clusters without image volumes (GKE Autopilot
+# rejects them): copies the pack into a shared emptyDir at /symbols.
+FROM busybox:1.37-musl AS k8s-pack-init
+COPY --from=build /out/packs/k8ssyms.so /pack/k8ssyms.so
+ENTRYPOINT ["cp", "/pack/k8ssyms.so", "/symbols/"]
