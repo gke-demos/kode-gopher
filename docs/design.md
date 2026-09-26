@@ -76,27 +76,13 @@ The MCP server speaks the standard MCP wire protocol; the transport underneath i
 
 Until that slice lands, everything in this document assumes stdio.
 
-## Runtime modes
+## Runtime
 
-The sandbox can be backed by one of two runtimes. The compiled runtime is what ships today and stays the default; the Yaegi runtime is opt-in (slice 6).
+The sandbox runs snippets with the real Go toolchain. The pod has the toolchain plus a prewarmed `$GOCACHE`/`$GOMODCACHE` for the curated GCP packages, and each `execute_go_code` call runs `go mod tidy && go build -o .kode-gopher/bin/run . && ./bin/run`. That is three `Execute`s on the same session, with `/app` reset between calls but the caches surviving.
 
-**Compiled (today, default).** The sandbox pod has the Go toolchain plus a prewarmed `$GOCACHE`/`$GOMODCACHE` for the curated GCP packages. Each `execute_go_code` call runs `go mod tidy && go build -o .kode-gopher/bin/run . && ./bin/run` — three `Execute`s on the same session, with `/app` reset between calls but caches surviving. End-to-end latency dominated by the compile step (~5 s warm on kind, ~30 s warm on GKE Autopilot; cold first calls 30-60 s). Sandbox image is ~2.2 GB (toolchain + prewarmed cache + base). Works for any pure-Go program the snippet imports — the curated set is a performance optimization, not a correctness boundary.
+End-to-end latency is dominated by the compile step: ~5 s warm on kind, ~30 s warm on GKE Autopilot, and 30-60 s for cold first calls. The sandbox image is ~2.2 GB (toolchain + prewarmed cache + base). Any pure-Go import works: the curated set is a performance optimization, not a correctness boundary. Cutting the latency is slice 7 (`docs/plan.md`).
 
-**Yaegi (planned, slice 6).** The sandbox pod has a small interpreter binary (`kg-yaegi-runner`) with the curated GCP SDK packages registered as `yaegi extract`-generated symbol maps baked in at image-build time. One `Execute` per call: `kg-yaegi-runner main.go`. No compile step; interpretation overhead is single-digit ms. End-to-end latency dominated by the actual API call (~700 ms-1 s for a typical GCS list against real infra). Image is targeted at <200 MB. **The curated set IS a correctness boundary here** — snippets can only import packages whose symbols were extracted at build time. Failures surface as "package not found" rather than compile errors. Anything outside the curated set is a hard "use `--runtime=compiled`" error.
-
-| | compiled | yaegi |
-|---|---|---|
-| status | ships today | slice 6 |
-| typical cold latency | 30-60 s | <2 s |
-| typical warm latency | 5-30 s | <2 s |
-| image size | ~2.2 GB | target <200 MB |
-| package compatibility | any pure-Go import | curated extracts only |
-| `extra_imports` | additive via `go mod tidy` | no-op (must be in curated) |
-| failure mode for unknown package | `go mod tidy` resolves or fails | hard error from runner |
-| CPU-heavy workloads | normal Go perf | interpreted (much slower) |
-| `unsafe` / cgo | unrestricted | not supported |
-
-The Build model section below describes the compiled runtime's flow. The Yaegi runtime's flow is simpler: ship `main.go`, run `kg-yaegi-runner main.go`, fetch any `/app/.kode-gopher/result.json` the snippet wrote — same result protocol, same wrapper template, same Outcome shape, different command. Session lifecycle, sandbox boundary, authentication, and transport modes all apply identically.
+An interpreted runtime (Yaegi) was prototyped as slice 6 and shelved: it produces silently wrong output for common idioms, including `json.Marshal` of snippet-defined structs. See `docs/decisions.md > Differential corpus`.
 
 ## Authentication model
 
@@ -149,8 +135,6 @@ Why a file instead of a stdout sentinel:
 - The contract is symmetric: a user submitting a full `package main` writes their own `/app/.kode-gopher/result.json`; the wrapper case writes the same shape for them.
 
 ## Build model
-
-Applies to the compiled runtime. The Yaegi runtime (slice 6) skips the compile step entirely — see the Runtime modes section above.
 
 Inside the sandbox, every invocation is:
 
@@ -255,7 +239,7 @@ kode-gopher/
 
 ## Non-goals (for v1)
 
-- A second non-Go runtime. Slice 6's Yaegi backend is still Go — it's an interpreter for the same language, not a different one. Cross-language tool surfaces (Python, TS) would be a different project.
+- A second non-Go runtime. Cross-language tool surfaces (Python, TS) would be a different project.
 - A native `kode-gopher auth login` 3LO flow. We forward gcloud ADC. (Multi-tenant HTTP mode in slice 5 may force revisiting this.)
 - Per-end-user credential isolation in multi-tenant SaaS deployments. The stdio MCP server is single-tenant per process; multi-tenancy belongs to slice 5's HTTP/SSE work.
 - L7 egress filtering. NetworkPolicy is L3 IP allowlist only.

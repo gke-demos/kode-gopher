@@ -1,0 +1,95 @@
+# In-cluster symbol-pack test: the runner image carries no SDK symbols; the
+# k8s pack is copied into an emptyDir by an initContainer and dlopen'd at
+# startup. Two pods, identical except for the runtime: gVisor and the
+# default (runc).
+#
+# Uses the initContainer fallback rather than an `image:` volume because GKE
+# Autopilot rejects image volumes at admission (autopilot-volume-type-limitation,
+# not bypassable via allowlist). On Standard clusters an image volume of the
+# k8s-pack image mounted at /symbols is the simpler equivalent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kg-pack-test
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: snippet
+  namespace: kg-pack-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kg-pack-test-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+- kind: ServiceAccount
+  name: snippet
+  namespace: kg-pack-test
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pack-gvisor
+  namespace: kg-pack-test
+spec:
+  runtimeClassName: gvisor
+  serviceAccountName: snippet
+  restartPolicy: Never
+  initContainers:
+  - name: k8s-pack
+    image: us-central1-docker.pkg.dev/gke-demos-345619/kode-gopher-dev/k8s-pack-init:slice6
+    volumeMounts:
+    - name: symbols
+      mountPath: /symbols
+  containers:
+  - name: runner
+    image: us-central1-docker.pkg.dev/gke-demos-345619/kode-gopher-dev/yaegi-runner:slice6
+    args: ["/testdata/k8s_api_types.go"]
+    env:
+    - name: KG_SYMBOL_PLUGINS
+      value: /symbols
+    volumeMounts:
+    - name: symbols
+      mountPath: /symbols
+      readOnly: true
+    resources:
+      requests: {cpu: 500m, memory: 512Mi}
+  volumes:
+  - name: symbols
+    emptyDir: {}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pack-runc
+  namespace: kg-pack-test
+spec:
+  serviceAccountName: snippet
+  restartPolicy: Never
+  initContainers:
+  - name: k8s-pack
+    image: us-central1-docker.pkg.dev/gke-demos-345619/kode-gopher-dev/k8s-pack-init:slice6
+    volumeMounts:
+    - name: symbols
+      mountPath: /symbols
+  containers:
+  - name: runner
+    image: us-central1-docker.pkg.dev/gke-demos-345619/kode-gopher-dev/yaegi-runner:slice6
+    args: ["/testdata/k8s_api_types.go"]
+    env:
+    - name: KG_SYMBOL_PLUGINS
+      value: /symbols
+    volumeMounts:
+    - name: symbols
+      mountPath: /symbols
+      readOnly: true
+    resources:
+      requests: {cpu: 500m, memory: 512Mi}
+  volumes:
+  - name: symbols
+    emptyDir: {}

@@ -23,7 +23,8 @@ Planned slices in [`docs/plan.md`](./docs/plan.md):
 
 - **Slice 3** — full GKE deployment story (formalize Artifact Registry push, Workload Identity binding docs; largely done opportunistically).
 - **Slice 5** — HTTP/SSE transport. Scope gated on five explicit design questions (session topology, auth, per-end-user creds, streaming, deployment topology).
-- **Slice 6** — alternative Yaegi (interpreter) runtime as opt-in second backend. PoC in `experiments/yaegi-poc/` shows ~700ms end-to-end for a real GCS list vs ~5-30s through the compiled path; full slice gated on testing `cloud.google.com/go/compute/apiv1` (true gRPC) under Yaegi.
+- **Slice 6** — Yaegi (interpreter) runtime. **Shelved**: packaging worked, but the interpreter silently produces wrong output for common Go idioms (see `docs/decisions.md`). The PoC stays in `experiments/yaegi-poc/`.
+- **Slice 7** — fast compiled path: measure, then ship a pre-populated `GOCACHE` for the curated set and take `go mod tidy` off the hot path.
 
 ## Try it locally
 
@@ -91,14 +92,14 @@ All smoketests are idempotent and reuse infra across runs.
 | [`scripts/smoketest-kind.sh`](./scripts/smoketest-kind.sh) | local-kind direct-CLI verification |
 | [`scripts/smoketest-gke.sh`](./scripts/smoketest-gke.sh) | GKE Autopilot direct-CLI verification |
 | [`scripts/smoketest-mcp.sh`](./scripts/smoketest-mcp.sh) | MCP-layer verification against either substrate |
-| [`experiments/yaegi-poc`](./experiments/yaegi-poc) | Slice 6 proof of concept — Yaegi interpreter as an alternative runtime |
+| [`experiments/yaegi-poc`](./experiments/yaegi-poc) | Slice 6 proof of concept (shelved) — Yaegi interpreter as an alternative runtime, plus the `kg-difftest` corpus that ruled it out |
 
 ## Built on
 
 - [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) — SandboxClaim / SandboxTemplate / SandboxWarmPool CRDs, in-pod runtime, controller, and Go client (`sigs.k8s.io/agent-sandbox/clients/go/sandbox`).
 - [gke-demos/go-runtime-sandbox](https://github.com/gke-demos/go-runtime-sandbox) — the published sandbox image (`ghcr.io/gke-demos/go-runtime-sandbox:latest`) we extend as our base in `sandbox/Dockerfile`.
 - [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk) — MCP server + client SDK.
-- [traefik/yaegi](https://github.com/traefik/yaegi) — only inside `experiments/yaegi-poc/` (standalone module, not pulled into the main build) as the interpreter behind the Slice 6 PoC.
+- [traefik/yaegi](https://github.com/traefik/yaegi) — only inside `experiments/yaegi-poc/` (standalone module, not pulled into the main build) as the interpreter behind the shelved Slice 6 PoC.
 
 ## License
 

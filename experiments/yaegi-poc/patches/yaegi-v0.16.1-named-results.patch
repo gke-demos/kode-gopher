@@ -1,0 +1,20 @@
+--- a/interp/run.go	2026-09-24 13:00:40.040890902 +0000
++++ b/interp/run.go	2026-09-24 13:00:18.206267454 +0000
+@@ -1393,6 +1393,17 @@
+ 			}
+ 		}
+ 
++		// Reset return values aliased to caller locations. They hold whatever
++		// the caller slot held before (e.g. the previous result at the same
++		// call site in a loop), which named results would otherwise start from.
++		// Done after the parameter copy, since with `return f(n)` the caller
++		// slot is also the source of an argument.
++		for i, v := range rvalues {
++			if v != nil && nf.data[i].CanSet() {
++				nf.data[i].Set(reflect.Zero(nf.data[i].Type()))
++			}
++		}
++
+ 		// Execute function body
+ 		if goroutine {
+ 			go runCfg(def.child[3].start, nf, def, n)
