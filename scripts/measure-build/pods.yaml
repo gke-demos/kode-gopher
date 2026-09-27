@@ -1,0 +1,144 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Measurement pods for scripts/measure-build/measure.sh on GKE Autopilot:
+# today's SandboxTemplate resources under gVisor, 2 dedicated CPUs under
+# gVisor, and 2 dedicated CPUs under runc. Push an image built from
+# sandbox/Dockerfile and set it below first; the one used on 2026-09-27
+# was in a temporary registry that no longer exists. Then:
+#
+#   kubectl create namespace kg-measure
+#   kubectl -n kg-measure create configmap measure-build \
+#     --from-file=measure.sh --from-file=hello.go=progs/hello/main.go \
+#     --from-file=gcs.go=progs/gcs/main.go --from-file=k8s.go=progs/k8s/main.go
+#   kubectl apply -f pods.yaml
+#   kubectl -n kg-measure exec <pod> -- bash /mb/measure.sh /mb/progs /tmp/out 2
+#
+# Run pods one at a time: the two gVisor pods usually share a node.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kg-measure
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gvisor-small
+  namespace: kg-measure
+spec:
+  runtimeClassName: gvisor
+  nodeSelector:
+    sandbox.gke.io/runtime: gvisor
+  tolerations:
+    - key: sandbox.gke.io/runtime
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+  securityContext:
+    fsGroup: 1000
+    runAsGroup: 1000
+    runAsUser: 1000
+    runAsNonRoot: true
+  containers:
+    - name: sandbox
+      image: us-central1-docker.pkg.dev/gke-demos-345619/kode-gopher-dev/kode-gopher-sandbox:measure
+      command: ["sleep", "infinity"]
+      resources:
+        requests: {cpu: "100m", memory: "256Mi"}
+        limits: {cpu: "2", memory: "2Gi"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        seccompProfile: {type: RuntimeDefault}
+      volumeMounts:
+        - {name: mb, mountPath: /mb}
+  volumes:
+    - name: mb
+      configMap:
+        name: measure-build
+        items:
+          - {key: measure.sh, path: measure.sh}
+          - {key: hello.go, path: progs/hello/main.go}
+          - {key: gcs.go, path: progs/gcs/main.go}
+          - {key: k8s.go, path: progs/k8s/main.go}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gvisor-big
+  namespace: kg-measure
+spec:
+  runtimeClassName: gvisor
+  nodeSelector:
+    sandbox.gke.io/runtime: gvisor
+  tolerations:
+    - key: sandbox.gke.io/runtime
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+  securityContext:
+    fsGroup: 1000
+    runAsGroup: 1000
+    runAsUser: 1000
+    runAsNonRoot: true
+  containers:
+    - name: sandbox
+      image: us-central1-docker.pkg.dev/gke-demos-345619/kode-gopher-dev/kode-gopher-sandbox:measure
+      command: ["sleep", "infinity"]
+      resources:
+        requests: {cpu: "2", memory: "4Gi"}
+        limits: {cpu: "2", memory: "4Gi"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        seccompProfile: {type: RuntimeDefault}
+      volumeMounts:
+        - {name: mb, mountPath: /mb}
+  volumes:
+    - name: mb
+      configMap:
+        name: measure-build
+        items:
+          - {key: measure.sh, path: measure.sh}
+          - {key: hello.go, path: progs/hello/main.go}
+          - {key: gcs.go, path: progs/gcs/main.go}
+          - {key: k8s.go, path: progs/k8s/main.go}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: runc-big
+  namespace: kg-measure
+spec:
+  securityContext:
+    fsGroup: 1000
+    runAsGroup: 1000
+    runAsUser: 1000
+    runAsNonRoot: true
+  containers:
+    - name: sandbox
+      image: us-central1-docker.pkg.dev/gke-demos-345619/kode-gopher-dev/kode-gopher-sandbox:measure
+      command: ["sleep", "infinity"]
+      resources:
+        requests: {cpu: "2", memory: "4Gi"}
+        limits: {cpu: "2", memory: "4Gi"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        seccompProfile: {type: RuntimeDefault}
+      volumeMounts:
+        - {name: mb, mountPath: /mb}
+  volumes:
+    - name: mb
+      configMap:
+        name: measure-build
+        items:
+          - {key: measure.sh, path: measure.sh}
+          - {key: hello.go, path: progs/hello/main.go}
+          - {key: gcs.go, path: progs/gcs/main.go}
+          - {key: k8s.go, path: progs/k8s/main.go}

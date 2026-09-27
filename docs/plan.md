@@ -132,24 +132,26 @@ What carries forward into slice 7:
 - delivering read-only artifacts to sandbox pods via initContainer → emptyDir, because Autopilot rejects `image:` volumes;
 - the image-size numbers.
 
-## Slice 7 — fast compiled path (measure first)
+## Slice 7 — fast compiled path
 
-Goal: cut compiled-path latency (~5-30 s warm, ~30-55 s cold) without giving up the Go toolchain as the source of truth. The curated package set is fixed and known, so most of each build is work that could be done once, ahead of time.
+Goal: cut compiled-path latency on GKE + gVisor without giving up the Go toolchain as the source of truth.
 
-**Gate — measure before building anything.** Inside a gVisor sandbox pod on GKE, time `go build` for a stdlib snippet, a GCS snippet and a client-go snippet under three conditions:
-1. today's prewarmed image;
-2. a `GOCACHE` fully populated for the curated set, at the exact toolchain, flags and module versions the sandbox uses;
-3. (2) plus `-trimpath` and a pinned, vendored module graph, so `go mod tidy` is not on the hot path.
+**Gate — measured ✅ 2026-09-27** (`docs/decisions.md > Slice 7 gate`, harness in `scripts/measure-build/`):
+- **The prewarmed `$GOCACHE` already works.** Only the snippet's own package compiles.
+- **A warm `tidy` + `build` costs ~7-8 s under gVisor** (~3.5 s without gVisor), mostly linking plus gVisor filesystem overhead.
+- **Slice 1.7's ~55 s came from a stale GHCR image** that predates the lockfile bootstrap. The cache missed, and GCS builds took ~70 s. client-go builds OOM at 4 GiB.
 
-Also split out how much time goes to `go mod tidy`, compile, link, and gVisor filesystem overhead, since gVisor may dominate. Decide the scope below from those numbers.
+**Scope:**
+- **Image publishing that can't go stale.** A CI workflow builds and pushes `kode-gopher-sandbox` on changes to `sandbox/`, `internal/prewarm/`, `internal/executor/` or `internal/curated/`, tagged by commit. The GKE overlay pins the tag or digest, replacing `:latest` + `imagePullPolicy: Always`. Add a startup check in the executor (or smoketest) that fails clearly if `/opt/kode-gopher-base/go.mod` is missing.
+- **Skip `go mod tidy` when the lockfile already covers every import.** Try `go build` directly on the bootstrapped `go.mod`, and fall back to tidy only when the build reports a missing module, or when `extra_imports` or a caller `go.mod` is present. Saves 0.5-2.5 s under gVisor.
+- **`-ldflags='-s -w'`** on the snippet build. Saves 0.6-1 s.
+- **Guard against cache-miss blowups**: warn in the tool result when tidy moved a lockfile-pinned version, since that means a slow, memory-hungry rebuild. Raise the sandbox memory limit if client-go-scale rebuilds must succeed (>4 GiB under gVisor).
+- **Investigate, measure first**: gVisor filesystem options for the read-only cache layers (the remaining ~3 s).
 
-**Candidate scope (depending on the gate):**
-- Ship the pre-populated `GOCACHE` for the curated set, either baked into the sandbox image or delivered as a read-only pack using the slice-6 initContainer pattern and copied into a writable cache dir.
-- Skip `go mod tidy` when the snippet imports only curated packages. Use a fixed, pre-resolved `go.mod`/`go.sum`, and fall back to tidy only for `extra_imports`.
-- Cheaper link: `-ldflags=-s -w`, and see whether it is measurably faster.
-- Revisit the `$GOCACHE` PVC item below if cross-pod sharing still matters after this.
-
-**Pass criteria (to be set from the gate):** warm-call latency target for stdlib and GCS snippets on GKE+gVisor, with no change in correctness, since output still comes from the real toolchain.
+**Pass criteria:**
+- `scripts/smoketest-gke.sh` on a fresh cluster from the CI-published image: GCS snippet end to end under 12 s warm (today's measured build floor ~7 s under gVisor, plus the agent-sandbox round trips).
+- A curated-only snippet runs no `go mod tidy`; a snippet with `extra_imports` still works.
+- The published image and the executor can't drift: the image tag in the overlay matches a CI build of the same commit.
 
 ## Critical files for MVP (slice 0 + slice 1)
 
@@ -166,6 +168,6 @@ These are what to create first; everything else is dead weight until the loop wo
 - **Native 3LO OAuth flow** (`kode-gopher auth login`). Deferred until a use case requires it (e.g., headless server with no developer workstation).
 - **OAuth client distribution** if 3LO is added. Likely "BYO required, plus `--use-gcloud-adc` escape hatch".
 - **Multi-tenancy**. Current design is one MCP server process per credential context. A SaaS deployment would need per-request session pools and per-end-user credential plumbing. **Folded into slice 5** if/when HTTP transport gets a multi-tenant shape.
-- **`$GOCACHE` PVC** for cross-pod persistence. Prewarm covers most of the value; revisit after slice 7's measurements (a pre-populated, shipped `GOCACHE` may make a PVC unnecessary).
+- **`$GOCACHE` PVC** for cross-pod persistence. Prewarm covers most of the value; slice 7's measurements show the shipped `GOCACHE` already hits fully, so a PVC would only help cache-miss builds (`extra_imports` moving versions).
 - **Sandbox egress filtering**. Delegated to the agent-sandbox controller: `SandboxTemplate.spec.networkPolicy` (with `networkPolicyManagement: Managed`) generates a shared NetworkPolicy per template. On GKE Autopilot's Dataplane V2 (Cilium), FQDN-based egress rules are natively supported — no ipranges-refresh CronJob needed. Non-Cilium CNIs get CIDR-only rules; document CNI requirements in README rather than shipping our own filtering layer.
 - **Non-GCP tool surface**. If we ever want to give the sandbox access to capabilities outside the GCP SDK (e.g., a "secrets" tool), we'll need to add the host↔sandbox RPC bridge we deliberately skipped. Add only when there's a real reason.
