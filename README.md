@@ -24,7 +24,7 @@ Planned slices in [`docs/plan.md`](./docs/plan.md):
 - **Slice 3** — full GKE deployment story (formalize Artifact Registry push, Workload Identity binding docs; largely done opportunistically).
 - **Slice 5** — HTTP/SSE transport. Scope gated on five explicit design questions (session topology, auth, per-end-user creds, streaming, deployment topology).
 - **Slice 6** — Yaegi (interpreter) runtime. **Shelved**: packaging worked, but the interpreter silently produces wrong output for common Go idioms (see `docs/decisions.md`). The PoC stays in `experiments/yaegi-poc/`.
-- **Slice 7** — fast compiled path: measure, then ship a pre-populated `GOCACHE` for the curated set and take `go mod tidy` off the hot path.
+- **Slice 7** — fast compiled path. Measured: a warm build under gVisor is ~7-8 s, and the ~55 s seen on GKE came from a stale published sandbox image. Scope: CI-published, pinned sandbox image; skip `go mod tidy` for curated-only snippets; stripped links.
 
 ## Try it locally
 

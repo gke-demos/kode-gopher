@@ -80,7 +80,7 @@ Until that slice lands, everything in this document assumes stdio.
 
 The sandbox runs snippets with the real Go toolchain. The pod has the toolchain plus a prewarmed `$GOCACHE`/`$GOMODCACHE` for the curated GCP packages, and each `execute_go_code` call runs `go mod tidy && go build -o .kode-gopher/bin/run . && ./bin/run`. That is three `Execute`s on the same session, with `/app` reset between calls but the caches surviving.
 
-End-to-end latency is dominated by the compile step: ~5 s warm on kind, ~30 s warm on GKE Autopilot, and 30-60 s for cold first calls. The sandbox image is ~2.2 GB (toolchain + prewarmed cache + base). Any pure-Go import works: the curated set is a performance optimization, not a correctness boundary. Cutting the latency is slice 7 (`docs/plan.md`).
+End-to-end latency is dominated by the compile step: ~5 s warm on kind. On GKE Autopilot + gVisor a warm `tidy` + `build` measures ~7-8 s; the ~55 s seen earlier came from a stale published image whose cache missed (`docs/decisions.md > Slice 7 gate`). The sandbox image is ~2.2 GB (toolchain + prewarmed cache + base). Any pure-Go import works: the curated set is a performance optimization, not a correctness boundary. Cutting the latency is slice 7 (`docs/plan.md`).
 
 An interpreted runtime (Yaegi) was prototyped as slice 6 and shelved: it produces silently wrong output for common idioms, including `json.Marshal` of snippet-defined structs. See `docs/decisions.md > Differential corpus`.
 

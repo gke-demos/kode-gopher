@@ -733,3 +733,45 @@ Options, pending decision:
 3. **Fix yaegi.** The X-prefix field export is architectural: it's how yaegi builds reflect types at runtime. High effort on a lightly maintained codebase.
 
 Recommendation: 1, measuring the warm-cache compile latency first. If it gets to a few seconds, yaegi's remaining speed advantage doesn't justify its correctness risk.
+
+## Slice 7 gate: where compiled-path latency goes — 2026-09-27
+
+Slice 1.7 measured ~55 s per `kode-gopher exec` on GKE Autopilot against ~5 s on kind, and guessed at gVisor, Autopilot CPU accounting and cold filesystems. We measured the build phases directly with `scripts/measure-build/`:
+- programs: stdlib-only, GCS, and client-go + GKE API;
+- phases: `go mod tidy`, then `go build` with `-debug-trace` for per-action timing and cache misses;
+- two rounds, in a fresh work dir bootstrapped exactly like the executor does it;
+- environments: local Docker, and three GKE Autopilot pods on the sandbox image built from `sandbox/Dockerfile` at `main`.
+
+Build time in ms, round 2 (round 1 is within noise except where noted):
+
+| | local runc, 2 CPU | GKE runc, 2 CPU | GKE gVisor, 2 CPU | GKE gVisor, today's 100m req / 2 CPU limit |
+|---|---|---|---|---|
+| stdlib `tidy` + `build` | 49 + 253 | 101 + 495 | 536 + 592 | 570 + 709 |
+| GCS `tidy` + `build` | 147 + 3240 | 107 + 4039 | 819 + 6059 | 831 + 5976 |
+| client-go `tidy` + `build` | 93 + 3288 | 183 + 6663 | 725 + 6807 | 731 + 7113 |
+| GCS build, `-ldflags='-s -w'`, no tidy | 2520 | 5327 | 5067 | 5096 |
+
+Round 1 `tidy` under gVisor is 1-2.5 s (first touch of the module cache).
+
+What the traces show:
+- **The prewarmed `$GOCACHE` works.** In every environment only the snippet's own package is compiled; every dependency is a cache hit.
+- **Linking is the biggest single cost**, 1.7-2.6 s for GCS and client-go programs, and about the same under gVisor. `-s -w` saves 0.6-1 s of it.
+- **gVisor roughly doubles a warm build**, from ~3.5 to ~6.5 s. The extra time is filesystem work, not CPU: package loading goes from ~0.4 to ~1.2 s, and cache checks across ~1000 packages add ~2 s. `go mod tidy` goes from ~0.1 to ~0.7 s.
+- **Today's small CPU request doesn't matter on an idle node.** It could under contention; that wasn't tested.
+
+So a warm call on GKE + gVisor costs ~7-8 s of `tidy` + `build`, not 55 s.
+
+**The missing ~45 s is a stale image.** `ghcr.io/gke-demos/kode-gopher-sandbox:latest`, which the GKE overlay pulls, predates the lockfile bootstrap (`/opt/kode-gopher-base/go.mod`). Without that bootstrap, `go mod tidy` on an empty `go.mod` resolves newer versions than prewarm compiled, and the cache misses. We reproduced this under gVisor with the `main` image by starting from `go mod init`:
+- **GCS: 9.3-9.9 s `tidy` + 59-60 s `build`, twice.**
+- **client-go: OOM-killed at both 2 GiB and 4 GiB.** Under gVisor the OOM takes down the whole sandbox container.
+
+That matches slice 1.7's ~55 s. The current executor also runs `cp /opt/kode-gopher-base/go.mod ...` under `set -e`, so with the GHCR image as published it would presumably fail the tidy phase outright. That wasn't tested end to end, because this cluster has no agent-sandbox addon.
+
+Not measured: the agent-sandbox layer (claim, router, four `Execute` round trips, `/app` reset). On kind it's ~1.5 s (5 s total against ~3.5 s of build).
+
+### Consequences for slice 7
+1. **Republish the sandbox image, and make it impossible to go stale.** This is most of the win: 55 s → ~8 s. Build and push from CI on changes to `sandbox/`, `internal/prewarm/` or `internal/executor/`. Pin the GKE overlay to an immutable tag or digest rather than `:latest` + `Always`.
+2. **Skip `go mod tidy` when every import is covered by the prewarm lockfile.** Saves 0.5-2.5 s under gVisor. Tidy stays for `extra_imports` and caller-supplied `go.mod`.
+3. **Link with `-ldflags='-s -w'`.** Saves 0.6-1 s. Snippet binaries are run once and discarded, so debug info buys nothing.
+4. **gVisor file-access overhead (~3 s) is the remaining floor.** Worth trying: gVisor's overlay/rootfs caching options, or keeping `$GOCACHE` on a medium gVisor handles faster. Measure before committing.
+5. **Cache misses can crash the sandbox.** A snippet whose `extra_imports` move a shared dependency's version off the lockfile recompiles large trees, and client-go doesn't fit in 4 GiB. Either raise the limit or make `extra_imports` version changes visible, e.g. warn when tidy changes a lockfile-pinned version.
