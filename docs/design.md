@@ -105,12 +105,10 @@ A native `kode-gopher auth login` flow would require us to either embed an OAuth
 
 `k8s.io/client-go` (typed `kubernetes` clientset, `dynamic`, `tools/clientcmd`, `tools/watch`, and `apimachinery/pkg/apis/meta/v1`) is in the curated prewarmed set. The reachability story splits by *which* cluster a snippet is trying to talk to.
 
-### The sandbox's own cluster (the common case)
-`rest.InClusterConfig()` works when the pod's KSA token is mounted. Note: the agent-sandbox extensions controller (`extensions/controllers/utils.go`) applies a "secure by default" that sets `automountServiceAccountToken=false` unless the template overrides it. Our `manifests/base/sandboxtemplate.yaml` explicitly sets it to `true` — we accept mounting the token as the cost of the "own cluster access" capability. Without that override, the snippet would fail at `open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory`. **On GKE this no longer holds:** since the addon's move to v1beta1 (2026-09-29), its admission policy rejects templates that mount the token. The GKE overlay sets it to `false`, so in-cluster access works on kind only (`docs/decisions.md > Slice 7: fast path`).
+### The sandbox's own cluster
+There is no in-cluster path. Sandbox pods mount no KSA token (`automountServiceAccountToken: false` in `manifests/base/sandboxtemplate.yaml`), so `rest.InClusterConfig()` fails. The template's network policy also blocks private ranges, which covers the API server's cluster address. This is agent-sandbox's secure default, and the GKE addon's admission policy rejects templates that mount the token anyway. A snippet reaches its own cluster the same way it reaches any other GKE cluster (below), through the DNS endpoint with Google credentials. That makes Kubernetes RBAC for the caller's Google identity the only grant that matters, and the sandbox KSA stays powerless. It also keeps kind and GKE the same (`docs/decisions.md > Slice 8`).
 
-`client.Discovery().ServerVersion()` needs no RBAC (the `/version` endpoint is unauthenticated). Anything typed — `Pods().List(...)`, `Deployments().Get(...)`, `.Watch(...)` — additionally needs a Role/RoleBinding (or ClusterRole/ClusterRoleBinding) granted to the sandbox KSA. Today the manifests grant nothing beyond the KSA's default. Grant sparingly, per-namespace when possible; a blanket `cluster-admin` binding would erase the sandbox boundary.
-
-### Other GKE clusters
+### Any GKE cluster
 The snippet builds a `rest.Config` manually. Recommended pattern:
 
 1. Use `cloud.google.com/go/container/apiv1` (curated) to `GetCluster` (or `ListClusters` + pick) on the target — this returns endpoint metadata under `ControlPlaneEndpointsConfig`, plus `MasterAuth.ClusterCaCertificate` and location.
@@ -208,16 +206,14 @@ kode-gopher/
 ├── sandbox/
 │   └── Dockerfile           # FROM upstream go-runtime-sandbox image; COPY prewarm; RUN it
 ├── manifests/
-│   ├── base/
-│   │   ├── sandboxtemplate.yaml
+│   ├── base/                # works on kind as is
+│   │   ├── sandboxtemplate.yaml # v1beta1; network policy; no KSA token
+│   │   ├── warmpool.yaml        # SandboxWarmPool go-runtime-pool, which claims name
+│   │   ├── sandbox-router.yaml  # upstream Go router, DNS-only
 │   │   └── kustomization.yaml
-│   ├── overlays/gke/
-│   │   ├── workloadidentity.yaml   # KSA <-> GSA binding template
-│   │   ├── networkpolicy.yaml      # Google IP ranges + metadata + oauth2/sts
-│   │   ├── ipranges-refresh.yaml   # weekly CronJob; updates a ConfigMap
-│   │   └── kustomization.yaml
-│   ├── warmpool.yaml        # SandboxWarmPool shadow-pool-go-runtime-template: replicas 2, OnReplenish
-│   └── computeclass.yaml    # ComputeClass kode-gopher-sandbox: C3 first
+│   └── overlays/gke/
+│       ├── computeclass.yaml    # ComputeClass kode-gopher-sandbox: C3 first
+│       └── kustomization.yaml   # gVisor, pinned image, pool of 2
 ├── docs/
 │   ├── design.md            # this document
 │   └── plan.md              # the build sequence

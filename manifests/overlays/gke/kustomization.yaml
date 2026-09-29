@@ -22,24 +22,13 @@
 #     immutable, so imagePullPolicy: IfNotPresent. Never go back to a
 #     floating :latest: a stale :latest was what made GKE calls ~55 s
 #     (docs/decisions.md > Slice 7 gate).
-#   - /spec/networkPolicyManagement: Managed — required by the
-#     Autopilot addon for the controller to actually materialize pods.
-#   - /spec/networkPolicy: the managed default only admits ingress from
-#     app=sandbox-router in agent-sandbox-system, and our router runs
-#     in this namespace. Egress is the addon's default (internet only,
-#     no private ranges) plus DNS: pods resolve through NodeLocal
-#     DNSCache at 169.254.20.10, which the default blocks, so nothing
-#     resolved and every GCP call hung.
 #   - runtimeClassName: gvisor + matching nodeSelector + toleration —
 #     pin the sandbox pod to GKE's gVisor node pool. Autopilot taints
 #     those nodes; pods without the toleration won't schedule.
 #   - compute-class: kode-gopher-sandbox (computeclass.yaml) — C3-first
 #     nodes. Builds are CPU-bound under gVisor and ~3x faster than on
 #     the default class's E2-class nodes.
-#   - automountServiceAccountToken: false — the addon's
-#     ValidatingAdmissionPolicy sandbox-core-policy rejects templates
-#     that mount the KSA token (seen on a fresh 1.36 cluster,
-#     2026-09-29), so rest.InClusterConfig() doesn't work on GKE.
+#   - Warm pool at 2 replicas (base: 1).
 #   - Pod- and container-level securityContext — required by
 #     Autopilot's strict pod-security policy (non-root, no privilege
 #     escalation, dropped capabilities, RuntimeDefault seccomp).
@@ -54,8 +43,6 @@ namespace: codemode
 
 resources:
   - ../../base
-  - warmpool.yaml
-  - sandbox-router.yaml
   - computeclass.yaml
 
 patches:
@@ -63,51 +50,6 @@ patches:
       kind: SandboxTemplate
       name: go-runtime-template
     patch: |-
-      - op: replace
-        path: /spec/podTemplate/spec/automountServiceAccountToken
-        value: false
-      - op: add
-        path: /spec/networkPolicyManagement
-        value: Managed
-      - op: add
-        path: /spec/networkPolicy
-        value:
-          ingress:
-            - from:
-                - podSelector:
-                    matchLabels:
-                      app: sandbox-router
-              ports:
-                - port: 8888
-                  protocol: TCP
-          egress:
-            - to:
-                - ipBlock:
-                    cidr: 169.254.20.10/32
-                - namespaceSelector:
-                    matchLabels:
-                      kubernetes.io/metadata.name: kube-system
-                  podSelector:
-                    matchLabels:
-                      k8s-app: kube-dns
-              ports:
-                - port: 53
-                  protocol: UDP
-                - port: 53
-                  protocol: TCP
-            - to:
-                - ipBlock:
-                    cidr: 0.0.0.0/0
-                    except:
-                      - 10.0.0.0/8
-                      - 172.16.0.0/12
-                      - 192.168.0.0/16
-                      - 169.254.0.0/16
-                - ipBlock:
-                    cidr: ::/0
-                    except:
-                      - fc00::/7
-                      - fe80::/10
       - op: replace
         path: /spec/podTemplate/spec/containers/0/image
         value: ghcr.io/gke-demos/kode-gopher/sandbox:p-c158bbe9970d
@@ -148,3 +90,10 @@ patches:
           runAsGroup: 1000
           runAsUser: 1000
           runAsNonRoot: true
+  - target:
+      kind: SandboxWarmPool
+      name: go-runtime-pool
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2

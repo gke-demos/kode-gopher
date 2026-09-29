@@ -45,9 +45,7 @@ Environment: `$GOOGLE_CLOUD_PROJECT` is forwarded into the run phase. ADC lands 
 
 ## Kubernetes API access
 
-For the sandbox's OWN cluster: `rest.InClusterConfig()` works — the pod's KSA token is mounted. The default KSA has no RBAC bindings; typed calls (Pods().List, etc.) will 403 unless a Role is granted.
-
-For OTHER GKE clusters: use `container/apiv1` `ListClusters`/`GetCluster` to find the cluster, prefer `c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint` over `c.Endpoint` (the DNS endpoint routes through Google's control plane, works for private-endpoint clusters, uses system-trust TLS), and wrap an `oauth2.Transport` sourced from `google.DefaultTokenSource` as `rest.Config.WrapTransport`.
+The sandbox has no Kubernetes service-account token, so `rest.InClusterConfig()` fails, and the cluster's internal addresses (API server, cluster Services) are blocked. Reach every GKE cluster, including the one the sandbox runs in, through Google's API with the forwarded credentials: use `container/apiv1` `ListClusters`/`GetCluster` to find the cluster, prefer `c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint` over `c.Endpoint` (the DNS endpoint routes through Google's control plane, works for private-endpoint clusters, uses system-trust TLS), and wrap an `oauth2.Transport` sourced from `google.DefaultTokenSource` as `rest.Config.WrapTransport`. What the snippet may do in the cluster is whatever Kubernetes RBAC grants the credentials' Google identity.
 
 ## Failure surfaces
 

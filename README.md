@@ -16,7 +16,7 @@ Pre-alpha. Shipped through Slice 4 of [`docs/plan.md`](./docs/plan.md):
   One long-lived `sandbox.Session` per server process; mutex-serialized tool calls; `/app` reset between calls (caches survive); retry-once on `ErrSessionDead` so a pod eviction mid-call self-heals.
 - **Sandbox backend**: own thin wrapper at `internal/sandbox/` over `sigs.k8s.io/agent-sandbox/clients/go/sandbox`. Prewarmed image (`ghcr.io/gke-demos/kode-gopher/sandbox`, published by CI under a content-derived tag the GKE overlay pins; the in-pod server is our own `cmd/sandbox-server`) bakes GCP SDK + `k8s.io/client-go` into `$GOCACHE`/`$GOMODCACHE`; the tidied prewarm `go.mod` is preserved at `/opt/kode-gopher-base/` and the executor bootstraps each snippet's `/app/go.mod` from it so version selection is reproducible and builds cache-hit. `PerAttemptTimeout` is 3 minutes (was implicit 60 s from the upstream default).
 - **Credentials** unified as `creds.Source` — Materialize forwards ADC + env into the sandbox; Identity parses ADC and calls the OAuth2 userinfo endpoint for `authorized_user` creds (cached). `Workload` implementation is stubbed until we run in-cluster.
-- **Substrates**: verified end-to-end on local `kind` and on a real GKE Autopilot cluster with the agent-sandbox addon + gVisor isolation. Both the direct-CLI and the MCP paths diff cleanly against `gcloud storage buckets list`; the MCP smoketest also exercises the k8s and multi-file paths.
+- **Substrates**: verified end-to-end on local `kind` and on a real GKE Autopilot cluster with the agent-sandbox addon + gVisor isolation. Both the direct-CLI and the MCP paths diff cleanly against `gcloud storage buckets list`; the MCP smoketest also exercises the GKE-composition and multi-file paths.
 - **Generated LLM prompt**: `make prompts` regenerates `internal/prompts/{system.md,description.go}` from `internal/curated.Packages`, keeping the LLM system prompt and the `execute_go_code` tool description in lockstep with the curated set.
 
 Planned slices in [`docs/plan.md`](./docs/plan.md):
@@ -24,6 +24,7 @@ Planned slices in [`docs/plan.md`](./docs/plan.md):
 - **Slice 3** — full GKE deployment story (formalize Artifact Registry push, Workload Identity binding docs; largely done opportunistically).
 - **Slice 5** — HTTP/SSE transport. Scope gated on five explicit design questions (session topology, auth, per-end-user creds, streaming, deployment topology).
 - **Slice 6** — Yaegi (interpreter) runtime. **Shelved**: packaging worked, but the interpreter silently produces wrong output for common Go idioms (see `docs/decisions.md`). The PoC stays in `experiments/yaegi-poc/`.
+- **Slice 8** — agent-sandbox v1.0: v1.0.4 client, v1beta1 manifests, claims on a named warm pool, upstream's Go sandbox-router on both kind and GKE. Sandboxes get no KSA token anywhere; snippets reach GKE clusters, including their own, with forwarded Google credentials.
 - **Slice 7** — fast compiled path. Measured: a warm build under gVisor is ~7-8 s, and the ~55 s seen on GKE came from a stale published sandbox image. Shipped: our own CI-published, pinned sandbox image; `go mod tidy` only when the lockfile misses; C3-first sandbox nodes. The GCS snippet is ~4.4 s end to end on GKE.
 
 ## Try it locally
@@ -88,8 +89,8 @@ All smoketests are idempotent and reuse infra across runs.
 | [`internal/prewarm`](./internal/prewarm) | standalone Go module imported at image build to populate `$GOCACHE`; committed `go.mod`+`go.sum` pin versions |
 | [`internal/prompts`](./internal/prompts) | generated `system.md` (LLM system prompt) + `description.go` (execute_go_code tool description); regenerate via `make prompts` |
 | [`sandbox/Dockerfile`](./sandbox/Dockerfile) | the sandbox image: Go toolchain, `sandbox-server`, prewarmed cache |
-| [`manifests/base`](./manifests/base) | SandboxTemplate kustomize base (kind-compatible) |
-| [`manifests/overlays/gke`](./manifests/overlays/gke) | GKE Autopilot overlay: gVisor + securityContext + Workload Identity + SandboxWarmPool + per-namespace sandbox-router + C3-first ComputeClass |
+| [`manifests/base`](./manifests/base) | kustomize base (kind-compatible): v1beta1 SandboxTemplate with network policy, SandboxWarmPool `go-runtime-pool`, per-namespace sandbox-router |
+| [`manifests/overlays/gke`](./manifests/overlays/gke) | GKE Autopilot overlay: gVisor + securityContext + pinned image + pool of 2 + C3-first ComputeClass |
 | [`scripts/smoketest-kind.sh`](./scripts/smoketest-kind.sh) | local-kind direct-CLI verification |
 | [`scripts/smoketest-gke.sh`](./scripts/smoketest-gke.sh) | GKE Autopilot direct-CLI verification |
 | [`scripts/smoketest-mcp.sh`](./scripts/smoketest-mcp.sh) | MCP-layer verification against either substrate |

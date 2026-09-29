@@ -37,14 +37,16 @@ import (
 	sb "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
-// Options configures Open. Required: Template. Everything else has a
+// Options configures Open. Required: WarmPool. Everything else has a
 // default appropriate for our local kind / GKE Autopilot setups.
 type Options struct {
 	// Namespace where the SandboxClaim is created. Default: "default".
 	Namespace string
 
-	// Template is the SandboxTemplate name to claim from. Required.
-	Template string
+	// WarmPool is the SandboxWarmPool to claim from. Required: v1beta1
+	// claims name a pool, not a template. With no ready sandbox in the
+	// pool, the controller cold-starts one from the pool's template.
+	WarmPool string
 
 	// ClaimName, if non-empty, reattaches to that existing sandbox
 	// rather than creating a new one. Useful for development across
@@ -124,8 +126,8 @@ const (
 // Open creates a Session either by creating a new sandbox (ClaimName
 // empty) or reattaching to an existing claim.
 func Open(ctx context.Context, opts Options) (*Session, error) {
-	if opts.Template == "" {
-		return nil, fmt.Errorf("sandbox: Template is required")
+	if opts.WarmPool == "" {
+		return nil, fmt.Errorf("sandbox: WarmPool is required")
 	}
 	if opts.Namespace == "" {
 		opts.Namespace = "default"
@@ -136,9 +138,13 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		perAttempt = defaultPerAttemptTimeout
 	}
 	clientOpts := sb.Options{
-		TemplateName:      opts.Template,
+		WarmPoolName:      opts.WarmPool,
 		Namespace:         opts.Namespace,
 		PerAttemptTimeout: perAttempt,
+		// Route by the sandbox's headless Service, not the pod IP the
+		// client read when it opened. A restarted pod gets a new IP, and
+		// the router kept dialing the old one (502, connection refused).
+		DisablePodIPRouting: true,
 	}
 	if opts.SandboxReadyTimeout > 0 {
 		clientOpts.SandboxReadyTimeout = opts.SandboxReadyTimeout
@@ -168,7 +174,7 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 			return nil, fmt.Errorf("sandbox: reattach %q: %w", opts.ClaimName, err)
 		}
 	} else {
-		box, err = client.CreateSandbox(ctx, opts.Template, opts.Namespace)
+		box, err = client.CreateSandbox(ctx, opts.WarmPool, opts.Namespace)
 		if err != nil {
 			return nil, fmt.Errorf("sandbox: create sandbox: %w", err)
 		}

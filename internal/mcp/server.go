@@ -42,11 +42,11 @@ const Version = "0.1.0"
 // Config is everything Server needs to know to open and drive a
 // sandbox.Session. Zero-value fields fall back to sensible defaults.
 type Config struct {
-	// Namespace is the k8s namespace that holds the SandboxTemplate
+	// Namespace is the k8s namespace that holds the SandboxWarmPool
 	// and where the SandboxClaim is created.
 	Namespace string
-	// Template is the SandboxTemplate name to claim from.
-	Template string
+	// WarmPool is the SandboxWarmPool name to claim from.
+	WarmPool string
 	// Claim, if non-empty, reattaches to an existing sandbox instead
 	// of creating a new one on first tool call.
 	Claim string
@@ -77,8 +77,8 @@ func (c *Config) applyDefaults() {
 	if c.Namespace == "" {
 		c.Namespace = "default"
 	}
-	if c.Template == "" {
-		c.Template = "go-runtime-template"
+	if c.WarmPool == "" {
+		c.WarmPool = "go-runtime-pool"
 	}
 	if c.OpenTimeout == 0 {
 		c.OpenTimeout = 5 * time.Minute
@@ -156,10 +156,10 @@ func (s *Server) ensureSession(ctx context.Context) (*sandbox.Session, error) {
 	}
 	openCtx, cancel := context.WithTimeout(ctx, s.cfg.OpenTimeout)
 	defer cancel()
-	log.Printf("opening sandbox (namespace=%s template=%s claim=%q context=%q)", s.cfg.Namespace, s.cfg.Template, s.cfg.Claim, s.cfg.KubeContext)
+	log.Printf("opening sandbox (namespace=%s pool=%s claim=%q context=%q)", s.cfg.Namespace, s.cfg.WarmPool, s.cfg.Claim, s.cfg.KubeContext)
 	sess, err := sandbox.Open(openCtx, sandbox.Options{
 		Namespace:   s.cfg.Namespace,
-		Template:    s.cfg.Template,
+		WarmPool:    s.cfg.WarmPool,
 		ClaimName:   s.cfg.Claim,
 		KubeContext: s.cfg.KubeContext,
 	})
