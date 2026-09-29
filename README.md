@@ -14,7 +14,7 @@ Pre-alpha. Shipped through Slice 4 of [`docs/plan.md`](./docs/plan.md):
   - `gcp_auth_status()` — report the sandbox's credential identity (mode, credential type, email, project).
   - `lookup_package_docs(package, symbol?)` — `go doc` for curated packages against the prewarmed cache, subsecond.
   One long-lived `sandbox.Session` per server process; mutex-serialized tool calls; `/app` reset between calls (caches survive); retry-once on `ErrSessionDead` so a pod eviction mid-call self-heals.
-- **Sandbox backend**: own thin wrapper at `internal/sandbox/` over `sigs.k8s.io/agent-sandbox/clients/go/sandbox`. Prewarmed image (`ghcr.io/gke-demos/kode-gopher-sandbox:latest`) bakes GCP SDK + `k8s.io/client-go` into `$GOCACHE`/`$GOMODCACHE`; the tidied prewarm `go.mod` is preserved at `/opt/kode-gopher-base/` and the executor bootstraps each snippet's `/app/go.mod` from it so version selection is reproducible and builds cache-hit. `PerAttemptTimeout` is 3 minutes (was implicit 60 s from the upstream default).
+- **Sandbox backend**: own thin wrapper at `internal/sandbox/` over `sigs.k8s.io/agent-sandbox/clients/go/sandbox`. Prewarmed image (`ghcr.io/gke-demos/kode-gopher/sandbox`, published by CI under a content-derived tag the GKE overlay pins; the in-pod server is our own `cmd/sandbox-server`) bakes GCP SDK + `k8s.io/client-go` into `$GOCACHE`/`$GOMODCACHE`; the tidied prewarm `go.mod` is preserved at `/opt/kode-gopher-base/` and the executor bootstraps each snippet's `/app/go.mod` from it so version selection is reproducible and builds cache-hit. `PerAttemptTimeout` is 3 minutes (was implicit 60 s from the upstream default).
 - **Credentials** unified as `creds.Source` — Materialize forwards ADC + env into the sandbox; Identity parses ADC and calls the OAuth2 userinfo endpoint for `authorized_user` creds (cached). `Workload` implementation is stubbed until we run in-cluster.
 - **Substrates**: verified end-to-end on local `kind` and on a real GKE Autopilot cluster with the agent-sandbox addon + gVisor isolation. Both the direct-CLI and the MCP paths diff cleanly against `gcloud storage buckets list`; the MCP smoketest also exercises the k8s and multi-file paths.
 - **Generated LLM prompt**: `make prompts` regenerates `internal/prompts/{system.md,description.go}` from `internal/curated.Packages`, keeping the LLM system prompt and the `execute_go_code` tool description in lockstep with the curated set.
@@ -77,6 +77,7 @@ All smoketests are idempotent and reuse infra across runs.
 | [`docs/decisions.md`](./docs/decisions.md) | append-only log of judgment calls per slice |
 | [`cmd/kode-gopher`](./cmd/kode-gopher) | the CLI binary — subcommands `exec` and `serve` |
 | [`cmd/mcp-smoketest`](./cmd/mcp-smoketest) | programmatic MCP client; spawns `kode-gopher serve` and exercises `execute_go_code` end-to-end |
+| [`cmd/sandbox-server`](./cmd/sandbox-server) | the in-pod HTTP server (agent-sandbox runtime protocol on :8888), built into the sandbox image |
 | [`internal/mcp`](./internal/mcp) | MCP server + tool handlers (execute_go_code, gcp_auth_status, lookup_package_docs) |
 | [`internal/executor`](./internal/executor) | Build/Run/Fetch phases over a `sandbox.Session`; bootstraps `/app/go.mod` from the prewarm lockfile |
 | [`internal/sandbox`](./internal/sandbox) | our thin client over `sigs.k8s.io/agent-sandbox`; `KubeContext` + `PerAttemptTimeout` options; typed `ErrSessionDead` for retry-once at MCP layer |
@@ -86,7 +87,7 @@ All smoketests are idempotent and reuse infra across runs.
 | [`internal/curated`](./internal/curated) | canonical list of GCP + k8s.io/client-go packages prewarmed in the sandbox image; `go:generate` drives prompts regen |
 | [`internal/prewarm`](./internal/prewarm) | standalone Go module imported at image build to populate `$GOCACHE`; committed `go.mod`+`go.sum` pin versions |
 | [`internal/prompts`](./internal/prompts) | generated `system.md` (LLM system prompt) + `description.go` (execute_go_code tool description); regenerate via `make prompts` |
-| [`sandbox/Dockerfile`](./sandbox/Dockerfile) | extends `ghcr.io/gke-demos/go-runtime-sandbox:latest` with the prewarmed cache |
+| [`sandbox/Dockerfile`](./sandbox/Dockerfile) | the sandbox image: Go toolchain, `sandbox-server`, prewarmed cache |
 | [`manifests/base`](./manifests/base) | SandboxTemplate kustomize base (kind-compatible) |
 | [`manifests/overlays/gke`](./manifests/overlays/gke) | GKE Autopilot overlay: gVisor + securityContext + Workload Identity + SandboxWarmPool + per-namespace sandbox-router |
 | [`scripts/smoketest-kind.sh`](./scripts/smoketest-kind.sh) | local-kind direct-CLI verification |
@@ -97,7 +98,7 @@ All smoketests are idempotent and reuse infra across runs.
 ## Built on
 
 - [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) — SandboxClaim / SandboxTemplate / SandboxWarmPool CRDs, in-pod runtime, controller, and Go client (`sigs.k8s.io/agent-sandbox/clients/go/sandbox`).
-- [gke-demos/go-runtime-sandbox](https://github.com/gke-demos/go-runtime-sandbox) — the published sandbox image (`ghcr.io/gke-demos/go-runtime-sandbox:latest`) we extend as our base in `sandbox/Dockerfile`.
+- [gke-demos/go-runtime-sandbox](https://github.com/gke-demos/go-runtime-sandbox): where kode-gopher started. We used its image as our base until slice 7; `cmd/sandbox-server` now implements the same agent-sandbox runtime protocol.
 - [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk) — MCP server + client SDK.
 - [traefik/yaegi](https://github.com/traefik/yaegi) — only inside `experiments/yaegi-poc/` (standalone module, not pulled into the main build) as the interpreter behind the shelved Slice 6 PoC.
 

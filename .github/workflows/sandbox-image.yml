@@ -1,0 +1,84 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Builds the sandbox image and, on main, publishes it to GHCR under the
+# content-derived tag from scripts/sandbox-image-tag.sh (plus :latest).
+# The GKE overlay pins that tag; ci.yml fails PRs whose pin is stale.
+# Pull requests build without pushing, to catch a broken Dockerfile.
+name: sandbox-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - sandbox/**
+      - cmd/sandbox-server/**
+      - internal/prewarm/**
+      - scripts/sandbox-image-tag.sh
+      - .github/workflows/sandbox-image.yml
+  pull_request:
+    paths:
+      - sandbox/**
+      - cmd/sandbox-server/**
+      - internal/prewarm/**
+      - scripts/sandbox-image-tag.sh
+      - .github/workflows/sandbox-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/gke-demos/kode-gopher/sandbox
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compute tag
+        id: tag
+        run: echo "tag=$(scripts/sandbox-image-tag.sh)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags are content-derived, so an existing tag is already the right
+      # image (e.g. after a revert): just move :latest to it.
+      - name: Check for existing image
+        id: exists
+        if: github.event_name != 'pull_request'
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:${{ steps.tag.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Retag existing image as latest
+        if: steps.exists.outputs.exists == 'true'
+        run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:${{ steps.tag.outputs.tag }}"
+
+      - name: Build (and push on main)
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: sandbox/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+            ${{ env.IMAGE }}:latest

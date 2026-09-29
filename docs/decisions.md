@@ -765,7 +765,7 @@ So a warm call on GKE + gVisor costs ~7-8 s of `tidy` + `build`, not 55 s.
 - **GCS: 9.3-9.9 s `tidy` + 59-60 s `build`, twice.**
 - **client-go: OOM-killed at both 2 GiB and 4 GiB.** Under gVisor the OOM takes down the whole sandbox container.
 
-That matches slice 1.7's ~55 s. The current executor also runs `cp /opt/kode-gopher-base/go.mod ...` under `set -e`, so with the GHCR image as published it would presumably fail the tidy phase outright. That wasn't tested end to end, because this cluster has no agent-sandbox addon.
+That matches slice 1.7's ~55 s. The current executor also runs `cp /opt/kode-gopher-base/go.mod ...` under `set -e`, so with the GHCR image as published it fails the tidy phase outright (confirmed later the same day; see the next entry).
 
 Not measured: the agent-sandbox layer (claim, router, four `Execute` round trips, `/app` reset). On kind it's ~1.5 s (5 s total against ~3.5 s of build).
 
@@ -775,3 +775,31 @@ Not measured: the agent-sandbox layer (claim, router, four `Execute` round trips
 3. **Link with `-ldflags='-s -w'`.** Saves 0.6-1 s. Snippet binaries are run once and discarded, so debug info buys nothing.
 4. **gVisor file-access overhead (~3 s) is the remaining floor.** Worth trying: gVisor's overlay/rootfs caching options, or keeping `$GOCACHE` on a medium gVisor handles faster. Measure before committing.
 5. **Cache misses can crash the sandbox.** A snippet whose `extra_imports` move a shared dependency's version off the lockfile recompiles large trees, and client-go doesn't fit in 4 GiB. Either raise the limit or make `extra_imports` version changes visible, e.g. warn when tidy changes a lockfile-pinned version.
+
+## Slice 7: our own sandbox image, published by CI and pinned — 2026-09-29
+
+Fix for the stale image found at the slice 7 gate. While fixing it we dropped the last dependency on `gke-demos/go-runtime-sandbox`: its image was our base.
+
+- **Our own in-pod server: `cmd/sandbox-server`.** The upstream image contributed a Go toolchain, a uid 1000 user, some env, and `sandbox-server`: the HTTP server on :8888 that the agent-sandbox client (through the router) calls. The protocol belongs to agent-sandbox, not go-runtime-sandbox; its reference runtime is `examples/python-runtime-sandbox`. We implement all six endpoints: `GET /`, `POST /execute`, `POST /upload`, `GET /download/`, `/list/`, `/exists/`. We only call `/execute` and `/upload`, plus `/` from the readiness probe, but the stock client's `Read`/`List`/`Exists` also work. It's stdlib only:
+  - `sh -c` runs in its own process group, so a cancelled request kills compiler children too;
+  - a `WaitDelay` stops a backgrounded child from holding `/execute` open;
+  - a signal death reports 128+signal;
+  - each stream is capped at 4 MiB, keeping the response under the client's 16 MiB limit;
+  - uploads are written to a temp file and renamed into place;
+  - file endpoints go through `os.Root`, so neither `..` nor symlinks leave `/app`.
+  
+  Tests speak the client's wire format: percent-encoded paths with `/` as `%2F`, and multipart field `file`.
+- **The image is ours end to end.**
+  - Base images, pinned by digest: `golang:1.26.8-bookworm` for the toolchain and `debian:bookworm-slim` for the runtime. This is the same shape as upstream's image, without its 94 MB stdlib cache, which the prewarm makes redundant.
+  - The toolchain version is now a line in our Dockerfile. It used to be whatever upstream last pushed, and toolchain changes invalidate every prewarmed cache entry.
+  - `sandbox-server` builds as a throwaway module, so root `go.mod` changes don't feed the image tag.
+- **New package: `ghcr.io/gke-demos/kode-gopher/sandbox`.** The old `kode-gopher-sandbox` package is linked to `gke-demos/go-runtime-sandbox`: it inherited that from the base image's source label at first push, and was last updated 2026-05-21. Pushing there from this repo's `GITHUB_TOKEN` would need a UI-only "Manage Actions access" grant. A new package created by this repo's workflow is linked to this repo automatically. Like every new GHCR package it starts **private**, so flip it to public once after the first push (as in slice 1.7). The old package can be deleted after that.
+- **Content-derived tag.** `scripts/sandbox-image-tag.sh` hashes every tracked file under `sandbox/`, `cmd/sandbox-server/` and `internal/prewarm/`, giving a tag like `p-aa7c324c5cee`. A commit SHA can't work: the overlay would have to name the commit it lives in. With a hash of the inputs, the PR that changes the image also updates the pin (`make sandbox-pin`).
+- **`.github/workflows/sandbox-image.yml`**:
+  - on `main`, builds and pushes `:<tag>` and `:latest` to GHCR; if the tag already exists (e.g. after a revert), it only moves `:latest`;
+  - on PRs, builds without pushing.
+- **`.github/workflows/ci.yml`** (the repo's first CI) runs build, vet, test, `make prompts-check`, and `make sandbox-pin-check`. The pin check fails any PR whose overlay doesn't pin the current tag. CI would also have caught that the slice 7 gate commit broke `go build ./...`: its measurement programs were outside a `testdata/` dir, so they became packages of the root module. They're moved.
+- **The overlay pins the tag with `imagePullPolicy: IfNotPresent`**, replacing `:latest` + `Always`.
+- **The executor names the failure.** Against an image without `/opt/kode-gopher-base/go.mod`, the tidy phase now says so and points at the pin. Before, it failed with a bare `cp` error. Verified against the old published `:latest`, which fails this way: the current executor never worked with the image the GKE overlay pulled.
+
+**Known gap:** right after a merge that changes the image, the pinned tag doesn't exist until `sandbox-image` finishes (several minutes, since prewarm compiles the GCP SDK and client-go). Deploying in that window fails with an image pull error, not a wrong image.

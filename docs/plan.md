@@ -48,7 +48,7 @@ gcloud storage buckets list --format=json | jq '[.[] | {name, timeCreated}] | so
 **Scope**:
 - `internal/curated/packages.go`: canonical list of pre-cached GCP packages — `storage`, `compute`, `container` (GKE), `bigquery`, `pubsub`, `secretmanager`, `run`, `monitoring`, `logging`, `iam`, `resourcemanager`, plus `google.golang.org/api/option`.
 - `internal/prewarm/main.go`: imports each curated package, invokes a no-op constructor per service.
-- `sandbox/Dockerfile`: extends upstream go-runtime-sandbox image, copies the prewarm binary, runs it at build to populate `$GOCACHE` and `$GOMODCACHE`. Push to Artifact Registry.
+- `sandbox/Dockerfile`: extends upstream go-runtime-sandbox image (replaced by our own image in slice 7), copies the prewarm binary, runs it at build to populate `$GOCACHE` and `$GOMODCACHE`. Push to Artifact Registry.
 - `manifests/base/sandboxtemplate.yaml`: references the new image; `runtimeClassName: gvisor`.
 - `manifests/overlays/gke/workloadidentity.yaml`: KSA bound to a GSA with whatever GCP permissions the model's code should have (locked-down for v1).
 - **Deferred to slice 4**: NetworkPolicy, warm pool. Keeping this slice focused on the auth + image story.
@@ -142,7 +142,7 @@ Goal: cut compiled-path latency on GKE + gVisor without giving up the Go toolcha
 - **Slice 1.7's ~55 s came from a stale GHCR image** that predates the lockfile bootstrap. The cache missed, and GCS builds took ~70 s. client-go builds OOM at 4 GiB.
 
 **Scope:**
-- **Image publishing that can't go stale.** A CI workflow builds and pushes `kode-gopher-sandbox` on changes to `sandbox/`, `internal/prewarm/`, `internal/executor/` or `internal/curated/`, tagged by commit. The GKE overlay pins the tag or digest, replacing `:latest` + `imagePullPolicy: Always`. Add a startup check in the executor (or smoketest) that fails clearly if `/opt/kode-gopher-base/go.mod` is missing.
+- ✅ **Image publishing that can't go stale, and an image that's all ours** (done 2026-09-29; `docs/decisions.md > Slice 7: our own sandbox image`). Our own `cmd/sandbox-server`, which implements the agent-sandbox runtime protocol, replaces the go-runtime-sandbox base image. Base images are pinned by digest, and the tag is derived from the image's inputs. CI publishes to `ghcr.io/gke-demos/kode-gopher/sandbox` on `main` and fails PRs with a stale overlay pin. The executor names a missing `/opt/kode-gopher-base/go.mod`.
 - **Skip `go mod tidy` when the lockfile already covers every import.** Try `go build` directly on the bootstrapped `go.mod`, and fall back to tidy only when the build reports a missing module, or when `extra_imports` or a caller `go.mod` is present. Saves 0.5-2.5 s under gVisor.
 - **`-ldflags='-s -w'`** on the snippet build. Saves 0.6-1 s.
 - **Guard against cache-miss blowups**: warn in the tool result when tidy moved a lockfile-pinned version, since that means a slow, memory-hungry rebuild. Raise the sandbox memory limit if client-go-scale rebuilds must succeed (>4 GiB under gVisor).

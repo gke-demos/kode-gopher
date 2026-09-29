@@ -14,8 +14,8 @@
 #
 #   kubectl create namespace kg-measure
 #   kubectl -n kg-measure create configmap measure-build \
-#     --from-file=measure.sh --from-file=hello.go=progs/hello/main.go \
-#     --from-file=gcs.go=progs/gcs/main.go --from-file=k8s.go=progs/k8s/main.go
+#     --from-file=measure.sh --from-file=hello.go=testdata/hello/main.go \
+#     --from-file=gcs.go=testdata/gcs/main.go --from-file=k8s.go=testdata/k8s/main.go
 #   kubectl apply -f pods.yaml
 #   kubectl -n kg-measure exec <pod> -- bash /mb/measure.sh /mb/progs /tmp/out 2
 #

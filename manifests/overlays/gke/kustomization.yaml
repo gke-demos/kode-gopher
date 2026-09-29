@@ -17,8 +17,11 @@
 # Differences from manifests/base (which works on local kind):
 #   - Resources land in the 'codemode' namespace, not 'default'.
 #   - Sandbox container pulls from ghcr.io/gke-demos/... (not the local
-#     kind-loaded image). imagePullPolicy: Always so the kubelet picks
-#     up new pushes without us having to bump the tag.
+#     kind-loaded image), pinned to the content-derived tag CI publishes
+#     (`make sandbox-pin`; CI fails if the pin is stale). Tags are
+#     immutable, so imagePullPolicy: IfNotPresent. Never go back to a
+#     floating :latest: a stale :latest was what made GKE calls ~55 s
+#     (docs/decisions.md > Slice 7 gate).
 #   - /spec/service is removed: the GKE-bundled SandboxTemplate CRD
 #     doesn't have that field and the apiserver rejects unknown fields.
 #   - /spec/networkPolicyManagement: Managed — required by the
@@ -55,10 +58,10 @@ patches:
         value: Managed
       - op: replace
         path: /spec/podTemplate/spec/containers/0/image
-        value: ghcr.io/gke-demos/kode-gopher-sandbox:latest
+        value: ghcr.io/gke-demos/kode-gopher/sandbox:p-cd6e930ddec0
       - op: replace
         path: /spec/podTemplate/spec/containers/0/imagePullPolicy
-        value: Always
+        value: IfNotPresent
       - op: add
         path: /spec/podTemplate/spec/containers/0/securityContext
         value:

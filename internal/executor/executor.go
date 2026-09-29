@@ -106,8 +106,14 @@ const (
 // multi-file snippets can override version selection at their own
 // risk (build may cache-miss). The module line in the prewarm's
 // go.mod is rewritten to kode_gopher_user so the snippet compiles.
+// A sandbox image without the lockfile predates it and would cache-miss
+// every build (~60 s+ on GKE), so name that instead of a bare cp error.
 const tidyCmd = `set -e
 if [ ! -f go.mod ]; then
+  if [ ! -f ` + baseGoModPath + ` ]; then
+    echo "kode-gopher: sandbox image has no ` + baseGoModPath + `; it is older than this kode-gopher. Use the image pinned in manifests/overlays/gke (make sandbox-pin)." >&2
+    exit 1
+  fi
   cp ` + baseGoModPath + ` go.mod
   sed -i 's|^module .*|module kode_gopher_user|' go.mod
   cp ` + baseGoSumPath + ` go.sum
