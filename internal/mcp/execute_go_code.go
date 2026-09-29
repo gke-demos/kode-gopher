@@ -49,13 +49,16 @@ type ExecuteGoCodeArgs struct {
 // consume MCP structured content get this typed; clients that only
 // read text get the human-readable rendering in CallToolResult.Content.
 type ExecuteGoCodeOutput struct {
-	Phase      string  `json:"phase"`                  // "build" or "run"
-	Mode       string  `json:"mode"`                   // "verbatim" or "wrapped"
-	ExitCode   int     `json:"exit_code"`
-	DurationMS int64   `json:"duration_ms"`
-	Stdout     string  `json:"stdout,omitempty"`
-	Stderr     string  `json:"stderr,omitempty"`
-	Result     *Result `json:"result,omitempty"` // {kind: ok|error|panic|marshal_error, value?, message?, stack?, type?}
+	Phase      string   `json:"phase"` // "build" or "run"
+	Mode       string   `json:"mode"`  // "verbatim" or "wrapped"
+	ExitCode   int      `json:"exit_code"`
+	DurationMS int64    `json:"duration_ms"`
+	BuildMS    int64    `json:"build_ms"`
+	Tidied     bool     `json:"tidied"` // the build ran go mod tidy (an import outside the prewarmed lockfile)
+	Warnings   []string `json:"warnings,omitempty"`
+	Stdout     string   `json:"stdout,omitempty"`
+	Stderr     string   `json:"stderr,omitempty"`
+	Result     *Result  `json:"result,omitempty"` // {kind: ok|error|panic|marshal_error, value?, message?, stack?, type?}
 }
 
 // Result is the wire-form discriminated payload sent on
@@ -208,12 +211,15 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 		Mode:       norm.Mode.String(),
 		ExitCode:   outcome.ExitCode,
 		DurationMS: outcome.Duration.Milliseconds(),
+		BuildMS:    outcome.BuildDuration.Milliseconds(),
+		Tidied:     outcome.Tidied,
+		Warnings:   outcome.Warnings,
 		Stdout:     outcome.Stdout,
 		Stderr:     outcome.Stderr,
 		Result:     toWireResult(outcome.Result),
 	}
-	log.Printf("execute_go_code: done phase=%s exit=%d duration=%s (handler total=%s)",
-		out.Phase, out.ExitCode, outcome.Duration.Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
+	log.Printf("execute_go_code: done phase=%s exit=%d tidied=%v duration=%s (handler total=%s)",
+		out.Phase, out.ExitCode, out.Tidied, outcome.Duration.Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
 
 	// IsError if the program crashed (non-zero exit) or the wrapper
 	// reported a non-ok result. The LLM uses IsError to decide
@@ -230,7 +236,10 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 // MCP clients that ignore structured content.
 func renderText(o *ExecuteGoCodeOutput) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "phase=%s  mode=%s  exit=%d  (%dms)\n", o.Phase, o.Mode, o.ExitCode, o.DurationMS)
+	fmt.Fprintf(&b, "phase=%s  mode=%s  exit=%d  tidied=%v  (%dms, build %dms)\n", o.Phase, o.Mode, o.ExitCode, o.Tidied, o.DurationMS, o.BuildMS)
+	for _, w := range o.Warnings {
+		b.WriteString("\nwarning: " + ensureNewline(w))
+	}
 	if o.Stdout != "" {
 		b.WriteString("\n── stdout ──\n")
 		b.WriteString(ensureNewline(o.Stdout))

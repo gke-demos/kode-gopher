@@ -1,0 +1,39 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ComputeClass for sandbox pods: C3 first, then C4, N4 or N2.
+#
+# Autopilot's default class runs gVisor pods on ek-standard (E2-class)
+# nodes, where a warm GCS build takes ~6-8 s. The same build on C3 takes
+# ~2.2 s. That is CPU under gVisor, not I/O; see docs/decisions.md >
+# Slice 7: fast path. Unlike the built-in Performance class (one node
+# per pod), a custom class bin-packs pods onto the nodes it creates.
+# Fallbacks cover stockouts (N4 was out in us-central1-c on
+# 2026-09-29). whenUnsatisfiable: ScaleUpAnyway keeps sandboxes
+# schedulable, if slower, when none of them can be had.
+#
+# Cluster-scoped, so not namespaced by kustomize.
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: kode-gopher-sandbox
+spec:
+  priorities:
+    - machineFamily: c3
+    - machineFamily: c4
+    - machineFamily: n4
+    - machineFamily: n2
+  nodePoolAutoCreation:
+    enabled: true
+  whenUnsatisfiable: ScaleUpAnyway

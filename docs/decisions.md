@@ -803,3 +803,102 @@ Fix for the stale image found at the slice 7 gate. While fixing it we dropped th
 - **The executor names the failure.** Against an image without `/opt/kode-gopher-base/go.mod`, the tidy phase now says so and points at the pin. Before, it failed with a bare `cp` error. Verified against the old published `:latest`, which fails this way: the current executor never worked with the image the GKE overlay pulled.
 
 **Known gap:** right after a merge that changes the image, the pinned tag doesn't exist until `sandbox-image` finishes (several minutes, since prewarm compiles the GCP SDK and client-go). Deploying in that window fails with an image pull error, not a wrong image.
+
+## Slice 7: fast path — build first, fast nodes, and a GKE addon that moved — 2026-09-29
+
+The rest of slice 7, verified with `scripts/smoketest-gke.sh` on a fresh rapid-channel Autopilot cluster (1.36.4, `--enable-agent-sandbox`), using the CI-published image `p-c158bbe9970d`.
+
+**Result:** the GCS snippet takes **4.3-4.4 s** of CLI wall-clock end to end over three runs (target: under 12 s). That covers claim, upload, a 2.3-2.6 s build, run and fetch.
+
+| `kode-gopher exec` on GKE | build | total (build + run) | wall-clock |
+|---|---|---|---|
+| `list_buckets_snippet.go`, default nodes (E2-class `ek-standard-8`) | 11.1 s | 12.5-12.7 s | ~13 s |
+| `list_buckets_snippet.go`, C3 via `kode-gopher-sandbox` ComputeClass | 2.3-2.6 s | 3.5-3.8 s | 4.3-4.4 s |
+| `list_gke_pods_snippet.go` (client-go + container API), C3 | 2.5 s | 3.3 s | — |
+| non-lockfile import (`github.com/fatih/color`), C3 | 1.3 s incl. tidy | 1.3 s | 2.2 s |
+| `extra_imports` that moves otel/logr/x/sys versions, C3 | 25.6 s (cache miss) | 26.7 s | 27.5 s, with warning |
+
+### Build first, tidy only on a lockfile miss
+The build phase is now a single `Execute`, in `internal/executor.buildCmd`:
+1. Bootstrap `go.mod`/`go.sum` from the prewarm lockfile, as before.
+2. Run `go build -ldflags='-s -w'` straight away. The default `-mod=readonly` either builds with exactly the lockfile's versions or fails fast.
+3. Only if the error is about a missing module or `go.sum` entry: run `go mod tidy` and build again.
+
+This covers `extra_imports` and caller `go.mod`s without special-casing them. There's one fewer round trip even when tidy does run.
+
+Curated-only snippets never run tidy. Compile errors come straight back, without a tidy.
+
+`Outcome`, and the MCP output, gain three fields:
+- `tidied`;
+- `warnings`;
+- `build_ms`.
+
+### Cache-miss guard: a warning, not more memory
+When tidy moves a module that the lockfile pinned, the build reports it and the tool result carries a warning naming each `path old -> new`. Moving a pinned module means recompiling everything built against it. The warning says so and suggests curated packages instead.
+
+We kept the 2 GiB limit. Raising it would buy client-go-scale cache misses at the cost of a much bigger Autopilot request for every sandbox. Those builds take minutes anyway. The warning is what lets the model steer back.
+
+### Cache mtimes pushed into the future
+Go's build cache bumps the mtime of any entry it uses that is more than an hour old. That's how `go clean -cache` trimming knows what's live. In a fresh container every entry baked into the image is "old". So the first build chtimes hundreds of cache files, and each chtime copies the whole file up out of the image layer.
+
+Every claim gets a fresh warm-pool pod, so every request pays this. `sandbox/Dockerfile` now `touch`es the cache to 2100-01-01 right after the prewarm build. A future mtime is never old and never trimmed.
+
+First GCS build in a fresh container:
+
+| | image older than 1 h | future mtimes |
+|---|---|---|
+| local Docker (runc) | 13.3 s | 2.0 s |
+| GKE gVisor, default nodes | 14.9 s | 9.0 s |
+
+The GKE numbers were measured at the same time on the same node.
+
+### gVisor "filesystem overhead" was mostly slow CPUs
+We measured before changing anything, per the plan. On default Autopilot gVisor nodes, an edit rebuild of the GCS program splits like this (`-debug-trace`):
+
+| step | time |
+|---|---|
+| package load | ~1.5 s |
+| cache checks | ~1.5 s |
+| compiling the one-file `main` | 2.2-3.5 s |
+| link | 2-3 s |
+
+That rebuild takes 6-8 s; a no-op rebuild takes 2.3-2.5 s. Experiments:
+- **tmpfs:** copying the 405 MB of dependency archives to tmpfs and running `go tool compile`/`link` by hand cut compile from 3.4-4.7 s to ~2.4 s. Link was unchanged.
+- **Plain file I/O is cheap:** stat of 5.7k cache files takes 0.3 s; reading 1.1 GB takes 2.3 s.
+- **`GOGC`** 200/400/off: within noise.
+
+So filesystem access is worth about 1 s. The rest is CPU under gVisor.
+
+The same pod on a **C3** node, with the same 2-CPU limit:
+
+| | default nodes | C3 |
+|---|---|---|
+| first build | 6.2 s | 2.4 s |
+| edit rebuild | 6.0 s | 2.2 s |
+| no-op rebuild | 2.3 s | 0.63 s |
+| stat of the cache | 0.31 s | 0.10 s |
+
+Autopilot's default class puts gVisor pods on E2-class `ek-standard` nodes. The overlay now adds `manifests/overlays/gke/computeclass.yaml`:
+- the priority list is C3, then C4, N4, N2;
+- `whenUnsatisfiable: ScaleUpAnyway`;
+- sandbox pods select it with `cloud.google.com/compute-class`.
+
+Unlike the built-in `Performance` class, which gives every pod its own node, a custom class bin-packs pods. N4 was stocked out in us-central1-c during the test, hence the fallbacks.
+
+Cost: we pay C3 prices for sandbox nodes. There's nothing left to gain from gVisor filesystem options.
+
+### The agent-sandbox addon moved to v1beta1
+The same overlay worked on 2026-09-27. On a new rapid-channel cluster, the addon now serves the v1beta1 API (agent-sandbox v1.0), which broke four things. The fixes keep our v0.4.6 client working:
+
+- **The template may not mount the KSA token.** The ValidatingAdmissionPolicy `sandbox-core-policy` rejects `automountServiceAccountToken: true`. The overlay sets it to `false`.
+  - `rest.InClusterConfig()` snippets therefore don't work on GKE any more, so `scripts/smoketest-gke.sh` drops `list_k8s_version_snippet.go`.
+  - The kind smoketest still runs it.
+  - `list_gke_pods_snippet.go` authenticates with forwarded Google credentials and is unaffected.
+- **Claims name a warm pool, not a template.** v1beta1 `SandboxClaim.spec` has a required `warmPoolRef`. A v1alpha1 claim for template `T` converts to one for pool `shadow-pool-T`, which nothing creates. Nothing picked the claims up, and opening a sandbox timed out after 3 min. We renamed our warm pool to `shadow-pool-go-runtime-template`. Older addons match claims to pools by template, so the name works on both.
+- **Per-sandbox Services are back.** The template CRD has `spec.service` again, and the router resolves `<sandbox>.<ns>.svc`. The overlay no longer removes it. Without it: 502, `Name or service not known`.
+- **The managed NetworkPolicy blocked our router and DNS.**
+  - The default admits ingress only from `app=sandbox-router` in `agent-sandbox-system`; ours runs in the sandbox namespace.
+  - Its egress (internet, no private ranges) excludes NodeLocal DNSCache at 169.254.20.10, so nothing resolved and every GCP call hung until the 90 s timeout.
+  - The overlay now sets `spec.networkPolicy`: ingress on 8888 from our router, egress to the internet plus DNS to 169.254.20.10 and kube-dns.
+
+**Follow-up:** move the client to `sigs.k8s.io/agent-sandbox` v1.0.x and the manifests to v1beta1, and retire the `shadow-pool-` naming trick. Also decide what "the sandbox's own cluster" means on GKE now that the KSA token can't be mounted. `docs/design.md` and the prompt still describe `rest.InClusterConfig()` as working.

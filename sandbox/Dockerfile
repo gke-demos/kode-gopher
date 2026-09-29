@@ -81,8 +81,17 @@ USER 1000
 # what we committed). This is the version-selection artifact that
 # snippet builds inherit at runtime; see /opt/kode-gopher-base/
 # preservation below.
+#
+# Then push every cache entry's mtime into the future. On each hit, Go
+# bumps the mtime of any entry more than an hour old (so its trim knows
+# what's in use). In a fresh container every baked-in entry is "old",
+# so the first build would chtime hundreds of files, and each chtime
+# copies the whole file up out of the image layer: ~10 s on the first
+# GCS build locally, before a single byte compiles. A future mtime is
+# never "old" and is never trimmed.
 RUN cd /tmp/prewarm \
- && go build -o /dev/null ./...
+ && go build -o /dev/null ./... \
+ && find "$GOCACHE" -type f -exec touch -m -d 2100-01-01 {} +
 
 # Preserve prewarm's tidied go.mod + go.sum at a well-known path so
 # the executor can bootstrap each snippet's /app/go.mod from them.

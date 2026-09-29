@@ -78,9 +78,9 @@ Until that slice lands, everything in this document assumes stdio.
 
 ## Runtime
 
-The sandbox runs snippets with the real Go toolchain. The pod has the toolchain plus a prewarmed `$GOCACHE`/`$GOMODCACHE` for the curated GCP packages, and each `execute_go_code` call runs `go mod tidy && go build -o .kode-gopher/bin/run . && ./bin/run`. That is three `Execute`s on the same session, with `/app` reset between calls but the caches surviving.
+The sandbox runs snippets with the real Go toolchain. The pod has the toolchain plus a prewarmed `$GOCACHE`/`$GOMODCACHE` for the curated GCP packages, and each `execute_go_code` call builds, then runs `./.kode-gopher/bin/run`, then fetches `result.json`. That is three `Execute`s on the same session, with `/app` reset between calls but the caches surviving. The build runs `go build -ldflags='-s -w'` on `go.mod` bootstrapped from the prewarm lockfile. It falls back to `go mod tidy` + rebuild only when an import isn't covered.
 
-End-to-end latency is dominated by the compile step: ~5 s warm on kind. On GKE Autopilot + gVisor a warm `tidy` + `build` measures ~7-8 s; the ~55 s seen earlier came from a stale published image whose cache missed (`docs/decisions.md > Slice 7 gate`). The sandbox image is ~2.2 GB (toolchain + prewarmed cache + base). Any pure-Go import works: the curated set is a performance optimization, not a correctness boundary. Cutting the latency is slice 7 (`docs/plan.md`).
+End-to-end latency is dominated by the compile step: ~5 s warm on kind. On GKE Autopilot + gVisor the GCS snippet builds in ~2.5 s on C3 nodes and takes ~4.4 s end to end. The default E2-class nodes are ~3× slower, and the ~55 s seen earlier came from a stale published image whose cache missed (`docs/decisions.md > Slice 7 gate`, `> Slice 7: fast path`). The sandbox image is ~2.2 GB (toolchain + prewarmed cache + base). Any pure-Go import works: the curated set is a performance optimization, not a correctness boundary. Cutting the latency is slice 7 (`docs/plan.md`).
 
 An interpreted runtime (Yaegi) was prototyped as slice 6 and shelved: it produces silently wrong output for common idioms, including `json.Marshal` of snippet-defined structs. See `docs/decisions.md > Differential corpus`.
 
@@ -106,7 +106,7 @@ A native `kode-gopher auth login` flow would require us to either embed an OAuth
 `k8s.io/client-go` (typed `kubernetes` clientset, `dynamic`, `tools/clientcmd`, `tools/watch`, and `apimachinery/pkg/apis/meta/v1`) is in the curated prewarmed set. The reachability story splits by *which* cluster a snippet is trying to talk to.
 
 ### The sandbox's own cluster (the common case)
-`rest.InClusterConfig()` works when the pod's KSA token is mounted. Note: the agent-sandbox extensions controller (`extensions/controllers/utils.go`) applies a "secure by default" that sets `automountServiceAccountToken=false` unless the template overrides it. Our `manifests/base/sandboxtemplate.yaml` explicitly sets it to `true` — we accept mounting the token as the cost of the "own cluster access" capability. Without that override, the snippet would fail at `open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory`.
+`rest.InClusterConfig()` works when the pod's KSA token is mounted. Note: the agent-sandbox extensions controller (`extensions/controllers/utils.go`) applies a "secure by default" that sets `automountServiceAccountToken=false` unless the template overrides it. Our `manifests/base/sandboxtemplate.yaml` explicitly sets it to `true` — we accept mounting the token as the cost of the "own cluster access" capability. Without that override, the snippet would fail at `open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory`. **On GKE this no longer holds:** since the addon's move to v1beta1 (2026-09-29), its admission policy rejects templates that mount the token. The GKE overlay sets it to `false`, so in-cluster access works on kind only (`docs/decisions.md > Slice 7: fast path`).
 
 `client.Discovery().ServerVersion()` needs no RBAC (the `/version` endpoint is unauthenticated). Anything typed — `Pods().List(...)`, `Deployments().Get(...)`, `.Watch(...)` — additionally needs a Role/RoleBinding (or ClusterRole/ClusterRoleBinding) granted to the sandbox KSA. Today the manifests grant nothing beyond the KSA's default. Grant sparingly, per-namespace when possible; a blanket `cluster-admin` binding would erase the sandbox boundary.
 
@@ -216,7 +216,8 @@ kode-gopher/
 │   │   ├── networkpolicy.yaml      # Google IP ranges + metadata + oauth2/sts
 │   │   ├── ipranges-refresh.yaml   # weekly CronJob; updates a ConfigMap
 │   │   └── kustomization.yaml
-│   └── warmpool.yaml        # SandboxWarmPool: replicas 2, OnReplenish
+│   ├── warmpool.yaml        # SandboxWarmPool shadow-pool-go-runtime-template: replicas 2, OnReplenish
+│   └── computeclass.yaml    # ComputeClass kode-gopher-sandbox: C3 first
 ├── docs/
 │   ├── design.md            # this document
 │   └── plan.md              # the build sequence

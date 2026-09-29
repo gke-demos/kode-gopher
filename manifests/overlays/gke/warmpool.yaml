@@ -22,10 +22,16 @@
 # Two replicas so the smoketest can run both test files back-to-back
 # without waiting for replenishment between them. Tune up if you'll
 # have higher concurrent-session counts.
+#
+# The name is not ours to choose. Newer addons (agent-sandbox v1beta1,
+# seen on a rapid-channel 1.36 cluster on 2026-09-29) store claims by
+# warm pool, not template, and convert our client's v1alpha1 claim for
+# template T into a claim on the pool "shadow-pool-T". Older addons
+# match claims to pools by template, so the name works on both.
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxWarmPool
 metadata:
-  name: kode-gopher-warmpool
+  name: shadow-pool-go-runtime-template
 spec:
   replicas: 2
   sandboxTemplateRef:

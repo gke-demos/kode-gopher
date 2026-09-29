@@ -24,7 +24,7 @@ Planned slices in [`docs/plan.md`](./docs/plan.md):
 - **Slice 3** — full GKE deployment story (formalize Artifact Registry push, Workload Identity binding docs; largely done opportunistically).
 - **Slice 5** — HTTP/SSE transport. Scope gated on five explicit design questions (session topology, auth, per-end-user creds, streaming, deployment topology).
 - **Slice 6** — Yaegi (interpreter) runtime. **Shelved**: packaging worked, but the interpreter silently produces wrong output for common Go idioms (see `docs/decisions.md`). The PoC stays in `experiments/yaegi-poc/`.
-- **Slice 7** — fast compiled path. Measured: a warm build under gVisor is ~7-8 s, and the ~55 s seen on GKE came from a stale published sandbox image. Scope: CI-published, pinned sandbox image; skip `go mod tidy` for curated-only snippets; stripped links.
+- **Slice 7** — fast compiled path. Measured: a warm build under gVisor is ~7-8 s, and the ~55 s seen on GKE came from a stale published sandbox image. Shipped: our own CI-published, pinned sandbox image; `go mod tidy` only when the lockfile misses; C3-first sandbox nodes. The GCS snippet is ~4.4 s end to end on GKE.
 
 ## Try it locally
 
@@ -89,7 +89,7 @@ All smoketests are idempotent and reuse infra across runs.
 | [`internal/prompts`](./internal/prompts) | generated `system.md` (LLM system prompt) + `description.go` (execute_go_code tool description); regenerate via `make prompts` |
 | [`sandbox/Dockerfile`](./sandbox/Dockerfile) | the sandbox image: Go toolchain, `sandbox-server`, prewarmed cache |
 | [`manifests/base`](./manifests/base) | SandboxTemplate kustomize base (kind-compatible) |
-| [`manifests/overlays/gke`](./manifests/overlays/gke) | GKE Autopilot overlay: gVisor + securityContext + Workload Identity + SandboxWarmPool + per-namespace sandbox-router |
+| [`manifests/overlays/gke`](./manifests/overlays/gke) | GKE Autopilot overlay: gVisor + securityContext + Workload Identity + SandboxWarmPool + per-namespace sandbox-router + C3-first ComputeClass |
 | [`scripts/smoketest-kind.sh`](./scripts/smoketest-kind.sh) | local-kind direct-CLI verification |
 | [`scripts/smoketest-gke.sh`](./scripts/smoketest-gke.sh) | GKE Autopilot direct-CLI verification |
 | [`scripts/smoketest-mcp.sh`](./scripts/smoketest-mcp.sh) | MCP-layer verification against either substrate |
