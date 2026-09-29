@@ -58,7 +58,7 @@ patches:
         value: Managed
       - op: replace
         path: /spec/podTemplate/spec/containers/0/image
-        value: ghcr.io/gke-demos/kode-gopher/sandbox:p-cd6e930ddec0
+        value: ghcr.io/gke-demos/kode-gopher/sandbox:p-c158bbe9970d
       - op: replace
         path: /spec/podTemplate/spec/containers/0/imagePullPolicy
         value: IfNotPresent
