@@ -53,6 +53,7 @@ type ExecuteGoCodeOutput struct {
 	Mode       string   `json:"mode"`  // "verbatim" or "wrapped"
 	ExitCode   int      `json:"exit_code"`
 	DurationMS int64    `json:"duration_ms"`
+	BuildMS    int64    `json:"build_ms"`
 	Tidied     bool     `json:"tidied"` // the build ran go mod tidy (an import outside the prewarmed lockfile)
 	Warnings   []string `json:"warnings,omitempty"`
 	Stdout     string   `json:"stdout,omitempty"`
@@ -210,6 +211,7 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 		Mode:       norm.Mode.String(),
 		ExitCode:   outcome.ExitCode,
 		DurationMS: outcome.Duration.Milliseconds(),
+		BuildMS:    outcome.BuildDuration.Milliseconds(),
 		Tidied:     outcome.Tidied,
 		Warnings:   outcome.Warnings,
 		Stdout:     outcome.Stdout,
@@ -234,7 +236,7 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 // MCP clients that ignore structured content.
 func renderText(o *ExecuteGoCodeOutput) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "phase=%s  mode=%s  exit=%d  tidied=%v  (%dms)\n", o.Phase, o.Mode, o.ExitCode, o.Tidied, o.DurationMS)
+	fmt.Fprintf(&b, "phase=%s  mode=%s  exit=%d  tidied=%v  (%dms, build %dms)\n", o.Phase, o.Mode, o.ExitCode, o.Tidied, o.DurationMS, o.BuildMS)
 	for _, w := range o.Warnings {
 		b.WriteString("\nwarning: " + ensureNewline(w))
 	}

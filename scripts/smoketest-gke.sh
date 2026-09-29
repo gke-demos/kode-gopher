@@ -47,10 +47,12 @@ NS="${NS:-codemode}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# No list_k8s_version_snippet.go: it uses rest.InClusterConfig(), and
+# the agent-sandbox addon forbids mounting the KSA token on GKE (see
+# manifests/overlays/gke). scripts/smoketest-kind.sh still runs it.
 DEFAULT_FILES=(
   "testdata/list_buckets.go"
   "testdata/list_buckets_snippet.go"
-  "testdata/list_k8s_version_snippet.go"
   "testdata/list_gke_pods_snippet.go"
 )
 TEST_FILES=("${DEFAULT_FILES[@]}")
@@ -112,15 +114,15 @@ step "wait for warmpool to populate (up to 8 min on a cold node)"
 # Autopilot may need to provision a fresh gVisor node + pull the
 # image, so first-run can take ~2-3 minutes. Subsequent invocations
 # are fast because the pool is already warm.
-desired=$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool kode-gopher-warmpool -o jsonpath='{.spec.replicas}' 2>/dev/null)
+desired=$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool shadow-pool-go-runtime-template -o jsonpath='{.spec.replicas}' 2>/dev/null)
 desired=${desired:-2}
 for i in {1..48}; do
-  ready=$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool kode-gopher-warmpool -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+  ready=$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool shadow-pool-go-runtime-template -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
   printf "  t+%03ds  ready=%s/%s\n" $((i*10)) "${ready:-0}" "$desired"
   [[ "$ready" == "$desired" ]] && break
   sleep 10
 done
-[[ "$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool kode-gopher-warmpool -o jsonpath='{.status.readyReplicas}')" == "$desired" ]] \
+[[ "$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool shadow-pool-go-runtime-template -o jsonpath='{.status.readyReplicas}')" == "$desired" ]] \
   || die "warmpool did not become ready within 8 minutes"
 
 step "wait for sandbox-router in '$NS' (deployed by the overlay)"

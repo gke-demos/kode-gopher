@@ -215,7 +215,8 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 // see the phase, exit code, both streams, and the structured result
 // at a glance.
 func printOutcome(o *executor.Outcome) {
-	fmt.Printf("phase=%s  exit=%d  tidied=%v  (%s)\n", o.Phase, o.ExitCode, o.Tidied, o.Duration.Round(time.Millisecond))
+	fmt.Printf("phase=%s  exit=%d  tidied=%v  (%s, build %s)\n", o.Phase, o.ExitCode, o.Tidied,
+		o.Duration.Round(time.Millisecond), o.BuildDuration.Round(time.Millisecond))
 	for _, w := range o.Warnings {
 		fmt.Print("\nwarning: ", ensureNewline(w))
 	}

@@ -72,6 +72,8 @@ type Outcome struct {
 	// Warnings are notes for the caller (and the model) about how the
 	// build went, e.g. tidy moving lockfile-pinned versions.
 	Warnings []string
+	// BuildDuration is the build phase alone (including any tidy).
+	BuildDuration time.Duration
 }
 
 // Request is the input to Run.
@@ -203,6 +205,8 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 			Duration: build.Duration,
 			Tidied:   tidied,
 			Warnings: warnings,
+
+			BuildDuration: build.Duration,
 		}, nil
 	}
 
@@ -243,6 +247,8 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 		Result:   result,
 		Tidied:   tidied,
 		Warnings: warnings,
+
+		BuildDuration: build.Duration,
 	}, nil
 }
 
