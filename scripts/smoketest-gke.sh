@@ -26,7 +26,8 @@
 #     with `app=sandbox-router` labels (we use whatever's there; we
 #     don't deploy our own)
 #
-# Applies manifests/overlays/gke (which references the GHCR image), runs
+# Applies manifests/overlays/gke (which pins the CI-published GHCR image;
+# see `make sandbox-pin`), runs
 # `kode-gopher exec --namespace=$NS` against each TEST_FILE, and (with
 # --compare) diffs against `gcloud storage buckets list`.
 #
@@ -37,13 +38,11 @@
 # Env overrides:
 #   CONTEXT       kubectl context name      (ap-gke-sandbox)
 #   NS            namespace                 (codemode)
-#   GHCR_IMG      sandbox image at GHCR     (ghcr.io/gke-demos/kode-gopher-sandbox:latest)
 
 set -euo pipefail
 
 CONTEXT="${CONTEXT:-ap-gke-sandbox}"
 NS="${NS:-codemode}"
-GHCR_IMG="${GHCR_IMG:-ghcr.io/gke-demos/kode-gopher-sandbox:latest}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
