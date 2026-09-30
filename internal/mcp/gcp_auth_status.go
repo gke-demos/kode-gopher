@@ -30,8 +30,8 @@ type GCPAuthStatusArgs struct{}
 // to decide whether the sandbox is properly credentialed before
 // spending a tool call on execute_go_code.
 type GCPAuthStatusOutput struct {
-	Mode      string `json:"mode"                       jsonschema:"'forwarded' (host ADC copied into sandbox), 'workload' (in-cluster KSA via metadata server), or 'none' (no credentials configured)."`
-	CredType  string `json:"credential_type,omitempty"  jsonschema:"For forwarded mode: 'authorized_user' or 'service_account'. For workload mode: 'metadata'."`
+	Mode      string `json:"mode"                       jsonschema:"'forwarded' (host ADC copied into sandbox), 'access-token' (a short-lived token minted by kode-gopher, served to each run by a metadata emulator in the sandbox), 'workload' (in-cluster KSA via metadata server), or 'none' (no credentials configured)."`
+	CredType  string `json:"credential_type,omitempty"  jsonschema:"For forwarded and access-token modes: 'authorized_user' or 'service_account' (access-token also 'metadata', when kode-gopher's own identity is Workload Identity). For workload mode: 'metadata'."`
 	Email     string `json:"email,omitempty"            jsonschema:"Best-effort identity email. Empty means lookup failed or wasn't possible."`
 	ProjectID string `json:"project_id,omitempty"       jsonschema:"GCP project associated with these credentials (ADC quota_project_id, or $GOOGLE_CLOUD_PROJECT)."`
 }

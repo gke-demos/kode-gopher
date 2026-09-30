@@ -29,8 +29,15 @@ limitations under the License.
 package sandbox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strconv"
 	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
@@ -80,6 +87,25 @@ type Options struct {
 	// Truncate controls LLM-friendly head+tail truncation of Execute
 	// stdout/stderr. Zero value applies defaults (8 KiB each).
 	Truncate TruncateConfig
+
+	// InCluster dials each sandbox by its headless Service
+	// (Status.ServiceFQDN) instead of port-forwarding to the router.
+	// Set it when kode-gopher runs in the cluster. Request.Credentials
+	// requires it.
+	InCluster bool
+}
+
+// Credentials is a short-lived Google access token for one run step.
+// The in-pod sandbox-server holds it in memory for that command only
+// and serves it from a GCE metadata emulator on 127.0.0.1
+// (docs/design-in-cluster.md, section 4). The field names are
+// sandbox-server's wire format.
+type Credentials struct {
+	AccessToken  string    `json:"access_token"`
+	Expiry       time.Time `json:"expiry"`
+	Email        string    `json:"email,omitempty"`
+	Project      string    `json:"project,omitempty"`
+	QuotaProject string    `json:"quota_project,omitempty"`
 }
 
 // Request is a single Execute call: ship Files under /app and run
@@ -97,6 +123,11 @@ type Request struct {
 	// (5min). The upstream agent-sandbox HTTP layer's own cap comes
 	// from Options.PerAttemptTimeout — we default that to 3min.
 	Timeout time.Duration
+
+	// Credentials, if set, is what Command runs as. It needs
+	// Options.InCluster: the agent-sandbox client's Run sends only the
+	// command, so this call goes straight to the sandbox's Service.
+	Credentials *Credentials
 }
 
 // Result is what Execute produced, post-truncation.
@@ -115,12 +146,19 @@ type Session struct {
 	box       *sb.Sandbox
 	truncate  TruncateConfig
 	ownClient bool
+	inCluster bool
+	// direct posts credentialed run steps to the sandbox's Service.
+	direct *http.Client
 }
 
 const (
 	defaultTimeout           = 5 * time.Minute
 	defaultPerAttemptTimeout = 3 * time.Minute
 	tarUploadName            = ".kg-upload.tar"
+	// serverPort is sandbox-server's port (the agent-sandbox default).
+	serverPort = 8888
+	// maxExecuteResponse matches the agent-sandbox client's cap.
+	maxExecuteResponse = 16 << 20
 )
 
 // Open creates a Session either by creating a new sandbox (ClaimName
@@ -145,6 +183,9 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		// client read when it opened. A restarted pod gets a new IP, and
 		// the router kept dialing the old one (502, connection refused).
 		DisablePodIPRouting: true,
+	}
+	if opts.InCluster {
+		clientOpts.Connectivity = sb.ConnectivityInClusterService
 	}
 	if opts.SandboxReadyTimeout > 0 {
 		clientOpts.SandboxReadyTimeout = opts.SandboxReadyTimeout
@@ -191,6 +232,8 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		box:       box,
 		truncate:  tc,
 		ownClient: true,
+		inCluster: opts.InCluster,
+		direct:    &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: perAttempt}},
 	}, nil
 }
 
@@ -227,7 +270,13 @@ func (s *Session) Execute(ctx context.Context, req Request) (*Result, error) {
 		return &Result{Duration: time.Since(start)}, nil
 	}
 
-	raw, err := s.box.Run(callCtx, req.Command, sb.WithTimeout(timeout))
+	var raw *sb.ExecutionResult
+	var err error
+	if req.Credentials != nil {
+		raw, err = s.runWithCredentials(callCtx, req.Command, req.Credentials)
+	} else {
+		raw, err = s.box.Run(callCtx, req.Command, sb.WithTimeout(timeout))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: run: %w", classifySessionErr(err))
 	}
@@ -241,6 +290,53 @@ func (s *Session) Execute(ctx context.Context, req Request) (*Result, error) {
 		StdoutTruncated: outTrunc,
 		StderrTruncated: errTrunc,
 	}, nil
+}
+
+func (s *Session) runWithCredentials(ctx context.Context, command string, c *Credentials) (*sb.ExecutionResult, error) {
+	if !s.inCluster {
+		return nil, errors.New("credentials need in-cluster connectivity (Options.InCluster)")
+	}
+	fqdn := s.box.ServiceFQDN()
+	if fqdn == "" {
+		return nil, errors.New("sandbox has no Service to address (spec.service unset on the template)")
+	}
+	return postExecute(ctx, s.direct, "http://"+net.JoinHostPort(fqdn, strconv.Itoa(serverPort)), command, c)
+}
+
+// postExecute sends one /execute with credentials, once: a run isn't
+// idempotent, so unlike the client's other calls it is never retried.
+// Errors never include the request body.
+func postExecute(ctx context.Context, hc *http.Client, baseURL, command string, c *Credentials) (*sb.ExecutionResult, error) {
+	payload, err := json.Marshal(struct {
+		Command     string       `json:"command"`
+		Credentials *Credentials `json:"credentials"`
+	}{command, c})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/execute", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, &sb.HTTPError{StatusCode: resp.StatusCode, Body: string(body), Operation: "run"}
+	}
+	result := sb.ExecutionResult{ExitCode: -1}
+	lr := io.LimitedReader{R: resp.Body, N: maxExecuteResponse}
+	if err := json.NewDecoder(&lr).Decode(&result); err != nil {
+		if lr.N <= 0 {
+			return nil, fmt.Errorf("%w: command output too large", sb.ErrResponseTooLarge)
+		}
+		return nil, fmt.Errorf("decode run result: %w", err)
+	}
+	return &result, nil
 }
 
 func (s *Session) materialize(ctx context.Context, files map[string][]byte) error {

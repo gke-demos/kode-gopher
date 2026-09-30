@@ -23,16 +23,21 @@ limitations under the License.
 // answering "what identity does this sandbox actually run as?" — the
 // question gcp_auth_status needs. Source formalizes both duties:
 //
-//   Materialize — for the executor: what files and env should be
-//   forwarded on each tool invocation.
-//   Identity — for gcp_auth_status: whose identity does the sandbox
-//   run under, in what form, on what project.
+//	Materialize — for the executor: what files and env should be
+//	forwarded on each tool invocation.
+//	Identity — for gcp_auth_status: whose identity does the sandbox
+//	run under, in what form, on what project.
 //
-// Two implementations ship: Forwarded (desktop / gcloud ADC) and
-// Workload (in-cluster / metadata server; stub until we run in-cluster).
+// Implementations: Forwarded (desktop / gcloud ADC copied into the
+// sandbox), Minted (short-lived access tokens served to the run through
+// sandbox-server's metadata emulator; a TokenMinter), and Workload (a
+// stub from before the in-cluster design).
 package creds
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Identity summarizes whose credentials the sandbox will actually use
 // at run time. Best-effort — Email in particular requires a live
@@ -40,7 +45,8 @@ import "context"
 // missing fields as "unknown" rather than "definitely absent."
 type Identity struct {
 	// Mode is the credential-forwarding shape: "forwarded" means the
-	// host copied ADC into the sandbox; "workload" means the sandbox
+	// host copied ADC into the sandbox; "access-token" means each run
+	// gets a token minted by kode-gopher (Minted); "workload" means the sandbox
 	// pod uses its bound KSA/GSA via the metadata server; "none"
 	// means there are no forwarded credentials (GCP calls will fail).
 	Mode string `json:"mode"`
@@ -81,4 +87,22 @@ type Source interface {
 	// forwards. Best-effort; implementations should cache the result
 	// after the first successful call.
 	Identity(ctx context.Context) (Identity, error)
+}
+
+// AccessToken is a short-lived Google access token for one run, plus
+// what the sandbox's metadata emulator reports alongside it.
+type AccessToken struct {
+	Token        string
+	Expiry       time.Time
+	Email        string
+	Project      string
+	QuotaProject string
+}
+
+// TokenMinter is a Source that hands each run an access token rather
+// than files. The executor passes it to the run phase only, through
+// sandbox-server's metadata emulator; it needs in-cluster connectivity.
+type TokenMinter interface {
+	Source
+	AccessToken(ctx context.Context) (AccessToken, error)
 }

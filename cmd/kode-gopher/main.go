@@ -93,6 +93,8 @@ func runExec(args []string) int {
 	claim := fs.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one")
 	keep := fs.Bool("keep", false, "leave the sandbox alive on exit (Disconnect) instead of deleting it (Close)")
 	extraImports := fs.String("extra-imports", "", "comma-separated import paths to add as blank imports (forces `go mod tidy` to resolve them)")
+	inCluster := fs.Bool("in-cluster", false, "dial sandboxes by their in-cluster Service instead of port-forwarding (kode-gopher running in the cluster)")
+	credMode := fs.String("credentials", credForwarded, "how the snippet gets Google credentials: forwarded (copy local ADC into the sandbox) or access-token (mint a short-lived token from ADC and serve it to the run only; needs --in-cluster)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: kode-gopher exec [flags] <file.go>\n\n")
 		fs.PrintDefaults()
@@ -106,7 +108,7 @@ func runExec(args []string) int {
 	}
 	path := fs.Arg(0)
 
-	exitCode, err := run(path, *namespace, *kubeCtx, *openTO, *execTO, *claim, *keep, splitCSV(*extraImports))
+	exitCode, err := run(path, *namespace, *kubeCtx, *openTO, *execTO, *claim, *keep, splitCSV(*extraImports), *inCluster, *credMode)
 	if err != nil {
 		log.Printf("%v", err)
 		return 1
@@ -130,7 +132,7 @@ func splitCSV(s string) []string {
 	return out
 }
 
-func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Duration, claim string, keep bool, extraImports []string) (int, error) {
+func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Duration, claim string, keep bool, extraImports []string, inCluster bool, credMode string) (int, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", path, err)
@@ -154,7 +156,10 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	credSrc := creds.NewForwarded(localADCPath(), forwardedEnv)
+	credSrc, err := credentialSource(ctx, credMode, inCluster)
+	if err != nil {
+		return 0, err
+	}
 	credFiles, envs, err := credSrc.Materialize(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("materialize credentials: %w", err)
@@ -162,7 +167,16 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 	for k, v := range credFiles {
 		files[k] = v
 	}
-	if _, ok := credFiles[".kode-gopher/creds/adc.json"]; ok {
+	var runCreds *sandbox.Credentials
+	if m, ok := credSrc.(creds.TokenMinter); ok {
+		tok, err := m.AccessToken(ctx)
+		if err != nil {
+			return 0, err
+		}
+		runCreds = &sandbox.Credentials{AccessToken: tok.Token, Expiry: tok.Expiry,
+			Email: tok.Email, Project: tok.Project, QuotaProject: tok.QuotaProject}
+		log.Printf("run phase gets a minted access token (%s, expires %s)", tok.Email, tok.Expiry.Format(time.RFC3339))
+	} else if _, ok := credFiles[".kode-gopher/creds/adc.json"]; ok {
 		log.Printf("forwarding ADC from %s", localADCPath())
 	} else {
 		log.Printf("no local ADC at %s — GCP calls will fail unless the sandbox has its own creds", localADCPath())
@@ -175,7 +189,8 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 		Namespace:   namespace,
 		WarmPool:    sandboxWarmPool,
 		KubeContext: kubeContext,
-		ClaimName: claim,
+		ClaimName:   claim,
+		InCluster:   inCluster,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("open sandbox: %w", err)
@@ -199,9 +214,10 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 	}()
 
 	outcome, err := executor.Run(ctx, sess, executor.Request{
-		Files:   files,
-		Env:     envs,
-		Timeout: execTimeout,
+		Files:       files,
+		Env:         envs,
+		Credentials: runCreds,
+		Timeout:     execTimeout,
 	})
 	if err != nil {
 		return 0, err
@@ -259,4 +275,25 @@ func fileKeys(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+const (
+	credForwarded   = "forwarded"
+	credAccessToken = "access-token"
+)
+
+// credentialSource builds the --credentials source. access-token needs
+// in-cluster connectivity: the token travels with the run request
+// straight to the sandbox's Service.
+func credentialSource(ctx context.Context, mode string, inCluster bool) (creds.Source, error) {
+	switch mode {
+	case credForwarded:
+		return creds.NewForwarded(localADCPath(), forwardedEnv), nil
+	case credAccessToken:
+		if !inCluster {
+			return nil, fmt.Errorf("--credentials=%s needs --in-cluster", credAccessToken)
+		}
+		return creds.NewMinted(ctx)
+	}
+	return nil, fmt.Errorf("--credentials must be %q or %q, got %q", credForwarded, credAccessToken, mode)
 }

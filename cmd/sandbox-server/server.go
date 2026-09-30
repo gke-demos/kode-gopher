@@ -105,7 +105,8 @@ type executeResponse struct {
 
 func (s *server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Command string `json:"command"`
+		Command     string       `json:"command"`
+		Credentials *credentials `json:"credentials,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxCommandBytes)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -115,10 +116,25 @@ func (s *server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "command must not be empty")
 		return
 	}
+	var env []string
+	if req.Credentials != nil {
+		if err := req.Credentials.validate(time.Now()); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		md, err := startMetadataEmulator(req.Credentials)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "starting metadata emulator: "+err.Error())
+			return
+		}
+		defer md.Close()
+		env = md.env()
+	}
 	start := time.Now()
-	resp := runShell(r.Context(), s.workdir, req.Command)
+	resp := runShell(r.Context(), s.workdir, req.Command, env)
 	s.log.Info("exec",
 		"command", preview(req.Command),
+		"credentials", req.Credentials != nil,
 		"exit", resp.ExitCode,
 		"stdout_bytes", len(resp.Stdout),
 		"stderr_bytes", len(resp.Stderr),
@@ -126,15 +142,18 @@ func (s *server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// runShell runs command via sh -c in dir. The shell gets its own
-// process group so that cancelling ctx (the client went away) kills
-// everything it started, e.g. a go build's compiler children, not
-// just the shell. A shell killed by a signal reports 128+signal, as
-// a shell would.
-func runShell(ctx context.Context, dir, command string) executeResponse {
+// runShell runs command via sh -c in dir, with env added to this
+// process's environment. The shell gets its own process group so that
+// cancelling ctx (the client went away) kills everything it started,
+// e.g. a go build's compiler children, not just the shell. A shell
+// killed by a signal reports 128+signal, as a shell would.
+func runShell(ctx context.Context, dir, command string, env []string) executeResponse {
 	var stdout, stderr cappedBuffer
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

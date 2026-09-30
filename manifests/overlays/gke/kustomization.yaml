@@ -52,7 +52,7 @@ patches:
     patch: |-
       - op: replace
         path: /spec/podTemplate/spec/containers/0/image
-        value: ghcr.io/gke-demos/kode-gopher/sandbox:p-c158bbe9970d
+        value: ghcr.io/gke-demos/kode-gopher/sandbox:p-8d8e2e8ab125
       - op: replace
         path: /spec/podTemplate/spec/containers/0/imagePullPolicy
         value: IfNotPresent

@@ -89,6 +89,9 @@ type Request struct {
 	// binary at run time. Not applied to the build (it has no
 	// business seeing GCP creds).
 	Env map[string]string
+	// Credentials, if set, is the access token the run phase executes
+	// as (never the build or fetch). Needs an in-cluster session.
+	Credentials *sandbox.Credentials
 	// Timeout bounds each individual sandbox /execute call. Zero means
 	// 90s. The upstream agent-sandbox HTTP cap is governed by
 	// internal/sandbox.Options.PerAttemptTimeout (default 3min).
@@ -213,8 +216,9 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 	// Phase 2: run the binary with the requested env.
 	runCmd := envPrefix(req.Env) + "./" + binPath
 	run, err := sess.Execute(ctx, sandbox.Request{
-		Command: runCmd,
-		Timeout: timeout,
+		Command:     runCmd,
+		Timeout:     timeout,
+		Credentials: req.Credentials,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("execute (run): %w", err)
