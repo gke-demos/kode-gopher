@@ -147,12 +147,26 @@ Goal: cut compiled-path latency on GKE + gVisor without giving up the Go toolcha
 - ✅ **`-ldflags='-s -w'`** on the snippet build.
 - ✅ **Guard against cache-miss blowups.** When tidy moves a lockfile-pinned version, the tool result carries a warning naming each move. The memory limit stays at 2 GiB (reasoning in decisions.md).
 - ✅ **Investigate, measure first: gVisor filesystem.** Filesystem access was worth ~1 s; the rest was slow CPUs. Sandbox pods now run on C3-first nodes through a custom ComputeClass: builds ~3× faster. The image also pushes `$GOCACHE` mtimes into the future, which saves ~6 s on each fresh pod's first build.
-- ✅ **The GKE agent-sandbox addon's move to v1beta1**, found on the fresh cluster, is handled in the overlay (token mount, warm-pool name, Service, NetworkPolicy). **Follow-up:** migrate the client to agent-sandbox v1.0.x and the manifests to v1beta1.
+- ✅ **The GKE agent-sandbox addon's move to v1beta1**, found on the fresh cluster, is handled in the overlay (token mount, warm-pool name, Service, NetworkPolicy). The client and manifest migration followed in slice 8.
 
 **Pass criteria** (all met 2026-09-29: GCS snippet 4.3-4.4 s wall-clock end to end):
 - `scripts/smoketest-gke.sh` on a fresh cluster from the CI-published image: GCS snippet end to end under 12 s warm (today's measured build floor ~7 s under gVisor, plus the agent-sandbox round trips).
 - A curated-only snippet runs no `go mod tidy`; a snippet with `extra_imports` still works.
 - The published image and the executor can't drift: the image tag in the overlay matches a CI build of the same commit.
+
+## Slice 8 — agent-sandbox v1.0
+
+Goal: run on agent-sandbox v1.0 (v1beta1) natively instead of relying on the addon's v1alpha1 conversion, and settle what Kubernetes access a sandbox has now that GKE forbids mounting its token.
+
+**Scope** (done 2026-09-29; `docs/decisions.md > Slice 8`):
+- ✅ **Client v1.0.4.** `internal/sandbox` claims from a warm pool (`Options.WarmPool`); the CLI and MCP server use `go-runtime-pool`. Requests route through the sandbox's Service, not a cached pod IP.
+- ✅ **v1beta1 manifests, one base for kind and GKE.** SandboxTemplate, SandboxWarmPool `go-runtime-pool` (claims name it; the `shadow-pool-` name is gone), and the network policy all live in `manifests/base`. The overlay keeps only GKE specifics.
+- ✅ **Upstream Go sandbox-router** (`registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.4`) in the base, DNS-only, header timeout raised to 300 s. kind no longer builds a router, and GKE no longer pulls one from gke-demos' Artifact Registry.
+- ✅ **No in-cluster access.** Sandboxes mount no KSA token on kind or GKE. Snippets reach any GKE cluster, their own included, through the DNS endpoint with Google credentials. `list_k8s_version_snippet.go` is gone; the prompt and design doc say so.
+
+**Pass criteria** (met 2026-09-29):
+- `scripts/smoketest-kind.sh --compare` and `scripts/smoketest-mcp.sh --target=kind --compare` pass on agent-sandbox v1.0.4.
+- `scripts/smoketest-gke.sh --compare` passes on a fresh rapid-channel Autopilot cluster, with claims bound to `go-runtime-pool`.
 
 ## Critical files for MVP (slice 0 + slice 1)
 

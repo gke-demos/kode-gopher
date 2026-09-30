@@ -72,8 +72,8 @@ if [[ -z "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
 fi
 kubectl --context "$CONTEXT" get ns "$NS" >/dev/null \
   || die "namespace '$NS' not found in context '$CONTEXT' (run smoketest-${TARGET}.sh first)"
-kubectl --context "$CONTEXT" -n "$NS" get sandboxtemplate go-runtime-template >/dev/null \
-  || die "SandboxTemplate 'go-runtime-template' not deployed to $NS (run smoketest-${TARGET}.sh first)"
+kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool go-runtime-pool >/dev/null \
+  || die "SandboxWarmPool 'go-runtime-pool' not deployed to $NS (run smoketest-${TARGET}.sh first)"
 echo "context=$CONTEXT  namespace=$NS  project=$GOOGLE_CLOUD_PROJECT  target=$TARGET"
 
 step "build binaries"

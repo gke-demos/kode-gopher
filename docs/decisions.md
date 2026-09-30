@@ -902,3 +902,44 @@ The same overlay worked on 2026-09-27. On a new rapid-channel cluster, the addon
   - The overlay now sets `spec.networkPolicy`: ingress on 8888 from our router, egress to the internet plus DNS to 169.254.20.10 and kube-dns.
 
 **Follow-up:** move the client to `sigs.k8s.io/agent-sandbox` v1.0.x and the manifests to v1beta1, and retire the `shadow-pool-` naming trick. Also decide what "the sandbox's own cluster" means on GKE now that the KSA token can't be mounted. `docs/design.md` and the prompt still describe `rest.InClusterConfig()` as working.
+
+## Slice 8: agent-sandbox v1.0 — warm pools, the Go router, and no in-cluster access — 2026-09-29
+
+Slice 7 kept our v0.4.6 client working against the GKE addon's v1beta1 API through workarounds. This slice moves to `sigs.k8s.io/agent-sandbox` v1.0.4 and v1beta1 manifests on both kind and GKE.
+
+### Client
+The v1.0.4 Go client barely changed for us:
+- `Options.TemplateName` became `WarmPoolName`, and `CreateSandbox` takes a pool name.
+- `internal/sandbox.Options.Template` is now `WarmPool`, and the CLI and MCP server claim from `go-runtime-pool`.
+- The client speaks only v1beta1, so kind needs the v1.0 controller (`sandbox-with-extensions.yaml` from the release).
+
+The bump also moves the host module to client-go 0.37 and controller-runtime 0.25. The sandbox image builds from its own module (`internal/prewarm`), so it didn't change, and the pin `p-c158bbe9970d` still holds.
+
+We set `DisablePodIPRouting`. By default the client sends the pod IP it read at open, and the router dials that IP directly. On kind, the smoketest deleted a warm pod right after applying the manifests. A claim then adopted the Sandbox while it still showed Ready with the dead pod's IP, and every request 502'd with connection refused. Routing by the per-sandbox headless Service follows the live pod. The kind smoketest now deletes the pool's Sandboxes (foreground cascade) instead of their pods.
+
+### Manifests: one v1beta1 base
+- **Warm pool.** `SandboxWarmPool go-runtime-pool` moved into `manifests/base`, with 1 replica on kind and 2 on GKE. v1beta1 claims require `warmPoolRef`, and an empty pool still works: the controller cold-starts from the pool's template. The `shadow-pool-go-runtime-template` name is gone.
+- **Network policy.** It moved into the base. The open-source v1.0 controller applies the same Managed default as the addon, so kind (kindnet enforces NetworkPolicy) broke the same way GKE did. The policy allows ingress from our router, egress to DNS and to public IPs.
+- **Router.** Upstream rewrote the sandbox-router in Go and publishes `registry.k8s.io/agent-sandbox/sandbox-router-go`. It's in the base now, so kind no longer builds the Python router and GKE no longer pulls from gke-demos' Artifact Registry. It keeps the `sandbox-router-svc` name, port 8080 and the `X-Sandbox-*` headers. Two settings differ from upstream's example:
+  - `--cache-enabled=false`. The Pod-IP cache needs a cluster-wide pods list/watch grant. Without it, the router needs no API access and mounts no token.
+  - `--response-header-timeout=300s` (default 30s) and `--proxy-timeout=300s`. Our server writes headers when the command exits, so the default would 502 any build or run over 30s. A 45s run on GKE passed.
+- **The GKE overlay** keeps only GKE specifics: gVisor, the pinned image, securityContext, the ComputeClass and the pool size.
+
+### In-cluster access: none
+The addon's admission policy rejects templates that mount the KSA token. We could have kept `rest.InClusterConfig()` on kind only, but chose to drop it everywhere:
+- **kind would need a hole.** The sandbox policy blocks private ranges, and the API server is on one, so kind would need an API-server exception that GKE can't have.
+- **A dev-only capability misleads.** The prompt would advertise something production can't do, and the kind smoketest would stop predicting GKE.
+- **The GKE path already works.** It's the container API plus the DNS endpoint with forwarded Google credentials (`list_gke_pods_snippet.go`), and it works for the sandbox's own cluster too. Kubernetes RBAC for the caller's Google identity is the only grant that matters, and the sandbox KSA stays powerless.
+
+So `automountServiceAccountToken: false` sits in the base, `testdata/list_k8s_version_snippet.go` and its MCP smoketest case are deleted, and the prompt and `docs/design.md` describe the one path.
+
+### Verified
+| | kind (v1.0.4) | GKE rapid 1.36, fresh cluster |
+|---|---|---|
+| list_buckets.go (CLI) | 3.6 s, build 2.4 s ✅ match | 4.9 s, build 3.7 s ✅ match |
+| list_buckets_snippet.go (CLI) | 3.5 s, build 2.4 s ✅ match | 5.2 s, build 3.9 s ✅ match |
+| list_gke_pods_snippet.go (CLI) | 3.2 s ✅ | 3.9 s ✅ |
+| MCP smoketest (4 execute cases + compare) | ✅ | ✅ |
+| 45 s run through the router | | ✅ |
+
+GKE builds were a little slower than slice 7's 2.3-2.6 s. These were the first builds on newly provisioned nodes, and the MCP run right after took 3.2-3.9 s end to end.

@@ -22,12 +22,10 @@
 #   - kubectl context $CONTEXT exists and reaches the cluster
 #   - the agent-sandbox CRDs and controller are installed (addon handles this)
 #   - a SandboxTemplate-hosting namespace exists ($NS)
-#   - some sandbox-router deployment exists somewhere in the cluster
-#     with `app=sandbox-router` labels (we use whatever's there; we
-#     don't deploy our own)
 #
-# Applies manifests/overlays/gke (which pins the CI-published GHCR image;
-# see `make sandbox-pin`), runs
+# Applies manifests/overlays/gke (SandboxTemplate, SandboxWarmPool and
+# sandbox-router; pins the CI-published GHCR image, see
+# `make sandbox-pin`), runs
 # `kode-gopher exec --namespace=$NS` against each TEST_FILE, and (with
 # --compare) diffs against `gcloud storage buckets list`.
 #
@@ -47,9 +45,6 @@ NS="${NS:-codemode}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# No list_k8s_version_snippet.go: it uses rest.InClusterConfig(), and
-# the agent-sandbox addon forbids mounting the KSA token on GKE (see
-# manifests/overlays/gke). scripts/smoketest-kind.sh still runs it.
 DEFAULT_FILES=(
   "testdata/list_buckets.go"
   "testdata/list_buckets_snippet.go"
@@ -99,7 +94,7 @@ echo "context=$CONTEXT  namespace=$NS  project=$GOOGLE_CLOUD_PROJECT  test_files
 step "switch kubectl current-context to '$CONTEXT' (kode-gopher inherits it)"
 kubectl config use-context "$CONTEXT" >/dev/null
 
-step "apply manifests/overlays/gke (SandboxTemplate + SandboxWarmPool -> '$NS')"
+step "apply manifests/overlays/gke (SandboxTemplate + SandboxWarmPool + sandbox-router -> '$NS')"
 kubectl --context "$CONTEXT" apply -k manifests/overlays/gke
 for _ in {1..30}; do
   if kubectl --context "$CONTEXT" -n "$NS" get sandboxtemplate go-runtime-template >/dev/null 2>&1; then
@@ -114,19 +109,19 @@ step "wait for warmpool to populate (up to 8 min on a cold node)"
 # Autopilot may need to provision a fresh gVisor node + pull the
 # image, so first-run can take ~2-3 minutes. Subsequent invocations
 # are fast because the pool is already warm.
-desired=$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool shadow-pool-go-runtime-template -o jsonpath='{.spec.replicas}' 2>/dev/null)
+desired=$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool go-runtime-pool -o jsonpath='{.spec.replicas}' 2>/dev/null)
 desired=${desired:-2}
 for i in {1..48}; do
-  ready=$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool shadow-pool-go-runtime-template -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+  ready=$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool go-runtime-pool -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
   printf "  t+%03ds  ready=%s/%s\n" $((i*10)) "${ready:-0}" "$desired"
   [[ "$ready" == "$desired" ]] && break
   sleep 10
 done
-[[ "$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool shadow-pool-go-runtime-template -o jsonpath='{.status.readyReplicas}')" == "$desired" ]] \
+[[ "$(kubectl --context "$CONTEXT" -n "$NS" get sandboxwarmpool go-runtime-pool -o jsonpath='{.status.readyReplicas}')" == "$desired" ]] \
   || die "warmpool did not become ready within 8 minutes"
 
 step "wait for sandbox-router in '$NS' (deployed by the overlay)"
-kubectl --context "$CONTEXT" -n "$NS" rollout status deployment/sandbox-router-deployment --timeout=180s
+kubectl --context "$CONTEXT" -n "$NS" rollout status deployment/sandbox-router --timeout=180s
 
 step "build kode-gopher -> ./bin/kode-gopher"
 mkdir -p bin
@@ -185,7 +180,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
 
   if [[ $COMPARE -eq 1 ]]; then
     # gcloud diff only applies to bucket-listing snippets; others
-    # (e.g. list_k8s_version_snippet.go) still run for the
+    # (e.g. list_gke_pods_snippet.go) still run for the
     # compile+execute proof but have no reference to check against.
     if [[ "$base" == list_buckets* ]]; then
       step "compare against gcloud: $TEST_FILE"

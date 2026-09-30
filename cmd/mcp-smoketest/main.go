@@ -83,16 +83,15 @@ func main() {
 		}
 	}
 
-	// 2. Exercise the test files (verbatim GCS + wrapped GCS + wrapped
-	// k8s) and parse the structured output from each. The wrapped-k8s
-	// case is what proves the k8s.io/client-go additions to the
-	// curated set are prewarmed AND that in-cluster auth works from
-	// the sandbox pod.
+	// 2. Exercise the test files (verbatim GCS + wrapped GCS + GKE
+	// composition) and parse the structured output from each. The
+	// gke-compose case proves the container/apiv1 and k8s.io/client-go
+	// additions to the curated set are prewarmed, and that a snippet can
+	// reach a GKE cluster with forwarded Google credentials.
 	var snippetResult []map[string]any
 	for _, tc := range []struct{ label, path string }{
 		{"verbatim", "testdata/list_buckets.go"},
 		{"wrapped", "testdata/list_buckets_snippet.go"},
-		{"k8s", "testdata/list_k8s_version_snippet.go"},
 		{"gke-compose", "testdata/list_gke_pods_snippet.go"},
 	} {
 		out, err := callExecuteGoCode(ctx, session, tc.path)

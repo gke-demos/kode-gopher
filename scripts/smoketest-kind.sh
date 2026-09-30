@@ -20,9 +20,9 @@
 # Brings up everything kode-gopher needs to run a Go program in a sandbox:
 #   1. kind cluster (created if missing; reused otherwise)
 #   2. agent-sandbox controller + extensions
-#   3. sandbox-router (built from kubernetes-sigs/agent-sandbox git context)
-#   4. kode-gopher sandbox image (built from sandbox/Dockerfile; prewarms GCP cache)
-#   5. SandboxTemplate 'go-runtime-template' (manifests/base)
+#   3. kode-gopher sandbox image (built from sandbox/Dockerfile; prewarms GCP cache)
+#   4. manifests/base: SandboxTemplate 'go-runtime-template', SandboxWarmPool
+#      'go-runtime-pool' and the upstream Go sandbox-router
 # Then builds the local kode-gopher binary and runs `kode-gopher exec`
 # against each TEST_FILE — by default both the verbatim variant
 # (testdata/list_buckets.go) and the snippet variant
@@ -38,19 +38,16 @@
 #
 # Env overrides:
 #   KIND_CLUSTER      cluster name             (kode-gopher-smoke)
-#   AS_VERSION        agent-sandbox release    (v0.4.6)
+#   AS_VERSION        agent-sandbox release    (v1.0.4)
 #   NS                target namespace         (default)
 #   KODE_GOPHER_IMG   sandbox image tag        (kode-gopher-sandbox:latest)
 
 set -euo pipefail
 
 CLUSTER="${KIND_CLUSTER:-kode-gopher-smoke}"
-AS_VERSION="${AS_VERSION:-v0.4.6}"
+AS_VERSION="${AS_VERSION:-v1.0.4}"
 NS="${NS:-default}"
 KODE_GOPHER_IMG="${KODE_GOPHER_IMG:-kode-gopher-sandbox:latest}"
-ROUTER_IMG="sandbox-router:${AS_VERSION}"
-ROUTER_CTX="https://github.com/kubernetes-sigs/agent-sandbox.git#${AS_VERSION}:clients/python/agentic-sandbox-client/sandbox-router"
-ROUTER_YAML_URL="https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AS_VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -58,7 +55,6 @@ cd "$REPO_ROOT"
 DEFAULT_FILES=(
   "testdata/list_buckets.go"
   "testdata/list_buckets_snippet.go"
-  "testdata/list_k8s_version_snippet.go"
   "testdata/list_gke_pods_snippet.go"
 )
 TEST_FILES=("${DEFAULT_FILES[@]}")
@@ -83,7 +79,7 @@ warn() { printf '\033[1;33m!!  %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m!!  %s\033[0m\n' "$*" >&2; exit 1; }
 
 step "preflight"
-for bin in kind kubectl docker go gcloud jq curl awk diff python3; do
+for bin in kind kubectl docker go gcloud jq awk diff python3; do
   command -v "$bin" >/dev/null 2>&1 || die "missing prerequisite: $bin"
 done
 if [[ -z "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
@@ -109,27 +105,11 @@ fi
 kubectl config use-context "kind-${CLUSTER}" >/dev/null
 
 step "install agent-sandbox controller ${AS_VERSION}"
-kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AS_VERSION}/manifest.yaml"
-kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AS_VERSION}/extensions.yaml"
+kubectl apply --server-side -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AS_VERSION}/sandbox-with-extensions.yaml"
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
 # Extensions may install one or more sibling deployments — wait on all of them.
 kubectl -n agent-sandbox-system get deployments -o name \
   | xargs -r -I{} kubectl -n agent-sandbox-system rollout status {} --timeout=180s
-
-step "build sandbox-router image (${ROUTER_IMG})"
-if docker image inspect "$ROUTER_IMG" >/dev/null 2>&1; then
-  echo "(image already built locally; skipping)"
-else
-  docker build -t "$ROUTER_IMG" "$ROUTER_CTX"
-fi
-kind load docker-image "$ROUTER_IMG" --name "$CLUSTER"
-
-step "deploy sandbox-router into namespace '$NS'"
-curl -sfL "$ROUTER_YAML_URL" \
-  | sed -e "s|\${ROUTER_IMAGE}|$ROUTER_IMG|g" \
-        -e "s|# imagePullPolicy: Never|imagePullPolicy: IfNotPresent|" \
-  | kubectl -n "$NS" apply -f -
-kubectl -n "$NS" rollout status deployment/sandbox-router-deployment --timeout=180s
 
 step "build ${KODE_GOPHER_IMG} (extends upstream with prewarmed GCP cache)"
 docker build -t "$KODE_GOPHER_IMG" -f sandbox/Dockerfile .
@@ -137,8 +117,9 @@ docker build -t "$KODE_GOPHER_IMG" -f sandbox/Dockerfile .
 step "load ${KODE_GOPHER_IMG} into kind"
 kind load docker-image "$KODE_GOPHER_IMG" --name "$CLUSTER"
 
-step "apply SandboxTemplate 'go-runtime-template' (manifests/base, references ${KODE_GOPHER_IMG})"
+step "apply manifests/base (SandboxTemplate + SandboxWarmPool + sandbox-router, references ${KODE_GOPHER_IMG})"
 kubectl apply -k manifests/base
+kubectl -n "$NS" rollout status deployment/sandbox-router --timeout=180s
 for _ in {1..30}; do
   if kubectl -n "$NS" get sandboxtemplate go-runtime-template >/dev/null 2>&1; then
     break
@@ -148,9 +129,22 @@ done
 kubectl -n "$NS" get sandboxtemplate go-runtime-template >/dev/null \
   || die "SandboxTemplate 'go-runtime-template' did not appear within 30s"
 
-# Evict any leaked sandbox pods so the next claim creates a fresh one
-# from our latest image.
-kubectl -n "$NS" delete pods -l sandbox --ignore-not-found --wait=false >/dev/null 2>&1 || true
+# Replace the pool's unclaimed sandboxes so claims get pods from the
+# image just loaded. Delete Sandboxes, not their pods: a Sandbox whose
+# pod was deleted stays Ready with the dead pod's IP for a moment, a
+# claim can adopt it then, and every request 502s. Foreground cascade
+# returns only once the pods are gone.
+step "refresh warm pool 'go-runtime-pool' (up to 3 min)"
+kubectl -n "$NS" delete sandbox -l agents.x-k8s.io/warm-pool-sandbox \
+  --cascade=foreground --ignore-not-found --wait=true
+ready=0
+for _ in {1..90}; do
+  ready=$(kubectl -n "$NS" get pods -l sandbox=kode-gopher-sandbox,agents.x-k8s.io/warm-pool-sandbox \
+    -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' | grep -c true || true)
+  [[ "$ready" -ge 1 ]] && break
+  sleep 2
+done
+[[ "$ready" -ge 1 ]] || die "warm pool did not become ready within 3 minutes"
 
 step "build kode-gopher binary -> ./bin/kode-gopher"
 mkdir -p bin
@@ -221,7 +215,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
 
   if [[ $COMPARE -eq 1 ]]; then
     # The gcloud diff only applies to bucket-listing snippets. Other
-    # test files (e.g. list_k8s_version_snippet.go) still run for the
+    # test files (e.g. list_gke_pods_snippet.go) still run for the
     # compile+execute proof but have no gcloud reference to check
     # against.
     if [[ "$base" == list_buckets* ]]; then

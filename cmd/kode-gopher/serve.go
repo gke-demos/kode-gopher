@@ -54,7 +54,7 @@ func runServe(args []string) int {
 
 	srv := mcp.New(mcp.Config{
 		Namespace:   *namespace,
-		Template:    "go-runtime-template",
+		WarmPool:    "go-runtime-pool",
 		Claim:       *claim,
 		Persistent:  *persistent,
 		OpenTimeout: *openTO,

@@ -45,7 +45,7 @@ import (
 	"github.com/gke-demos/kode-gopher/internal/sandbox"
 )
 
-const sandboxTemplate = "go-runtime-template"
+const sandboxWarmPool = "go-runtime-pool"
 
 // forwardedEnv lists host env vars copied into the sandbox if set.
 // The unified creds.NewForwarded takes this as its EnvAllowList.
@@ -170,10 +170,10 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 
 	openCtx, cancelOpen := context.WithTimeout(ctx, openTimeout)
 	defer cancelOpen()
-	log.Printf("opening sandbox (namespace=%s template=%s claim=%q context=%q)", namespace, sandboxTemplate, claim, kubeContext)
+	log.Printf("opening sandbox (namespace=%s pool=%s claim=%q context=%q)", namespace, sandboxWarmPool, claim, kubeContext)
 	sess, err := sandbox.Open(openCtx, sandbox.Options{
 		Namespace:   namespace,
-		Template:    sandboxTemplate,
+		WarmPool:    sandboxWarmPool,
 		KubeContext: kubeContext,
 		ClaimName: claim,
 	})

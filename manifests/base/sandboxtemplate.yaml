@@ -12,36 +12,81 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SandboxTemplate that the kode-gopher CLI / MCP server creates pods from.
-# Same name as upstream's (`go-runtime-template`) so the kode-gopher binary
-# doesn't need to know which template is in use — but points at our
-# locally-built image with the prewarmed GCP cache.
+# SandboxTemplate that the kode-gopher CLI / MCP server's warm pool
+# (warmpool.yaml) creates pods from. Same name as upstream's
+# (`go-runtime-template`), but points at our locally-built image with
+# the prewarmed GCP cache.
 #
 # Slice 0.5: no runtimeClassName (kind has no sandbox runtime).
 # Slice 3: gVisor overlay + Workload Identity binding land in
 # manifests/overlays/gke/.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+# Slice 8: v1beta1. Network policy and token settings moved here from
+# the GKE overlay, since agent-sandbox v1.0 applies the same defaults
+# on kind.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: go-runtime-template
-  namespace: default
 spec:
   # Controller-managed headless Service per sandbox — the sandbox-router
   # resolves this via DNS. Without it, uploads/runs return 502.
   service: true
+  # With Managed and no networkPolicy, the controller's default admits
+  # ingress only from app=sandbox-router in agent-sandbox-system, and
+  # egress only to public IPs, which also blocks cluster DNS. Our router
+  # runs in the claim's namespace, and snippets need DNS for every GCP
+  # call. So: ingress from our router, egress to DNS (kube-dns, plus
+  # NodeLocal DNSCache at 169.254.20.10 on GKE) and to public IPs.
+  # Private ranges, the API server and the metadata server stay blocked.
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+      - from:
+          - podSelector:
+              matchLabels:
+                app: sandbox-router
+        ports:
+          - port: 8888
+            protocol: TCP
+    egress:
+      - to:
+          - ipBlock:
+              cidr: 169.254.20.10/32
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+        ports:
+          - port: 53
+            protocol: UDP
+          - port: 53
+            protocol: TCP
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+              except:
+                - 10.0.0.0/8
+                - 172.16.0.0/12
+                - 192.168.0.0/16
+                - 169.254.0.0/16
+          - ipBlock:
+              cidr: ::/0
+              except:
+                - fc00::/7
+                - fe80::/10
   podTemplate:
     metadata:
       labels:
         sandbox: kode-gopher-sandbox
     spec:
-      # The agent-sandbox extensions controller's "secure by default"
-      # policy (extensions/controllers/utils.go:28) sets this to false
-      # unless overridden. Explicitly opting in mounts the sandbox
-      # KSA's token + cluster CA at /var/run/secrets/kubernetes.io/
-      # serviceaccount/, letting snippets call rest.InClusterConfig()
-      # against the API server the sandbox itself runs on. Snippets
-      # still need k8s RBAC for typed calls; the default KSA has none.
-      automountServiceAccountToken: true
+      # No KSA token, so no rest.InClusterConfig(). Snippets reach
+      # clusters, including this one, through the GKE API with Google
+      # credentials (docs/decisions.md > Slice 8). This is the
+      # controller's default anyway, and the GKE addon's admission
+      # policy rejects templates that mount the token.
+      automountServiceAccountToken: false
       containers:
         - name: go-runtime
           image: kode-gopher-sandbox:latest
