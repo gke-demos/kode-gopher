@@ -86,6 +86,8 @@ gcloud storage buckets list --format=json | jq '[.[] | {name, timeCreated}] | so
 
 ## Slice 5 — HTTP / SSE transport
 
+> **2026-09-30:** the in-cluster answers to the questions below are in `docs/design-in-cluster.md` (slice 9). Streaming stays open.
+
 Adds a second transport mode to `kode-gopher serve` so the MCP server can be reached over TCP from clients that aren't co-located. Significantly larger than the previous slices because several things that stdio sidesteps become real design questions.
 
 **Scope (to firm up before starting; the questions below are the gate):**
@@ -167,6 +169,18 @@ Goal: run on agent-sandbox v1.0 (v1beta1) natively instead of relying on the add
 **Pass criteria** (met 2026-09-29):
 - `scripts/smoketest-kind.sh --compare` and `scripts/smoketest-mcp.sh --target=kind --compare` pass on agent-sandbox v1.0.4.
 - `scripts/smoketest-gke.sh --compare` passes on a fresh rapid-channel Autopilot cluster, with claims bound to `go-runtime-pool`.
+
+## Slice 9 — in-cluster kode-gopher (proposed)
+
+Goal: users add one URL to their MCP client and sign in with Google. They need no kubeconfig, no Kubernetes RBAC and no local binary, and snippets run as the signed-in user. Design: `docs/design-in-cluster.md`.
+
+**Build order** (each step ships separately):
+1. sandbox-server GCE metadata emulator (access token only in the sandbox) and in-cluster connectivity (no router).
+2. HTTP transport: one sandbox per MCP session, claim leases via `spec.lifecycle.shutdownTime`, per-user session cap.
+   Agent Identity vault spike, finished 2026-09-30: phases A and B passed, including silent renewal after expiry, provided the requested scopes match the stored grant exactly. Step 3 uses the vault for custody, with the sealed envelope as fallback.
+3. kode-gopher as a spec-compliant OAuth 2.1 authorization server fronting Google sign-in: PKCE (S256), RFC 8707 resource indicators, CIMD + DCR + pre-registered clients; stateless sealed tokens; allow-list by Google group (required) and domain; all Google-side settings per-deployment config.
+4. GKE manifests (Gateway, cert, network policies including router lock-down) and `scripts/smoketest-http.sh`.
+5. Service-identity mode and the client-credentials extension (separate step).
 
 ## Critical files for MVP (slice 0 + slice 1)
 
