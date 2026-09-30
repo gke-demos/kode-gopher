@@ -942,4 +942,4 @@ So `automountServiceAccountToken: false` sits in the base, `testdata/list_k8s_ve
 | MCP smoketest (4 execute cases + compare) | ✅ | ✅ |
 | 45 s run through the router | | ✅ |
 
-GKE builds were a little slower than slice 7's 2.3-2.6 s. These were the first builds on newly provisioned nodes, and the MCP run right after took 3.2-3.9 s end to end.
+The GKE builds above (3.7-3.9 s) were the first on a brand-new cluster. A recheck on 2026-09-30 found no regression. On a second fresh cluster, the scheduling events put every sandbox pod on the `kode-gopher-sandbox` C3 node (`c3-standard-4`). Repeated runs there built in 2.47-2.67 s (3.2-3.8 s end to end), within slice 7's 2.3-2.6 s. The first builds on a new node are probably slower because the image's build cache is read from disk rather than the node's page cache; this wasn't measured.
