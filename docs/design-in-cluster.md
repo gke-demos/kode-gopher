@@ -138,7 +138,7 @@ How it fits:
 - The consent URL carries `code_challenge_method=S256` and `state`, and redirects to `.../authProviders/kg-spike-google/oauthcallback`.
 - Project owner does **not** include `retrieveCredentials`, so the principal needs the role explicitly.
 
-**Spike, 2026-09-30, phase B (real consent): partly done.** It used a Web OAuth client marked "used by an AI-powered agent". The harness ran in the spike pod as the Workload Identity, and the continue URI was reached through a browser.
+**Spike, 2026-09-30, phase B (real consent): passed.** It used a Web OAuth client marked "used by an AI-powered agent". The harness ran in the spike pod as the Workload Identity, and the continue URI was reached through a browser.
 - **The flow works end to end.** `retrieve` returns `uriConsentRequired`, then Google consent, then the vault's `oauthcallback`, then our continue URI. That URI receives `user_id_validation_state`, `auth_provider_name`, `connector_name` and `uuid`. Then `finalize` (200, empty body), then `retrieve` returns `success` with a 1 h token issued to our client (`azp`).
 - **Finalize caller:** the workload, with only `roles/agentidentity.user`. No extra role is needed.
 - **The user ID isn't checked.** The vault accepted an arbitrary `userId` and stored the grant of whichever account consented. The API has only `retrieve` and `finalize`, so there's no way to list or delete a stored credential. kode-gopher must:
@@ -147,10 +147,14 @@ How it fits:
   - refuse on a mismatch.
   The `userId` is always our own verified `sub`, never user input.
 - **Offline access is configurable.** By default the consent URL has no `access_type=offline`. Query parameters on the provider's `authorizationUrl` are preserved, so `...?access_type=offline&prompt=consent` adds them.
-- **Renewal (open).** `forceRefreshToken` with a still-valid token returns `uriConsentRequired`, with or without the offline grant. The docs say to set it only for an expired or invalid token. What happens after expiry decides whether the vault is usable: plain `retrieve` renews silently, `forceRefreshToken` renews, or the user has to consent again every hour.
+- **Renewal works, given the offline grant and exact scopes.** After the 1 h token expired, plain `retrieve` silently returned a fresh token for the same `sub`, and `retrieve` with `forceRefreshToken` minted another. No consent was needed. Two traps:
+  - **Scopes must match the stored grant exactly.** The vault stores Google's canonical names (`email` becomes `https://www.googleapis.com/auth/userinfo.email`). A request naming `email` doesn't match, and every call falls through to `uriConsentRequired`. kode-gopher requests `openid`, `https://www.googleapis.com/auth/userinfo.email` and `cloud-platform`, spelled that way, always.
+  - **`expireTime` is unreliable.** One renewed token reported an `expireTime` 4 h out, while tokeninfo gave it 1 h. Treat tokens as good for under an hour, and retry with `forceRefreshToken` on a 401.
+
+  `forceRefreshToken` with a still-valid token returns `uriConsentRequired`, as the docs imply (set it only for an expired or invalid token). Without the offline grant, the grant can't renew.
 - **Org admin trust.** In a Workspace org that restricts Google Cloud scopes, consent fails with "Access blocked: your institution's admin needs to review" until an admin marks the client Trusted. This applies to kode-gopher's own client under either custody option.
 
-Decision rule: if phase B passes, the vault is the default custody backend and the sealed envelope is the fallback for deployments without it. It's an interface in `internal/oauth`, either way.
+Decision: phase B passed, so the vault is the default custody backend and the sealed envelope is the fallback for deployments without it. It's an interface in `internal/oauth`, either way.
 
 **Google OAuth client.** It's an "Internal" consent screen in the deploying organization, so `cloud-platform` needs no app verification. Mark it "used by an AI-powered agent". In orgs that restrict Google Cloud scopes, a Workspace admin must mark it Trusted (see the phase B results). This is the "own a client" cost that `docs/design.md > Why not 3LO` avoided for desktop use; in-cluster there's no way around it.
 
@@ -255,7 +259,7 @@ The router's deny-all ingress policy (the earlier proposal) lands here too. The 
 3. **OAuth authorization server with Google, plus the allow-list (groups and domains).**
    - Authorization code with PKCE, resource indicators, and all three registration mechanisms.
    - Test with Claude Code and MCP Inspector.
-   - Credential custody is behind an interface: sealed envelope, or the Agent Identity vault, depending on the spike.
+   - Credential custody is behind an interface: the Agent Identity vault by default (it passed the spike), sealed envelope as the fallback.
 4. **Manifests: Gateway, cert, policies. Smoketest on GKE.**
 5. **Service-identity mode and the client-credentials extension.** This is a separate step: a different trust model (no user), its own config, and nothing in steps 1–4 depends on it.
 
