@@ -102,7 +102,7 @@ func toWireResult(r *executor.Result) *Result {
 	return out
 }
 
-func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest, args ExecuteGoCodeArgs) (*sdk.CallToolResult, *ExecuteGoCodeOutput, error) {
+func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolRequest, args ExecuteGoCodeArgs) (*sdk.CallToolResult, *ExecuteGoCodeOutput, error) {
 	start := time.Now()
 
 	// Exactly one of code/files must be set.
@@ -161,15 +161,16 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 		}
 	}
 
-	sess, err := s.ensureSession(ctx)
+	sl := s.slotFor(req)
+	sess, err := s.ensureSession(ctx, sl)
 	if err != nil {
 		return toolError(err.Error()), nil, nil
 	}
 
 	// Serialize tool invocations: one Execute at a time on this
 	// session, even if the SDK is dispatching us concurrently.
-	s.execMu.Lock()
-	defer s.execMu.Unlock()
+	sl.execMu.Lock()
+	defer sl.execMu.Unlock()
 
 	// runOnce runs Reset + Build/Run/Fetch on the given session. Split
 	// out so the retry-on-dead-session path below can reuse it against
@@ -189,21 +190,16 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 	outcome, err := runOnce(sess)
 	if err != nil && errors.Is(err, sandbox.ErrSessionDead) && ctx.Err() == nil {
 		// Session went away (pod evicted, port-forward dropped, ...).
-		// Close what we have, drop it from the server's session slot,
+		// Close what we have, drop it from the MCP session's slot,
 		// open a fresh one, and try the whole (reset + build + run)
 		// dance once more. On retry failure return the ORIGINAL error
 		// so diagnostics point at the real cause, not the retry symptom.
 		origErr := err
 		log.Printf("execute_go_code: session dead, closing and retrying once: %v", err)
 		closeCtx, cancelClose := context.WithTimeout(context.Background(), 30*time.Second)
-		_ = sess.Close(closeCtx)
+		s.dropSession(closeCtx, sl, sess)
 		cancelClose()
-		s.mu.Lock()
-		if s.session == sess {
-			s.session = nil
-		}
-		s.mu.Unlock()
-		if sess2, e := s.ensureSession(ctx); e == nil {
+		if sess2, e := s.ensureSession(ctx, sl); e == nil {
 			if o2, e2 := runOnce(sess2); e2 == nil {
 				outcome, err = o2, nil
 			} else {

@@ -15,12 +15,12 @@ limitations under the License.
 */
 
 // Package mcp wraps github.com/modelcontextprotocol/go-sdk to expose
-// kode-gopher as an MCP server. One server process holds at most one
-// sandbox.Session for its lifetime, opens it lazily on the first
-// tool call, and serializes all tool invocations with a mutex.
-//
-// Today the server registers exactly one tool, execute_go_code; the
-// design's lookup_package_docs and gcp_auth_status land in slice 4.
+// kode-gopher as an MCP server. Each MCP session gets its own sandbox,
+// opened lazily on the session's first tool call, and serializes that
+// session's tool invocations with a mutex. Over stdio there is one
+// session for the life of the process. Over streamable HTTP (RunHTTP)
+// there is one per Mcp-Session-Id, and its sandbox is closed when the
+// session ends.
 package mcp
 
 import (
@@ -48,11 +48,11 @@ type Config struct {
 	// WarmPool is the SandboxWarmPool name to claim from.
 	WarmPool string
 	// Claim, if non-empty, reattaches to an existing sandbox instead
-	// of creating a new one on first tool call.
+	// of creating a new one on first tool call. stdio only.
 	Claim string
 	// Persistent: on shutdown, Disconnect (leave sandbox alive) rather
 	// than Close (delete it). Useful for development across multiple
-	// server restarts.
+	// server restarts. stdio only.
 	Persistent bool
 	// OpenTimeout bounds the sandbox.Open call on first tool use.
 	OpenTimeout time.Duration
@@ -75,6 +75,13 @@ type Config struct {
 	// their Service instead of port-forwarding. A creds.TokenMinter
 	// Credentials source requires it.
 	InCluster bool
+	// Lease forwards to sandbox.Options.Lease: claims expire within
+	// Lease unless renewed, so a crashed server's sandboxes go away.
+	// Zero: claims don't expire.
+	Lease time.Duration
+	// MaxSandboxesPerUser caps the open sandboxes (one per MCP session)
+	// per authenticated user. Zero: no cap.
+	MaxSandboxesPerUser int
 }
 
 func (c *Config) applyDefaults() {
@@ -96,6 +103,17 @@ func (c *Config) applyDefaults() {
 type Server struct {
 	cfg Config
 
+	// mu guards slots and open.
+	mu    sync.Mutex
+	slots map[string]*slot // by MCP session ID; stdio's is ""
+	open  map[string]int   // open sandboxes by user
+}
+
+// slot is one MCP session's sandbox.
+type slot struct {
+	id   string
+	user string // TokenInfo.UserID; "" over stdio
+
 	// mu guards session (and only session). Held briefly during
 	// lazy-open and shutdown.
 	mu      sync.Mutex
@@ -111,14 +129,11 @@ type Server struct {
 // New creates a Server with cfg's defaults filled in.
 func New(cfg Config) *Server {
 	cfg.applyDefaults()
-	return &Server{cfg: cfg}
+	return &Server{cfg: cfg, slots: map[string]*slot{}, open: map[string]int{}}
 }
 
-// Run starts the MCP server on the stdio transport and blocks until
-// ctx is cancelled or the transport closes. Always calls shutdown on
-// return (using a fresh context so it completes even after ctx is
-// cancelled by SIGINT).
-func (s *Server) Run(ctx context.Context) error {
+// newSDKServer registers kode-gopher's tools on a go-sdk server.
+func (s *Server) newSDKServer() *sdk.Server {
 	srv := sdk.NewServer(&sdk.Implementation{
 		Name:    "kode-gopher",
 		Version: Version,
@@ -135,14 +150,19 @@ func (s *Server) Run(ctx context.Context) error {
 		Name:        "lookup_package_docs",
 		Description: lookupPackageDocsDescription,
 	}, s.handleLookupPackageDocs)
+	return srv
+}
 
-	runErr := srv.Run(ctx, &sdk.StdioTransport{})
+// Run starts the MCP server on the stdio transport and blocks until
+// ctx is cancelled or the transport closes. Always calls shutdown on
+// return (using a fresh context so it completes even after ctx is
+// cancelled by SIGINT).
+func (s *Server) Run(ctx context.Context) error {
+	runErr := s.newSDKServer().Run(ctx, &sdk.StdioTransport{})
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := s.shutdown(shutdownCtx); err != nil {
-		log.Printf("mcp shutdown: %v", err)
-	}
+	s.shutdown(shutdownCtx)
 
 	if runErr != nil && ctx.Err() == nil {
 		return runErr
@@ -150,46 +170,149 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// ensureSession lazy-opens the sandbox.Session on first use and
-// reuses it on subsequent calls.
-func (s *Server) ensureSession(ctx context.Context) (*sandbox.Session, error) {
+// slotFor returns the calling MCP session's slot, creating it on the
+// session's first tool call. An HTTP session's slot is released, and
+// its sandbox closed, when the session ends (client DELETE or idle
+// timeout).
+func (s *Server) slotFor(req *sdk.CallToolRequest) *slot {
+	var id, user string
+	if req != nil && req.Session != nil {
+		id = req.Session.ID()
+	}
+	if req != nil && req.Extra != nil && req.Extra.TokenInfo != nil {
+		user = req.Extra.TokenInfo.UserID
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.session != nil {
-		return s.session, nil
+	if sl, ok := s.slots[id]; ok {
+		return sl
+	}
+	sl := &slot{id: id, user: user}
+	s.slots[id] = sl
+	if id != "" {
+		ss := req.Session
+		go func() {
+			_ = ss.Wait()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			s.release(ctx, id)
+		}()
+	}
+	return sl
+}
+
+// ensureSession lazy-opens the slot's sandbox.Session on first use and
+// reuses it on subsequent calls.
+func (s *Server) ensureSession(ctx context.Context, sl *slot) (*sandbox.Session, error) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	if sl.session != nil {
+		return sl.session, nil
+	}
+	if err := s.reserve(sl.user); err != nil {
+		return nil, err
 	}
 	openCtx, cancel := context.WithTimeout(ctx, s.cfg.OpenTimeout)
 	defer cancel()
-	log.Printf("opening sandbox (namespace=%s pool=%s claim=%q context=%q)", s.cfg.Namespace, s.cfg.WarmPool, s.cfg.Claim, s.cfg.KubeContext)
+	log.Printf("opening sandbox (namespace=%s pool=%s claim=%q context=%q mcp-session=%q)", s.cfg.Namespace, s.cfg.WarmPool, s.cfg.Claim, s.cfg.KubeContext, sl.id)
 	sess, err := sandbox.Open(openCtx, sandbox.Options{
 		Namespace:   s.cfg.Namespace,
 		WarmPool:    s.cfg.WarmPool,
 		ClaimName:   s.cfg.Claim,
 		KubeContext: s.cfg.KubeContext,
 		InCluster:   s.cfg.InCluster,
+		Lease:       s.cfg.Lease,
 	})
 	if err != nil {
+		s.unreserve(sl.user)
 		return nil, fmt.Errorf("open sandbox: %w", err)
 	}
 	log.Printf("sandbox open: claim=%s", sess.ClaimName())
-	s.session = sess
+	sl.session = sess
 	return sess, nil
 }
 
-// shutdown is called by Run after the transport closes. Closes (or
-// disconnects from, if Persistent) the sandbox.
-func (s *Server) shutdown(ctx context.Context) error {
-	s.mu.Lock()
-	sess := s.session
-	s.session = nil
-	s.mu.Unlock()
-	if sess == nil {
-		return nil
+// dropSession closes sess and clears it from sl, if it's still sl's
+// session. Used when the sandbox died, so the next call opens a new one.
+func (s *Server) dropSession(ctx context.Context, sl *slot, sess *sandbox.Session) {
+	sl.mu.Lock()
+	current := sl.session == sess
+	if current {
+		sl.session = nil
 	}
+	sl.mu.Unlock()
+	_ = sess.Close(ctx)
+	if current {
+		s.unreserve(sl.user)
+	}
+}
+
+func (s *Server) reserve(user string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if max := s.cfg.MaxSandboxesPerUser; max > 0 && s.open[user] >= max {
+		return fmt.Errorf("too many open sandboxes for this user (limit %d); end another MCP session first", max)
+	}
+	s.open[user]++
+	return nil
+}
+
+func (s *Server) unreserve(user string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.open[user]--; s.open[user] <= 0 {
+		delete(s.open, user)
+	}
+}
+
+// release removes a slot and closes (or disconnects from, if
+// Persistent) its sandbox. It waits for a running tool call to finish.
+func (s *Server) release(ctx context.Context, id string) {
+	s.mu.Lock()
+	sl, ok := s.slots[id]
+	delete(s.slots, id)
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	sl.execMu.Lock()
+	defer sl.execMu.Unlock()
+	sl.mu.Lock()
+	sess := sl.session
+	sl.session = nil
+	sl.mu.Unlock()
+	if sess == nil {
+		return
+	}
+	defer s.unreserve(sl.user)
+	var err error
 	if s.cfg.Persistent {
 		log.Printf("disconnecting (claim %s preserved; reattach with --claim=%s)", sess.ClaimName(), sess.ClaimName())
-		return sess.Disconnect(ctx)
+		err = sess.Disconnect(ctx)
+	} else {
+		log.Printf("closing sandbox %s", sess.ClaimName())
+		err = sess.Close(ctx)
 	}
-	log.Printf("closing sandbox %s", sess.ClaimName())
-	return sess.Close(ctx)
+	if err != nil {
+		log.Printf("mcp: release sandbox %s: %v", sess.ClaimName(), err)
+	}
+}
+
+// shutdown releases every slot. Called when the transport closes.
+func (s *Server) shutdown(ctx context.Context) {
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.slots))
+	for id := range s.slots {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.release(ctx, id)
+		}()
+	}
+	wg.Wait()
 }

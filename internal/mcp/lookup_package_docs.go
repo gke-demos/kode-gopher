@@ -49,7 +49,7 @@ type LookupPackageDocsOutput struct {
 // rather than shell-escape.
 var symbolPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 
-func (s *Server) handleLookupPackageDocs(ctx context.Context, _ *sdk.CallToolRequest, args LookupPackageDocsArgs) (*sdk.CallToolResult, *LookupPackageDocsOutput, error) {
+func (s *Server) handleLookupPackageDocs(ctx context.Context, req *sdk.CallToolRequest, args LookupPackageDocsArgs) (*sdk.CallToolResult, *LookupPackageDocsOutput, error) {
 	if args.Package == "" {
 		return toolError("package is required (see curated list in execute_go_code's description)"), nil, nil
 	}
@@ -70,10 +70,11 @@ func (s *Server) handleLookupPackageDocs(ctx context.Context, _ *sdk.CallToolReq
 	// concurrent Reset from execute_go_code would race with our
 	// `go doc` invocation (though we skip Reset ourselves, we still
 	// need to not step on a concurrent build).
-	s.execMu.Lock()
-	defer s.execMu.Unlock()
+	sl := s.slotFor(req)
+	sl.execMu.Lock()
+	defer sl.execMu.Unlock()
 
-	sess, err := s.ensureSession(ctx)
+	sess, err := s.ensureSession(ctx, sl)
 	if err != nil {
 		return toolError(err.Error()), nil, nil
 	}
