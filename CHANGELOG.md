@@ -1,0 +1,19 @@
+# Changelog
+
+All notable changes to kode-gopher are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Every pull request with a user-visible change adds an entry under `## [Unreleased]`. Each release's section becomes its GitHub Release notes verbatim; see [`docs/release-process.md`](./docs/release-process.md).
+
+## [Unreleased]
+
+Everything built so far, before the first tagged release. Slice details are in [`docs/plan.md`](./docs/plan.md), and the evidence behind them in [`docs/decisions.md`](./docs/decisions.md).
+
+### Added
+
+- **Release process.** `kode-gopher version` and the MCP server's `Implementation.Version` report the build version, which GoReleaser stamps on tagged releases (linux and darwin, amd64 and arm64, with a cosign-signed `checksums.txt`). Release notes come from this file. ([#12](https://github.com/gke-demos/kode-gopher/issues/12))
+- **OAuth 2.1 sign-in (slice 9 step 3).** `serve --auth=oauth` makes kode-gopher an OAuth 2.1 authorization server that fronts Google sign-in, with PKCE, resource indicators, CIMD, DCR and pre-registered clients. Access is allow-listed by Google group and domain, and snippets run as the signed-in user.
+- **HTTP transport (slice 9 step 2).** `serve --transport=http` serves streamable HTTP, with one sandbox per MCP session, claim leases so a crashed server's sandboxes expire, and a per-user session cap.
+- **In-cluster mode (slice 9 step 1).** `--in-cluster` dials sandboxes by their Service. `--credentials=access-token` serves a short-lived token to the run only, through a GCE metadata emulator in the sandbox server.
+- **agent-sandbox v1.0 (slice 8).** v1.0.4 client, v1beta1 manifests shared by kind and GKE, claims on the `go-runtime-pool` warm pool, and the upstream Go sandbox-router. Sandboxes mount no Kubernetes service account token.
+- **Fast compiled path (slice 7).** kode-gopher's own sandbox image and in-pod server, published by CI under a content-derived tag that the GKE overlay pins. `go mod tidy` runs only when the prewarmed lockfile misses an import. A GCS snippet runs in about 4.4 s end to end on GKE with gVisor.
+- **Production hardening (slice 4).** The `gcp_auth_status` and `lookup_package_docs` tools, multi-file snippets, a unified credentials source, `--context` on `exec` and `serve`, sessions that recover from a dead sandbox, and an LLM prompt generated from the curated package set.
+- **MCP server (slice 2).** `kode-gopher serve` exposes `execute_go_code` over stdio.
+- **CLI and result contract (slices 0 and 1).** `kode-gopher exec <file.go>` normalizes a snippet or a full `package main` program, builds and runs it in an agent-sandbox pod, and returns a discriminated structured result. Verified on kind and on GKE Autopilot with gVisor.

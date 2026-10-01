@@ -21,3 +21,6 @@
 # In-progress files outside the project scope (file or dir)
 /resume
 /resume/
+
+# GoReleaser output (.goreleaser.yaml).
+/dist/

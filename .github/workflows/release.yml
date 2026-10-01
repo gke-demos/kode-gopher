@@ -1,0 +1,99 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Publishes a GitHub Release on every v* tag push (modeled on
+# go-steer/core-agent's and go-steer/mast's release.yml; process in
+# docs/release-process.md):
+#   - runs every presubmit first, so a tag never ships red;
+#   - extracts the notes for the tag from CHANGELOG.md
+#     (dev/release/notes.sh);
+#   - cross-compiles cmd/kode-gopher with GoReleaser (.goreleaser.yaml),
+#     signs checksums.txt with cosign keyless, and publishes the Release
+#     with those notes (-rc.N tags are marked Pre-release);
+#   - checks the published Release body is not empty.
+#
+# Dry run (builds dist/ and uploads it as an artifact; no Release, no
+# signing):
+#   gh workflow run release.yml -f dry_run=true
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only: skip publishing and signing, and upload dist/ as a workflow artifact.'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # publish the Release
+  id-token: write  # cosign keyless signing (GitHub OIDC -> Fulcio)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      # Publish only for a tag ref, and never on a dry run. A
+      # workflow_dispatch from a branch is always a dry run.
+      PUBLISH: ${{ !inputs.dry_run && startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # GoReleaser needs the tags and history
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Presubmits
+        run: dev/ci/presubmits/all.sh
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          dev/release/notes.sh "${GITHUB_REF_NAME}" > "${RUNNER_TEMP}/release-notes.md"
+          cat "${RUNNER_TEMP}/release-notes.md"
+      - name: Install cosign
+        if: env.PUBLISH == 'true'
+        uses: sigstore/cosign-installer@v4
+      - name: GoReleaser (publish)
+        if: env.PUBLISH == 'true'
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: '~> v2'
+          args: release --clean --release-notes=${{ runner.temp }}/release-notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The notes file being right proves nothing: GoReleaser has
+      # dropped it silently before (see the changelog note at the end of
+      # .goreleaser.yaml). Check what was actually published.
+      - name: Verify the published notes are not empty
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body_len=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '.body | gsub("\\s"; "") | length')
+          echo "published release body: ${body_len} non-whitespace chars"
+          if [ "${body_len}" -eq 0 ]; then
+            echo "::error::${GITHUB_REF_NAME} published with an empty body; the CHANGELOG.md notes did not reach the release." >&2
+            exit 1
+          fi
+      - name: GoReleaser (dry run)
+        if: env.PUBLISH != 'true'
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: '~> v2'
+          args: release --snapshot --clean --skip=publish,sign --release-notes=${{ runner.temp }}/release-notes.md
+      - name: Upload dist/ (dry run)
+        if: env.PUBLISH != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/

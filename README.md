@@ -8,7 +8,7 @@ The wedge: in Go, the LLM's "tool surface" already exists as importable packages
 
 Pre-alpha. Shipped through Slice 4 of [`docs/plan.md`](./docs/plan.md):
 
-- **CLI** (`kode-gopher {exec,serve,auth status}`). `exec <file.go>` and `serve` accept a snippet declaring `func run(ctx context.Context) (any, error)` (wrapped mode) or a full `package main` program (verbatim). Wrapper captures error / panic / json-marshal failure into a discriminated `result.json`. `auth status` reports the ambient identity kode-gopher will forward. `--context` flag on both `exec` and `serve` pins a kubeconfig context instead of inheriting ambient `kubectl config current-context`.
+- **CLI** (`kode-gopher {exec,serve,auth status,version}`). `exec <file.go>` and `serve` accept a snippet declaring `func run(ctx context.Context) (any, error)` (wrapped mode) or a full `package main` program (verbatim). Wrapper captures error / panic / json-marshal failure into a discriminated `result.json`. `auth status` reports the ambient identity kode-gopher will forward. `--context` flag on both `exec` and `serve` pins a kubeconfig context instead of inheriting ambient `kubectl config current-context`.
 - **MCP server** (`kode-gopher serve`) over stdio using `github.com/modelcontextprotocol/go-sdk`. Three tools:
   - `execute_go_code(code | files, extra_imports?)` — build+run Go in the sandbox. `code` is single-file; `files` is `map[path -> source]` for multi-file snippets with helper subpackages.
   - `gcp_auth_status()` — report the sandbox's credential identity (mode, credential type, email, project).
