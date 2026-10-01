@@ -1,0 +1,67 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# --auth=oauth: kode-gopher's OAuth server fronting Google sign-in, so
+# snippets run as the signed-in user (docs/design-in-cluster.md >
+# Step 3 as built).
+#
+# Reads the Secret kode-gopher-oauth:
+#   google-client.json  the Google OAuth client, as the console
+#                       downloads it; its redirect URIs must include
+#                       <issuer>/callback
+#   keyring             token-sealing keys, "<id> <base64 32 bytes>"
+#                       per line, sealing key first
+#   clients.json        pre-registered clients (optional; "[]" if none)
+#
+# Per-deployment flags (--oauth-issuer, the allow-list, custody, the
+# vault auth provider, --project) are appended by
+# scripts/deploy-gke-server.sh.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../gke-server
+
+patches:
+  - target:
+      kind: Deployment
+      name: kode-gopher
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/args/6
+        value: --auth=static
+      - op: replace
+        path: /spec/template/spec/containers/0/args/6
+        value: --auth=oauth
+      - op: replace
+        path: /spec/template/spec/containers/0/args/7
+        value: --oauth-google-client-file=/etc/kode-gopher/oauth/google-client.json
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --oauth-keyring-file=/etc/kode-gopher/oauth/keyring
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --oauth-clients-file=/etc/kode-gopher/oauth/clients.json
+      - op: replace
+        path: /spec/template/spec/containers/0/volumeMounts/0
+        value:
+          name: oauth
+          mountPath: /etc/kode-gopher/oauth
+          readOnly: true
+      - op: replace
+        path: /spec/template/spec/volumes/0
+        value:
+          name: oauth
+          secret:
+            secretName: kode-gopher-oauth

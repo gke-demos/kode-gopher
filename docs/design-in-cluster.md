@@ -289,6 +289,49 @@ The router's deny-all ingress policy (the earlier proposal) lands here too. The 
 - `gcp_auth_status` reports `mode=oauth, identity=<user email>`.
 - Local stdio mode, forwarded ADC, and the router path.
 
+### Step 4 as built
+
+`scripts/deploy-gke-server.sh [--auth=static|oauth]` deploys `manifests/overlays/gke-server` (or `gke-server-oauth`, on top of it). That's everything in `manifests/overlays/gke` plus:
+
+| File | What |
+|---|---|
+| `rbac.yaml` | KSA `kode-gopher`; Role and RoleBinding for claims and sandboxes in `codemode` |
+| `deployment.yaml` | Service and Deployment: one replica, `Recreate`, image `ghcr.io/gke-demos/kode-gopher/server`, `--auth=static` with the token from Secret `kode-gopher-token` |
+| `gateway.yaml` | Gateway (`gke-l7-global-external-managed`, HTTPS only, static IP `kode-gopher-ip`, pre-shared cert `kode-gopher-cert`), HTTPRoute, HealthCheckPolicy (`/healthz`), GCPBackendPolicy |
+| `networkpolicy.yaml` | kode-gopher's ingress and egress |
+
+`gke-server-oauth` swaps the token for the Secret `kode-gopher-oauth` (`google-client.json`, `keyring`, `clients.json`). The script appends the per-deployment flags: issuer, allow-list, custody and the vault auth provider.
+
+What the script does that the overlay can't:
+- It creates the static IP and the Google-managed certificate if they're missing. The hostname defaults to `<ip with dashes>.sslip.io`, so a test deployment needs no DNS.
+- It fills in the API server's address (from the `kubernetes` EndpointSlice) in the egress policy.
+- It creates the Secrets: a random static token, or for OAuth, a new keyring only on first deploy, since replacing it would invalidate every token.
+- It renders the overlay through a temporary kustomization, which patches the image and the flags.
+
+Decisions made while building:
+- **Kubernetes Secrets, not Secret Manager**, for v1. Secret Manager needs the CSI add-on and IAM on each secret. Section 6's Workload Identity grant becomes unnecessary until then.
+- **One replica.** Sessions and the OAuth replay cache are in memory. `Recreate` avoids two pods splitting them during a rollout.
+- **Backend timeout of 900 s.** The load balancer's 30 s default would cut off longer `execute_go_code` calls and the standalone SSE stream.
+- **Selectors use `component: server`** as well as `app: kode-gopher`. `app: kode-gopher` is what the sandbox policy admits, so other kode-gopher pods (test pods, `exec` jobs) carry it too and mustn't become Service endpoints.
+- **kode-gopher's egress:**
+  - DNS;
+  - sandboxes on :8888;
+  - the API server on :443;
+  - the GKE metadata server (169.254.169.254:80 and 169.254.169.252:988, for Workload Identity);
+  - public IPs on :443.
+
+  Its ingress is Google's front-end ranges (130.211.0.0/22, 35.191.0.0/16) on :8080. Those cover both the proxies and the health checks.
+- **Router lock-down** (`manifests/overlays/gke/router-networkpolicy.yaml`): no ingress at all. Egress is DNS and sandboxes on :8888. `kubectl port-forward` and kubelet probes aren't subject to policy, so local stdio is unaffected.
+
+Checked on `kg-sandbox` on 2026-10-01:
+- `scripts/smoketest-http.sh` with static auth, both through the load balancer (`https://<ip>.sslip.io`, once the certificate turned ACTIVE, within an hour of its creation) and with `--port-forward`:
+  - 401 without a token or with a wrong one;
+  - initialize, tools/list, and `gcp_auth_status` reports `mode=access-token`, `credential_type=metadata`;
+  - a snippet got a valid token from the metadata emulator, with no ADC file or `GOOGLE_APPLICATION_CREDENTIALS` in the sandbox (built in 0.7 s);
+  - two sessions, and `DELETE` ended both.
+- From a pod in another namespace, the router, the kode-gopher Service and a sandbox pod all timed out, while a public URL answered.
+- `kode-gopher exec` over stdio (port-forward to the locked-down router) still listed the project's buckets.
+
 ## Code changes
 
 | Area | Change |

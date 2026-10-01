@@ -1,0 +1,38 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# In-cluster kode-gopher on GKE (docs/design-in-cluster.md): everything
+# in manifests/overlays/gke (sandbox template, warm pool, router), plus
+# the kode-gopher server behind a Gateway:
+#   - rbac.yaml           KSA kode-gopher, Role and RoleBinding
+#   - deployment.yaml     Deployment and Service, --auth=static
+#   - gateway.yaml        Gateway, HTTPRoute, health check, timeout
+#   - networkpolicy.yaml  kode-gopher's ingress and egress
+#
+# Use scripts/deploy-gke-server.sh rather than applying this directly:
+# it fills in the API server address in networkpolicy.yaml, creates the
+# Secrets, the static IP and the certificate, and can pin the image.
+# The gke-server-oauth overlay, on top of this one, switches to Google
+# sign-in.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: codemode
+
+resources:
+  - ../gke
+  - rbac.yaml
+  - deployment.yaml
+  - gateway.yaml
+  - networkpolicy.yaml

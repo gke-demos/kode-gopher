@@ -1,0 +1,59 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Router lock-down (docs/design-in-cluster.md > Network policy). The
+# router forwards to any sandbox named in a request header, so nothing
+# in the cluster may reach it. Its only callers are local stdio
+# kode-gopher processes, through `kubectl port-forward`, which enters
+# the pod's network namespace on loopback and isn't subject to network
+# policy. Kubelet probes aren't either.
+#
+# Egress: DNS (it resolves <sandbox>.<namespace>.svc per request) and
+# the sandboxes' :8888.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-router
+  labels:
+    app: sandbox-router
+spec:
+  podSelector:
+    matchLabels:
+      app: sandbox-router
+  policyTypes:
+    - Ingress
+    - Egress
+  # Ingress listed in policyTypes with no ingress rules: deny all.
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              sandbox: kode-gopher-sandbox
+      ports:
+        - port: 8888
+          protocol: TCP

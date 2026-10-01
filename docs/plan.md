@@ -198,6 +198,7 @@ Goal: users add one URL to their MCP client and sign in with Google. They need n
    - a vault grant from another Google account is refused.
    Real Google sign-in, and Claude Code and MCP Inspector interop, move to step 4: they need the deployed issuer URL as a redirect URI on the OAuth client.
 4. GKE manifests (Gateway, cert, network policies including router lock-down) and `scripts/smoketest-http.sh`.
+   Built 2026-10-01 as `manifests/overlays/gke-server` (and `gke-server-oauth`), `scripts/deploy-gke-server.sh` and the server image `server/Dockerfile` (`docs/design-in-cluster.md > Step 4 as built`). Static-token deployment and the network policies passed on `kg-sandbox`. Still to do: real Google sign-in through the deployed issuer, with Claude Code and MCP Inspector, which needs the issuer's `/callback` on the Google OAuth client.
 5. Service-identity mode and the client-credentials extension (separate step).
 
 ## Critical files for MVP (slice 0 + slice 1)

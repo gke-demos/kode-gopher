@@ -1,0 +1,100 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Global external Application Load Balancer in front of kode-gopher,
+# HTTPS only. It needs two global resources made outside the cluster
+# (scripts/deploy-gke-server.sh creates them if missing):
+#   - static IP     kode-gopher-ip     gcloud compute addresses create
+#   - certificate   kode-gopher-cert   gcloud compute ssl-certificates
+#                                      create --domains=<hostname>
+# The Google-managed certificate turns ACTIVE only once <hostname>
+# resolves to the IP and the load balancer serves it, which takes
+# 15-60 minutes the first time.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: kode-gopher
+  labels:
+    app: kode-gopher
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - type: NamedAddress
+      value: kode-gopher-ip
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        options:
+          networking.gke.io/pre-shared-certs: kode-gopher-cert
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kode-gopher
+  labels:
+    app: kode-gopher
+spec:
+  parentRefs:
+    - name: kode-gopher
+      sectionName: https
+  rules:
+    - backendRefs:
+        - name: kode-gopher
+          port: 8080
+---
+# The load balancer's own health check. Its default is GET / on the
+# serving port, which kode-gopher answers with 404 (or with the OAuth
+# server's routes).
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: kode-gopher
+  labels:
+    app: kode-gopher
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8080
+        requestPath: /healthz
+  targetRef:
+    group: ""
+    kind: Service
+    name: kode-gopher
+---
+# The backend service timeout bounds every request, streams included.
+# The default 30s would cut off any execute_go_code call longer than
+# that (a cold build alone can be), and the standalone SSE stream every
+# 30s. 15 minutes matches --session-timeout; clients reconnect a cut
+# SSE stream.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: kode-gopher
+  labels:
+    app: kode-gopher
+spec:
+  default:
+    timeoutSec: 900
+  targetRef:
+    group: ""
+    kind: Service
+    name: kode-gopher

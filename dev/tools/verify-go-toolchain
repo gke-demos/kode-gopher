@@ -22,6 +22,7 @@
 #     builds cmd/sandbox-server with the root go.mod, and it compiles the
 #     users' snippets, so drift means a different compiler in the sandbox
 #     than in CI, or a toolchain download at image build time;
+#   - server/Dockerfile's builder is that version too;
 #   - workflows take Go from go.mod (go-version-file), never a literal.
 #
 #   verify-go-toolchain            static checks above
@@ -38,11 +39,13 @@ if [[ -z "$want" ]]; then
 fi
 failed=0
 
-docker="$(sed -n 's/^FROM golang:\([0-9.]*\)[-@].*/\1/p' sandbox/Dockerfile)"
-if [[ "$docker" != "$want" ]]; then
-  echo "FAIL: sandbox/Dockerfile uses golang:${docker:-?}, go.mod's toolchain is go${want}" >&2
-  failed=1
-fi
+for f in sandbox/Dockerfile server/Dockerfile; do
+  docker="$(sed -n 's/^FROM \(--platform=[^ ]* \)\{0,1\}golang:\([0-9.]*\)[-@].*/\2/p' "$f")"
+  if [[ "$docker" != "$want" ]]; then
+    echo "FAIL: $f uses golang:${docker:-?}, go.mod's toolchain is go${want}" >&2
+    failed=1
+  fi
+done
 
 if grep -rn 'go-version:' .github/workflows >&2; then
   echo "FAIL: workflows above pin a Go version; use 'go-version-file: go.mod'" >&2
