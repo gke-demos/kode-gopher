@@ -45,9 +45,9 @@ This keeps today's stdio semantics: files persist between calls, and so does the
 
 Per-request claims would add 1-2 s of claim time to every call for no isolation benefit. A session is already one user.
 
-**Leaks.** HTTP gives no reliable disconnect. Each claim gets `spec.lifecycle.shutdownTime = now + idle timeout` (default 15 min) and `shutdownPolicy: Delete`. kode-gopher pushes it forward on each call. If kode-gopher crashes, the controller still reaps the sandbox. The v1.0.4 client doesn't expose lifecycle, so kode-gopher patches the claim right after `Open`.
+**Leaks.** HTTP gives no reliable disconnect. The SDK's `SessionTimeout` (`--session-timeout`, default 15 min) ends a session that sees no requests, and ending a session (timeout or client `DELETE`) closes its sandbox. That covers a live server. For a crashed one, each claim gets `spec.lifecycle.shutdownTime = now + lease` (`--claim-lease`, default 10 min) and `shutdownPolicy: Delete`. While the session is open, kode-gopher renews the lease every third of its length. If kode-gopher dies, renewals stop and the controller reaps the sandbox within the lease. The v1.0.4 client doesn't expose lifecycle, so kode-gopher patches the claim right after `Open`, and fails the open if that first patch fails.
 
-**Quota.** There's a per-user cap on concurrent sessions (default 2), so one user can't drain the warm pool.
+**Quota.** There's a per-user cap on open sandboxes (`--max-sandboxes-per-user`, default 2), so one user can't drain the warm pool. It counts sessions that hold a sandbox. A session only takes a slot on its first sandbox-using tool call, so a session that never runs code doesn't count.
 
 ### 3. Auth: kode-gopher is its own OAuth authorization server, fronting Google
 

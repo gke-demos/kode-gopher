@@ -93,6 +93,12 @@ type Options struct {
 	// Set it when kode-gopher runs in the cluster. Request.Credentials
 	// requires it.
 	InCluster bool
+
+	// Lease, if non-zero, gives the claim spec.lifecycle.shutdownTime =
+	// now + Lease (policy Delete) and renews it while the Session is
+	// open. If kode-gopher dies, the controller deletes the claim within
+	// one Lease. Zero: the claim never expires on its own.
+	Lease time.Duration
 }
 
 // Credentials is a short-lived Google access token for one run step.
@@ -149,6 +155,8 @@ type Session struct {
 	inCluster bool
 	// direct posts credentialed run steps to the sandbox's Service.
 	direct *http.Client
+	// lease is nil unless Options.Lease was set.
+	lease *lease
 }
 
 const (
@@ -190,10 +198,12 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 	if opts.SandboxReadyTimeout > 0 {
 		clientOpts.SandboxReadyTimeout = opts.SandboxReadyTimeout
 	}
-	if opts.KubeContext != "" {
+	if opts.KubeContext != "" || opts.Lease > 0 {
 		// Upstream's default kubeconfig loader uses empty ConfigOverrides
 		// and ignores context selection. To honor --context we build a
 		// *rest.Config here with an explicit CurrentContext override.
+		// The lease needs one too, for its own claim patches. With no
+		// kubeconfig, the loader falls back to the in-cluster config.
 		rules := clientcmd.NewDefaultClientConfigLoadingRules()
 		overrides := &clientcmd.ConfigOverrides{CurrentContext: opts.KubeContext}
 		rc, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
@@ -227,14 +237,25 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		tc.TailBytes = defaultTailBytes
 	}
 
-	return &Session{
+	sess := &Session{
 		client:    client,
 		box:       box,
 		truncate:  tc,
 		ownClient: true,
 		inCluster: opts.InCluster,
 		direct:    &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: perAttempt}},
-	}, nil
+	}
+	if opts.Lease > 0 {
+		p, err := newDynamicPatcher(clientOpts.RestConfig, opts.Namespace, box.ClaimName())
+		if err == nil {
+			sess.lease, err = startLease(ctx, p, opts.Lease)
+		}
+		if err != nil {
+			_ = sess.Close(context.WithoutCancel(ctx))
+			return nil, err
+		}
+	}
+	return sess, nil
 }
 
 // ClaimName returns the underlying sandbox claim name. Persist this
@@ -393,15 +414,24 @@ func (s *Session) Reset(ctx context.Context) error {
 
 // Disconnect drops the network connection to the sandbox but leaves
 // the SandboxClaim and pod alive. Use when handing the ClaimName
-// back to a caller for later reattach.
+// back to a caller for later reattach. With a lease, renewal stops and
+// the claim still expires within one lease.
 func (s *Session) Disconnect(ctx context.Context) error {
+	s.stopLease()
 	return s.box.Disconnect(ctx)
+}
+
+func (s *Session) stopLease() {
+	if s.lease != nil {
+		s.lease.Stop()
+	}
 }
 
 // Close deletes the sandbox claim, tearing down the pod. If this
 // Session owns its agent-sandbox client (i.e., Open created it), the
 // client's owned sandboxes are also cleaned up.
 func (s *Session) Close(ctx context.Context) error {
+	s.stopLease()
 	err := s.box.Close(ctx)
 	if s.ownClient {
 		s.client.DeleteAll(ctx)
