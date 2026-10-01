@@ -27,8 +27,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
-
 	"github.com/gke-demos/kode-gopher/internal/mcp"
 )
 
@@ -46,8 +44,10 @@ func runServe(args []string) int {
 	inCluster := fs.Bool("in-cluster", false, "dial sandboxes by their in-cluster Service instead of port-forwarding (kode-gopher running in the cluster)")
 	transport := fs.String("transport", "stdio", "stdio, or http (streamable HTTP at <addr>/mcp, one sandbox per MCP session)")
 	addr := fs.String("addr", ":8080", "http: listen address")
-	tokenFile := fs.String("auth-token-file", "", "http: file holding the static bearer token clients must send (required for http)")
-	authUser := fs.String("auth-user", "operator", "http: the user the static token authenticates as")
+	authMode := fs.String("auth", "static", "http: static (one operator-issued bearer token) or oauth (kode-gopher's OAuth server fronting Google sign-in; snippets run as the signed-in user; needs --in-cluster)")
+	tokenFile := fs.String("auth-token-file", "", "http, static auth: file holding the bearer token clients must send")
+	authUser := fs.String("auth-user", "operator", "http, static auth: the user the static token authenticates as")
+	oauthCfg := addOAuthFlags(fs)
 	sessionTO := fs.Duration("session-timeout", 15*time.Minute, "http: end MCP sessions idle this long, closing their sandboxes")
 	lease := fs.Duration("claim-lease", 10*time.Minute, "http: sandbox claims expire this long after the last renewal, so a crashed server's sandboxes go away")
 	maxPerUser := fs.Int("max-sandboxes-per-user", 2, "http: open sandboxes (MCP sessions with a sandbox) allowed per user; 0 = no cap")
@@ -64,7 +64,10 @@ func runServe(args []string) int {
 		return 2
 	}
 
-	var verifier auth.TokenVerifier
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	httpOpts := mcp.HTTPOptions{Addr: *addr, SessionTimeout: *sessionTO}
 	switch *transport {
 	case "stdio":
 		*lease, *maxPerUser = 0, 0
@@ -73,19 +76,14 @@ func runServe(args []string) int {
 			log.Printf("mcp serve: --claim and --persistent are stdio-only")
 			return 2
 		}
-		token, err := readToken(*tokenFile)
-		if err != nil {
+		if err := httpAuth(ctx, &httpOpts, *authMode, *tokenFile, *authUser, *inCluster, oauthCfg); err != nil {
 			log.Printf("mcp serve: %v", err)
 			return 2
 		}
-		verifier = mcp.StaticTokenVerifier(token, *authUser)
 	default:
 		log.Printf("mcp serve: --transport must be stdio or http, got %q", *transport)
 		return 2
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	credSrc, err := credentialSource(ctx, *credMode, *inCluster)
 	if err != nil {
@@ -108,7 +106,7 @@ func runServe(args []string) int {
 	})
 
 	if *transport == "http" {
-		err = srv.RunHTTP(ctx, mcp.HTTPOptions{Addr: *addr, Verifier: verifier, SessionTimeout: *sessionTO})
+		err = srv.RunHTTP(ctx, httpOpts)
 	} else {
 		err = srv.Run(ctx)
 	}
@@ -119,10 +117,39 @@ func runServe(args []string) int {
 	return 0
 }
 
+// httpAuth fills in how HTTP requests are authenticated. Under OAuth
+// each request carries the user's own credentials, which override
+// --credentials.
+func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user string, inCluster bool, of *oauthFlags) error {
+	switch mode {
+	case "static":
+		token, err := readToken(tokenFile)
+		if err != nil {
+			return err
+		}
+		opts.Verifier = mcp.StaticTokenVerifier(token, user)
+	case "oauth":
+		if !inCluster {
+			// The user's token goes to the run through the sandbox's
+			// metadata emulator, reached by its in-cluster Service.
+			return fmt.Errorf("--auth=oauth needs --in-cluster")
+		}
+		as, err := of.server(ctx)
+		if err != nil {
+			return err
+		}
+		opts.Protect, opts.Routes = as.Protect, as.Handler()
+		log.Printf("mcp serve: OAuth issuer %s, resource %s", *of.issuer, as.Resource())
+	default:
+		return fmt.Errorf("--auth must be static or oauth, got %q", mode)
+	}
+	return nil
+}
+
 // readToken reads the static bearer token from path. Never logged.
 func readToken(path string) (string, error) {
 	if path == "" {
-		return "", fmt.Errorf("--transport=http needs --auth-token-file")
+		return "", fmt.Errorf("--auth=static needs --auth-token-file")
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {

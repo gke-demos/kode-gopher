@@ -172,6 +172,53 @@ The reference deployment uses `gke-demos-345619` in the `gke.ninja` org.
 - **Groups:** kode-gopher asks Cloud Identity with its own Workload Identity. It calls `groups.memberships.checkTransitiveMembership`, so nested groups count. The kode-gopher service account needs read access to group membership, which a Workspace admin grants with the Groups Reader admin role. Users don't consent to any groups scope.
 - **When it's checked:** at the callback and at every refresh, with the result cached for 5 minutes. Removing someone from a group takes effect at their next refresh, so within the 15-minute access-token lifetime.
 
+#### Step 3 as built
+
+`internal/oauth`, enabled with `kode-gopher serve --transport=http --in-cluster --auth=oauth`. It differs from the design above, or settles details it left open, as follows.
+
+**Flags.** Nothing about the Google side is built in:
+
+| Flag | Meaning |
+|---|---|
+| `--oauth-issuer` | Public base URL. The MCP endpoint, and every token's audience, is `<issuer>/mcp`. Must be https (http only on loopback, for tests). |
+| `--oauth-google-client-file` | kode-gopher's Google OAuth client, as the JSON the console downloads. Its redirect URIs must include `<issuer>/callback`, and under vault custody the auth provider's `oauthcallback` URL (the vault then returns the browser to `<issuer>/consent/continue`). |
+| `--oauth-keyring-file` | Sealing keys, one `<id> <base64 32 bytes>` per line, sealing key first. Keep older keys listed until what they sealed has expired (30 days for refresh tokens). |
+| `--oauth-custody` | `vault` (default) with `--oauth-vault-auth-provider=projects/<p>/locations/<l>/authProviders/<name>`, or `sealed`. |
+| `--oauth-allow-domains`, `--oauth-allow-groups` | Comma-separated. At least one entry. |
+| `--oauth-clients-file` | Pre-registered clients: a JSON array of `{client_id, client_secret?, client_name, redirect_uris}`. |
+| `--oauth-open-registration` | Accept DCR and CIMD clients. Default true. |
+| `--project`, `--quota-project` | Reported to snippets as `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_QUOTA_PROJECT`. |
+
+The vault and Cloud Identity calls use kode-gopher's own ADC (its Workload Identity).
+
+**Consent page.** kode-gopher acts as a proxy for Google, so the spec requires user consent per dynamically registered client: without it, a malicious DCR or CIMD client could ride a user's existing Google session. So DCR and CIMD clients get a kode-gopher page naming the client (and the CIMD URL) and its redirect host, with Continue and Cancel, before Google sign-in. Pre-registered clients skip it.
+
+**Browser binding.** `/authorize` sets a random `kg_auth` cookie (HttpOnly, SameSite=Lax, Secure on https). The consent form and Google `state` carry its hash, and the callback refuses a different browser. Vault consent carries the pending sign-in in a sealed `kg_consent` cookie.
+
+**Sign-in scopes by custody.**
+- Sealed: `openid`, `userinfo.email` and `cloud-platform`, offline. The callback refuses a grant missing `cloud-platform` or the refresh token.
+- Vault: only `openid` and `userinfo.email`, online. The vault's own consent asks for `cloud-platform`.
+
+**ID token.** It comes straight from Google's token endpoint over TLS, so per OIDC Core §3.1.3.7 the signature isn't checked. The issuer, audience, expiry, `sub` and `email_verified` are.
+
+**Vault grants are checked on every retrieve.** The tokeninfo `sub` must equal the signed-in user's, and the token must carry `cloud-platform`. A wrong-account consent stays in the vault under the user's ID, because there's no delete API, so the user can't sign in until it's revoked at https://myaccount.google.com/permissions. The vault's `expireTime` is ignored in favour of tokeninfo's, and a token with under 5 minutes left is force-refreshed once.
+
+**Tokens.**
+
+| kode-gopher token | Contents | Lifetime |
+|---|---|---|
+| authorization code | the request, user, Google access token (and refresh token, sealed custody) | 1 min, single use |
+| access token | `{sub, email, client_id, aud, scope, google_access_token, google_token_exp}` | `min(15 min, Google token's life - 1 min)` |
+| refresh token | `{user, client_id, aud, scope, google_refresh_token (sealed custody only), jti}` | 30 days, renewed by each use; rotated for every client |
+
+Refresh doesn't take a `resource`; it keeps the original audience. Each envelope's purpose is in its AEAD associated data, so one kind never opens as another.
+
+**Replay cache.** Spent codes and rotated refresh tokens are remembered in memory, until they'd have expired anyway. v1 runs one replica, and a restart forgets: a refresh token already rotated before the restart could be used once more. A shared cache comes with multiple replicas.
+
+**Scope.** `kode-gopher:execute` is always granted; unknown requested scopes are dropped. A valid token without it gets `403` with `Bearer error="insufficient_scope"`. go-sdk's own 403 lacks the error code, so kode-gopher answers that case itself.
+
+**Allow-list failures.** If the group check itself fails (Cloud Identity down or denied), the callback returns `server_error` and a refresh returns HTTP 500. Neither is cached, and neither revokes anything.
+
 **Why not IAP.** IAP authenticates the user but gives the backend an identity assertion, not a Google access token for the user. So snippets couldn't act as the user. MCP clients also don't do IAP's browser flow. IAP would fit only the service-identity mode below.
 
 ### 4. Credentials in the sandbox: access token only, via a local metadata emulator
@@ -249,7 +296,7 @@ The router's deny-all ingress policy (the earlier proposal) lands here too. The 
 | `internal/sandbox` | `Options.Connectivity`: in-cluster service when running in a pod; claim lifecycle patch and lease renewal; direct `/execute` with credentials for the run step |
 | `internal/mcp` | HTTP transport; per-session sandbox map keyed by `Mcp-Session-Id` and bound to user; per-user session cap |
 | `internal/oauth` (new) | Authorization server: metadata, register, authorize, callback, token; sealed tokens; custody interface; allow-list (Cloud Identity group check, `hd` domain check) |
-| `internal/creds` | `OAuthUser` source (mint access token from sealed refresh token); `Workload` source for service-identity mode |
+| `internal/creds` | `OAuthUser` source (the request's Google access token, unsealed from its kode-gopher access token); `Workload` source for service-identity mode |
 | `cmd/sandbox-server` | Optional `credentials` field on `/execute`, held in memory for that command; metadata emulator on 127.0.0.1 |
 | `manifests/overlays/gke-server` (new) | Deployment, Service, Gateway + HTTPRoute + cert, KSA + Role, network policies, Secret Manager refs |
 | `scripts/smoketest-http.sh` (new) | End-to-end over HTTP with a pre-minted test token; negative auth cases |
