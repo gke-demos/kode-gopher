@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# verify-go-toolchain: go.mod's `toolchain` directive is the one answer
+# to "which Go does kode-gopher build with". Checks that everything else
+# agrees:
+#   - go.mod has a toolchain directive at all (the `go` directive is the
+#     compatibility floor, not what we ship);
+#   - sandbox/Dockerfile's golang base image is that version. The sandbox
+#     builds cmd/sandbox-server with the root go.mod, and it compiles the
+#     users' snippets, so drift means a different compiler in the sandbox
+#     than in CI, or a toolchain download at image build time;
+#   - workflows take Go from go.mod (go-version-file), never a literal.
+#
+#   verify-go-toolchain            static checks above
+#   verify-go-toolchain --running  also: the go on PATH is that toolchain
+
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+cd "$(repo_root)"
+
+want="$(sed -n 's/^toolchain go\([0-9.]*\)$/\1/p' go.mod)"
+if [[ -z "$want" ]]; then
+  echo "FAIL: go.mod has no 'toolchain goX.Y.Z' directive" >&2
+  exit 1
+fi
+failed=0
+
+docker="$(sed -n 's/^FROM golang:\([0-9.]*\)[-@].*/\1/p' sandbox/Dockerfile)"
+if [[ "$docker" != "$want" ]]; then
+  echo "FAIL: sandbox/Dockerfile uses golang:${docker:-?}, go.mod's toolchain is go${want}" >&2
+  failed=1
+fi
+
+if grep -rn 'go-version:' .github/workflows >&2; then
+  echo "FAIL: workflows above pin a Go version; use 'go-version-file: go.mod'" >&2
+  failed=1
+fi
+
+if [[ "${1:-}" == "--running" ]]; then
+  got="$(go env GOVERSION)"
+  if [[ "$got" != "go${want}" ]]; then
+    echo "FAIL: go on PATH is ${got}, go.mod's toolchain is go${want}" >&2
+    failed=1
+  fi
+fi
+
+if ((failed)); then
+  exit 1
+fi
+echo "go-toolchain: OK (go${want})"

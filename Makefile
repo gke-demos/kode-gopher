@@ -6,7 +6,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-.PHONY: prompts prompts-check test build sandbox-tag sandbox-pin sandbox-pin-check
+.PHONY: prompts prompts-check test build lint presubmit sandbox-tag sandbox-pin sandbox-pin-check
 
 # prompts regenerates internal/prompts/{system.md,description.go} from
 # internal/curated.Packages. Run after touching the curated set so the
@@ -24,13 +24,21 @@ prompts-check: prompts
 		exit 1; \
 	fi
 
-# test runs the full unit-test suite.
+# test runs the full unit-test suite under the race detector.
 test:
-	go test ./...
+	dev/ci/presubmits/test.sh
 
 # build compiles all binaries (kode-gopher, mcp-smoketest).
 build:
 	go build ./...
+
+# lint runs golangci-lint at the pinned version.
+lint:
+	dev/tools/lint-go
+
+# presubmit runs everything CI runs (.github/workflows/ci.yml), sequentially.
+presubmit:
+	dev/ci/presubmits/all.sh
 
 # The sandbox image is published by CI under a tag derived from its inputs
 # (sandbox/, internal/prewarm/). The GKE overlay pins that tag.

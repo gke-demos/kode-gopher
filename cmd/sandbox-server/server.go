@@ -127,7 +127,7 @@ func (s *server) handleExecute(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "starting metadata emulator: "+err.Error())
 			return
 		}
-		defer md.Close()
+		defer func() { _ = md.Close() }()
 		env = md.env()
 	}
 	start := time.Now()
@@ -149,6 +149,8 @@ func (s *server) handleExecute(w http.ResponseWriter, r *http.Request) {
 // killed by a signal reports 128+signal, as a shell would.
 func runShell(ctx context.Context, dir, command string, env []string) executeResponse {
 	var stdout, stderr cappedBuffer
+	// #nosec G702 -- running the caller's command is this server's job; it
+	// runs inside the sandbox, which is the isolation boundary.
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
 	if len(env) > 0 {

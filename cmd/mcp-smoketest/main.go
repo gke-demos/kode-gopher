@@ -58,7 +58,7 @@ func main() {
 
 	session, err := connect(ctx, *serverPath, *namespace)
 	if err != nil {
-		log.Fatalf("connect: %v", err)
+		log.Fatalf("connect: %v", err) //nolint:gocritic // exiting; the deferred cancel is moot
 	}
 	defer func() { _ = session.Close() }()
 
@@ -352,6 +352,7 @@ func contentText(c []sdk.Content) string {
 // MCP session over its stdio.
 func connect(ctx context.Context, serverPath, namespace string) (*sdk.ClientSession, error) {
 	client := sdk.NewClient(&sdk.Implementation{Name: "mcp-smoketest", Version: "0.1.0"}, nil)
+	// #nosec G204 -- the operator's own flags.
 	cmd := exec.CommandContext(ctx, serverPath, "serve", "--namespace="+namespace)
 	cmd.Env = os.Environ() // pass GOOGLE_CLOUD_PROJECT etc. through
 	cmd.Stderr = os.Stderr // surface server logs to our stderr live
@@ -411,6 +412,7 @@ func callExecuteGoCode(ctx context.Context, s *sdk.ClientSession, path string) (
 // smoketest's jq filter, but in-process so the smoketest is
 // self-contained.
 func gcloudBucketNames(ctx context.Context, project string) ([]string, error) {
+	// #nosec G204 G702 -- the operator's own project.
 	cmd := exec.CommandContext(ctx, "gcloud", "storage", "buckets", "list", "--format=json", "--project="+project)
 	out, err := cmd.Output()
 	if err != nil {

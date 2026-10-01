@@ -100,6 +100,8 @@ func startLease(ctx context.Context, p claimPatcher, period time.Duration) (*lea
 	if err := l.renew(ctx); err != nil {
 		return nil, fmt.Errorf("sandbox: set claim lease: %w", err)
 	}
+	// #nosec G118 -- renewal deliberately outlives ctx (Open's): it runs
+	// until the session's Close or Disconnect calls Stop.
 	go l.loop()
 	return l, nil
 }
