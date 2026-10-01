@@ -35,7 +35,9 @@ spec:
   # ingress only from app=sandbox-router in agent-sandbox-system, and
   # egress only to public IPs, which also blocks cluster DNS. Our router
   # runs in the claim's namespace, and snippets need DNS for every GCP
-  # call. So: ingress from our router, egress to DNS (kube-dns, plus
+  # call. So: ingress from our router and from in-cluster kode-gopher
+  # (docs/design-in-cluster.md, which dials the sandbox's Service
+  # directly), egress to DNS (kube-dns, plus
   # NodeLocal DNSCache at 169.254.20.10 on GKE) and to public IPs.
   # Private ranges, the API server and the metadata server stay blocked.
   networkPolicyManagement: Managed
@@ -45,6 +47,9 @@ spec:
           - podSelector:
               matchLabels:
                 app: sandbox-router
+          - podSelector:
+              matchLabels:
+                app: kode-gopher
         ports:
           - port: 8888
             protocol: TCP

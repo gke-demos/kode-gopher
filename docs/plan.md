@@ -176,6 +176,12 @@ Goal: users add one URL to their MCP client and sign in with Google. They need n
 
 **Build order** (each step ships separately):
 1. sandbox-server GCE metadata emulator (access token only in the sandbox) and in-cluster connectivity (no router).
+   Passed on GKE on 2026-09-30, using a dev sandbox image and a kode-gopher pod running `exec --in-cluster --credentials=access-token` as its own Workload Identity:
+   - the storage client authenticated through the emulator;
+   - the token was in neither env nor files;
+   - the next run saw no emulator listener and no credentials (the network policy blocks the node's metadata server).
+
+   Workload Identity federated tokens can't be introspected by tokeninfo (400), and the metadata server reports their email as `<project>.svc.id.goog`. The public-bucket read is the validity check.
 2. HTTP transport: one sandbox per MCP session, claim leases via `spec.lifecycle.shutdownTime`, per-user session cap.
    Agent Identity vault spike, finished 2026-09-30: phases A and B passed, including silent renewal after expiry, provided the requested scopes match the stored grant exactly. Step 3 uses the vault for custody, with the sealed envelope as fallback.
 3. kode-gopher as a spec-compliant OAuth 2.1 authorization server fronting Google sign-in: PKCE (S256), RFC 8707 resource indicators, CIMD + DCR + pre-registered clients; stateless sealed tokens; allow-list by Google group (required) and domain; all Google-side settings per-deployment config.

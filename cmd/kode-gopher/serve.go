@@ -26,7 +26,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/mcp"
 )
 
@@ -40,6 +39,8 @@ func runServe(args []string) int {
 	persistent := fs.Bool("persistent", false, "on shutdown, Disconnect from the sandbox (preserve for reattach) instead of Close (delete it)")
 	openTO := fs.Duration("open-timeout", 5*time.Minute, "max time spent opening the sandbox on first tool call")
 	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (bounded upstream by PerAttemptTimeout, default 3min)")
+	inCluster := fs.Bool("in-cluster", false, "dial sandboxes by their in-cluster Service instead of port-forwarding (kode-gopher running in the cluster)")
+	credMode := fs.String("credentials", credForwarded, "how the snippet gets Google credentials: forwarded (copy local ADC into the sandbox) or access-token (mint a short-lived token from ADC and serve it to the run only; needs --in-cluster)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: kode-gopher serve [flags]\n\nMCP server over stdio. Registers one tool: execute_go_code.\n\n")
 		fs.PrintDefaults()
@@ -52,6 +53,14 @@ func runServe(args []string) int {
 		return 2
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	credSrc, err := credentialSource(ctx, *credMode, *inCluster)
+	if err != nil {
+		log.Printf("mcp serve: %v", err)
+		return 2
+	}
 	srv := mcp.New(mcp.Config{
 		Namespace:   *namespace,
 		WarmPool:    "go-runtime-pool",
@@ -60,11 +69,9 @@ func runServe(args []string) int {
 		OpenTimeout: *openTO,
 		ExecTimeout: *execTO,
 		KubeContext: *kubeCtx,
-		Credentials: creds.NewForwarded(localADCPath(), forwardedEnv),
+		Credentials: credSrc,
+		InCluster:   *inCluster,
 	})
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	if err := srv.Run(ctx); err != nil {
 		log.Printf("mcp serve: %v", err)
@@ -72,4 +79,3 @@ func runServe(args []string) int {
 	}
 	return 0
 }
-

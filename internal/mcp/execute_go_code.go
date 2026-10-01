@@ -27,6 +27,7 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/executor"
 	"github.com/gke-demos/kode-gopher/internal/normalize"
 	"github.com/gke-demos/kode-gopher/internal/prompts"
@@ -139,6 +140,7 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 		files[k] = v
 	}
 	envs := map[string]string{}
+	var runCreds *sandbox.Credentials
 	if s.cfg.Credentials != nil {
 		credFiles, credEnv, cErr := s.cfg.Credentials.Materialize(ctx)
 		if cErr != nil {
@@ -149,6 +151,13 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 		}
 		for k, v := range credEnv {
 			envs[k] = v
+		}
+		if m, ok := s.cfg.Credentials.(creds.TokenMinter); ok {
+			tok, tErr := m.AccessToken(ctx)
+			if tErr != nil {
+				return toolError(fmt.Sprintf("credentials: %v", tErr)), nil, nil
+			}
+			runCreds = sandboxCredentials(tok)
 		}
 	}
 
@@ -170,9 +179,10 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, _ *sdk.CallToolRequest
 			return nil, fmt.Errorf("reset sandbox: %w", rErr)
 		}
 		return executor.Run(ctx, sess, executor.Request{
-			Files:   files,
-			Env:     envs,
-			Timeout: s.cfg.ExecTimeout,
+			Files:       files,
+			Env:         envs,
+			Credentials: runCreds,
+			Timeout:     s.cfg.ExecTimeout,
 		})
 	}
 
@@ -284,3 +294,15 @@ func toolError(msg string) *sdk.CallToolResult {
 // from internal/curated.Packages via `make prompts`. Aliased here so
 // server.go's tool registration doesn't need to import prompts.
 var executeGoCodeDescription = prompts.ExecuteGoCodeDescription
+
+// sandboxCredentials converts a minted token to sandbox-server's
+// credentials field.
+func sandboxCredentials(t creds.AccessToken) *sandbox.Credentials {
+	return &sandbox.Credentials{
+		AccessToken:  t.Token,
+		Expiry:       t.Expiry,
+		Email:        t.Email,
+		Project:      t.Project,
+		QuotaProject: t.QuotaProject,
+	}
+}

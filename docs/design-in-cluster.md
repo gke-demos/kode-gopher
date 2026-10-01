@@ -180,17 +180,19 @@ Today the sandbox gets the user's ADC file, which includes the refresh token. In
 
 The token travels **with the run request and lives only in sandbox-server's memory** for that one command. It's never written to the sandbox filesystem.
 
-1. **Deliver.** The run step's `/execute` request carries an optional `credentials` field: `{access_token, expiry, email, project}`.
+1. **Deliver.** The run step's `/execute` request carries an optional `credentials` field: `{access_token, expiry, email, project, quota_project}`.
    - sandbox-server is ours, so this is a backwards-compatible extension. Requests without the field behave as today, so stdio and the router path are unaffected.
    - The agent-sandbox client's `Run` can't carry extra fields: it takes only a command and timeouts. So in-cluster, kode-gopher sends the run step itself: a plain HTTP POST to the sandbox's `Status.ServiceFQDN:8888`. The client still owns claim, open and close; uploads can keep using the client's `Write`.
    - Retries are skipped deliberately. A run isn't idempotent, so it shouldn't be retried like the client's other calls.
-2. **Serve.** While that command runs, sandbox-server's **GCE metadata emulator on 127.0.0.1** answers with the token:
-   - `computeMetadata/v1/instance/service-accounts/default/token`;
-   - `.../email`;
-   - `project/project-id`.
+2. **Serve.** Each such command gets its own **GCE metadata emulator** on its own 127.0.0.1 port. Concurrent commands never share one. It answers with the token:
+   - `computeMetadata/v1/instance/service-accounts/{default,<email>}/token`;
+   - `.../email`, `.../scopes`, `default/?recursive=true`;
+   - `project/project-id`, `universe/universe-domain`.
 
-   The command runs with `GCE_METADATA_HOST=127.0.0.1:<port>`.
-3. **Forget.** When the command exits, or its timeout fires, sandbox-server drops the token, and the emulator answers 404.
+   It requires `Metadata-Flavor: Google`, like the real server, and doesn't serve ID tokens (`/identity`).
+
+   The command runs with `GCE_METADATA_HOST` and `GCE_METADATA_IP` set to that port. It also gets `GOOGLE_CLOUD_PROJECT` (and `GOOGLE_CLOUD_QUOTA_PROJECT`) from the field.
+3. **Forget.** When the command exits, or its timeout fires, sandbox-server drops the token and closes the emulator's port.
    - Nothing depends on kode-gopher cleaning up: a kode-gopher crash mid-run can't leave a token behind.
    - Between calls, an idle session's sandbox holds no credential.
    - A session runs one call at a time, so there's never more than one token in flight per sandbox.
@@ -270,7 +272,7 @@ Each step ships separately. Step 2 alone is a usable internal deployment.
 ## Pass criteria
 
 - Claude Code, given only the URL, completes the sign-in and runs `list_buckets_snippet.go`. The output matches `gcloud` for that user, and a second user sees their own buckets.
-- No refresh token ever reaches a sandbox, and the access token never touches its filesystem. Check by inspecting the filesystem and env during a run. After the run, the emulator returns 404.
+- No refresh token ever reaches a sandbox, and the access token never touches its filesystem. Check by inspecting the filesystem and env during a run. After the run, the emulator's port is closed.
 - An unauthenticated request gets 401 with a `WWW-Authenticate` resource-metadata pointer. A user outside the allow-list is refused at the callback. A user admitted only through a nested group gets in. Removing them from the group refuses their next refresh.
 - Negative auth cases are rejected, each with the correct OAuth error:
   - no PKCE, or `plain` PKCE;

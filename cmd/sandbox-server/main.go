@@ -28,6 +28,13 @@ limitations under the License.
 //
 // <path> is percent-encoded (the clients encode "/" as %2F) and always
 // resolves inside the workdir.
+//
+// /execute also accepts an optional "credentials" field (kode-gopher's
+// extension): {access_token, expiry, email, project, quota_project}.
+// For that one command, a GCE metadata emulator on 127.0.0.1 serves the
+// token and the command runs with GCE_METADATA_HOST pointing at it. The
+// token is held only in memory and the emulator closes when the command
+// ends.
 package main
 
 import (

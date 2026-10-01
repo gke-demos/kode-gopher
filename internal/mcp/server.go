@@ -71,6 +71,10 @@ type Config struct {
 	// means "no creds forwarding" — the sandbox runs without
 	// GOOGLE_APPLICATION_CREDENTIALS.
 	Credentials creds.Source
+	// InCluster forwards to sandbox.Options.InCluster: dial sandboxes by
+	// their Service instead of port-forwarding. A creds.TokenMinter
+	// Credentials source requires it.
+	InCluster bool
 }
 
 func (c *Config) applyDefaults() {
@@ -162,6 +166,7 @@ func (s *Server) ensureSession(ctx context.Context) (*sandbox.Session, error) {
 		WarmPool:    s.cfg.WarmPool,
 		ClaimName:   s.cfg.Claim,
 		KubeContext: s.cfg.KubeContext,
+		InCluster:   s.cfg.InCluster,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open sandbox: %w", err)
