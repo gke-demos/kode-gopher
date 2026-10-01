@@ -77,7 +77,7 @@ All smoketests are idempotent and reuse infra across runs.
 | [`docs/plan.md`](./docs/plan.md) | slice-by-slice build sequence (0-6; 0-4 shipped, 5-6 planned) |
 | [`docs/decisions.md`](./docs/decisions.md) | append-only log of judgment calls per slice |
 | [`cmd/kode-gopher`](./cmd/kode-gopher) | the CLI binary — subcommands `exec` and `serve` |
-| [`cmd/mcp-smoketest`](./cmd/mcp-smoketest) | programmatic MCP client; spawns `kode-gopher serve` and exercises `execute_go_code` end-to-end |
+| [`cmd/mcp-smoketest`](./cmd/mcp-smoketest) | programmatic MCP client; spawns `kode-gopher serve` (stdio or streamable HTTP) and exercises `execute_go_code` end-to-end; `--offline` runs the checks that need no Google credentials |
 | [`cmd/sandbox-server`](./cmd/sandbox-server) | the in-pod HTTP server (agent-sandbox runtime protocol on :8888), built into the sandbox image |
 | [`internal/mcp`](./internal/mcp) | MCP server + tool handlers (execute_go_code, gcp_auth_status, lookup_package_docs) |
 | [`internal/executor`](./internal/executor) | Build/Run/Fetch phases over a `sandbox.Session`; bootstraps `/app/go.mod` from the prewarm lockfile |
@@ -97,6 +97,7 @@ All smoketests are idempotent and reuse infra across runs.
 | [`scripts/smoketest-gke.sh`](./scripts/smoketest-gke.sh) | GKE Autopilot direct-CLI verification |
 | [`scripts/smoketest-mcp.sh`](./scripts/smoketest-mcp.sh) | MCP-layer verification against either substrate |
 | [`scripts/smoketest-http.sh`](./scripts/smoketest-http.sh) | in-cluster kode-gopher over streamable HTTP, including negative auth cases |
+| [`dev/ci/e2e/kind.sh`](./dev/ci/e2e/kind.sh) | CI's kind end-to-end test, no Google credentials: throwaway cluster, agent-sandbox, sandbox image, `mcp-smoketest --offline` over stdio and HTTP |
 | [`experiments/yaegi-poc`](./experiments/yaegi-poc) | Slice 6 proof of concept (shelved) — Yaegi interpreter as an alternative runtime, plus the `kg-difftest` corpus that ruled it out |
 
 ## Built on

@@ -15,9 +15,15 @@ limitations under the License.
 */
 
 // cmd/mcp-smoketest spawns `kode-gopher serve` as a subprocess, speaks
-// MCP to it over stdio, and exercises execute_go_code against two test
-// files (verbatim + wrapped). Validates the MCP layer end-to-end
-// without involving an LLM.
+// MCP to it over stdio (or streamable HTTP with --transport=http), and
+// exercises execute_go_code against two test files (verbatim +
+// wrapped). Validates the MCP layer end-to-end without involving an
+// LLM.
+//
+// --offline runs only the checks that need no Google credentials (CI's
+// kind e2e, dev/ci/e2e/kind.sh): a snippet that calls no Google API, a
+// build error, a panic, gcp_auth_status reporting mode=none, and
+// lookup_package_docs.
 //
 // Usage:
 //
@@ -47,6 +53,8 @@ func main() {
 	namespace := flag.String("namespace", "default", "k8s namespace (must already exist; the SandboxTemplate must be deployed there)")
 	timeout := flag.Duration("timeout", 5*time.Minute, "overall test timeout")
 	compareNames := flag.Bool("compare", false, "fetch `gcloud storage buckets list` and assert the snippet result matches name order")
+	offline := flag.Bool("offline", false, "run only the checks that need no Google credentials (kode-gopher must have none)")
+	transport := flag.String("transport", "stdio", "how to reach kode-gopher serve: stdio, or http (a local streamable HTTP server with a generated static token)")
 	flag.Parse()
 
 	log.SetOutput(os.Stderr)
@@ -56,18 +64,32 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	session, err := connect(ctx, *serverPath, *namespace)
-	if err != nil {
-		log.Fatalf("connect: %v", err) //nolint:gocritic // exiting; the deferred cancel is moot
+	var session *sdk.ClientSession
+	var err error
+	switch *transport {
+	case "stdio":
+		session, err = connect(ctx, *serverPath, *namespace)
+	case "http":
+		session, err = connectHTTP(ctx, *serverPath, *namespace, nil)
+	default:
+		err = fmt.Errorf("--transport must be stdio or http, got %q", *transport)
 	}
-	defer func() { _ = session.Close() }()
+	if err != nil {
+		fatalf("connect: %v", err)
+	}
+	defer func() {
+		_ = session.Close()
+		if stopServer != nil {
+			stopServer()
+		}
+	}()
 
 	// 1. Tool discovery — must advertise execute_go_code, gcp_auth_status,
 	// and lookup_package_docs (slice 4 registers the latter two alongside
 	// the original).
 	tools, err := session.ListTools(ctx, &sdk.ListToolsParams{})
 	if err != nil {
-		log.Fatalf("list tools: %v", err)
+		fatalf("list tools: %v", err)
 	}
 	fmt.Printf("tools advertised: %d\n", len(tools.Tools))
 	expected := map[string]bool{"execute_go_code": false, "gcp_auth_status": false, "lookup_package_docs": false}
@@ -79,8 +101,12 @@ func main() {
 	}
 	for name, seen := range expected {
 		if !seen {
-			log.Fatalf("%s not advertised by server", name)
+			fatalf("%s not advertised by server", name)
 		}
+	}
+	if *offline {
+		runOffline(ctx, session)
+		return
 	}
 
 	// 2. Exercise the test files (verbatim GCS + wrapped GCS + GKE
@@ -96,25 +122,25 @@ func main() {
 	} {
 		out, err := callExecuteGoCode(ctx, session, tc.path)
 		if err != nil {
-			log.Fatalf("[%s] call: %v", tc.label, err)
+			fatalf("[%s] call: %v", tc.label, err)
 		}
 		fmt.Printf("\n========== %s (%s) ==========\nphase=%s mode=%s exit=%d duration=%dms\n",
 			tc.label, tc.path, out.Phase, out.Mode, out.ExitCode, out.DurationMS)
 		if out.ExitCode != 0 {
-			log.Fatalf("[%s] exit=%d (expected 0). stderr:\n%s", tc.label, out.ExitCode, out.Stderr)
+			fatalf("[%s] exit=%d (expected 0). stderr:\n%s", tc.label, out.ExitCode, out.Stderr)
 		}
 		switch tc.label {
 		case "wrapped":
 			// Wrapper produces a structured result; assert kind=ok
 			// and extract the bucket list for the compare step.
 			if out.Result == nil {
-				log.Fatalf("[%s] expected non-nil result (wrapper should always populate)", tc.label)
+				fatalf("[%s] expected non-nil result (wrapper should always populate)", tc.label)
 			}
 			if out.Result.Kind != "ok" {
-				log.Fatalf("[%s] expected result.kind=ok, got %q (message=%q)", tc.label, out.Result.Kind, out.Result.Message)
+				fatalf("[%s] expected result.kind=ok, got %q (message=%q)", tc.label, out.Result.Kind, out.Result.Message)
 			}
 			if err := json.Unmarshal(out.Result.Value, &snippetResult); err != nil {
-				log.Fatalf("[%s] decode result.value as []bucket: %v", tc.label, err)
+				fatalf("[%s] decode result.value as []bucket: %v", tc.label, err)
 			}
 			fmt.Printf("  result.kind=ok  value has %d buckets\n", len(snippetResult))
 		case "verbatim":
@@ -124,7 +150,7 @@ func main() {
 			// produced *something* sensible.
 			var stdoutResult []map[string]any
 			if err := json.Unmarshal([]byte(out.Stdout), &stdoutResult); err != nil {
-				log.Fatalf("[%s] decode stdout as []bucket: %v\nstdout:\n%s", tc.label, err, out.Stdout)
+				fatalf("[%s] decode stdout as []bucket: %v\nstdout:\n%s", tc.label, err, out.Stdout)
 			}
 			fmt.Printf("  stdout has %d buckets\n", len(stdoutResult))
 		case "k8s":
@@ -133,19 +159,19 @@ func main() {
 			// (major, gitVersion) are populated — proves the
 			// discovery client round-tripped to the API server.
 			if out.Result == nil {
-				log.Fatalf("[%s] expected non-nil result", tc.label)
+				fatalf("[%s] expected non-nil result", tc.label)
 			}
 			if out.Result.Kind != "ok" {
-				log.Fatalf("[%s] expected result.kind=ok, got %q (message=%q)", tc.label, out.Result.Kind, out.Result.Message)
+				fatalf("[%s] expected result.kind=ok, got %q (message=%q)", tc.label, out.Result.Kind, out.Result.Message)
 			}
 			var info map[string]any
 			if err := json.Unmarshal(out.Result.Value, &info); err != nil {
-				log.Fatalf("[%s] decode result.value as version.Info: %v", tc.label, err)
+				fatalf("[%s] decode result.value as version.Info: %v", tc.label, err)
 			}
 			major, _ := info["major"].(string)
 			git, _ := info["gitVersion"].(string)
 			if major == "" || git == "" {
-				log.Fatalf("[%s] version.Info missing expected fields (major=%q, gitVersion=%q); full=%v", tc.label, major, git, info)
+				fatalf("[%s] version.Info missing expected fields (major=%q, gitVersion=%q); full=%v", tc.label, major, git, info)
 			}
 			fmt.Printf("  result.kind=ok  server major=%s gitVersion=%s\n", major, git)
 		case "gke-compose":
@@ -154,10 +180,10 @@ func main() {
 			// Assert result.kind=ok, cluster field populated, and
 			// >=1 pod returned with non-empty namespace+name.
 			if out.Result == nil {
-				log.Fatalf("[%s] expected non-nil result", tc.label)
+				fatalf("[%s] expected non-nil result", tc.label)
 			}
 			if out.Result.Kind != "ok" {
-				log.Fatalf("[%s] expected result.kind=ok, got %q (message=%q)", tc.label, out.Result.Kind, out.Result.Message)
+				fatalf("[%s] expected result.kind=ok, got %q (message=%q)", tc.label, out.Result.Kind, out.Result.Message)
 			}
 			var res struct {
 				Cluster      string           `json:"cluster"`
@@ -167,18 +193,18 @@ func main() {
 				Pods         []map[string]any `json:"pods"`
 			}
 			if err := json.Unmarshal(out.Result.Value, &res); err != nil {
-				log.Fatalf("[%s] decode result.value: %v", tc.label, err)
+				fatalf("[%s] decode result.value: %v", tc.label, err)
 			}
 			if res.Cluster == "" {
-				log.Fatalf("[%s] cluster field empty in result: %s", tc.label, string(out.Result.Value))
+				fatalf("[%s] cluster field empty in result: %s", tc.label, string(out.Result.Value))
 			}
 			if len(res.Pods) == 0 {
-				log.Fatalf("[%s] expected >=1 pod in kube-system on cluster %s (result: %s)", tc.label, res.Cluster, string(out.Result.Value))
+				fatalf("[%s] expected >=1 pod in kube-system on cluster %s (result: %s)", tc.label, res.Cluster, string(out.Result.Value))
 			}
 			firstName, _ := res.Pods[0]["name"].(string)
 			firstNS, _ := res.Pods[0]["namespace"].(string)
 			if firstName == "" || firstNS == "" {
-				log.Fatalf("[%s] first pod missing name/namespace: %v", tc.label, res.Pods[0])
+				fatalf("[%s] first pod missing name/namespace: %v", tc.label, res.Pods[0])
 			}
 			fmt.Printf("  result.kind=ok  cluster=%s (%s) endpoint=%s (%s) pods_in_kube_system=%d first=%s/%s\n",
 				res.Cluster, res.Location, res.Endpoint, res.EndpointKind, len(res.Pods), firstNS, firstName)
@@ -190,15 +216,15 @@ func main() {
 		fmt.Println("\n========== compare against gcloud ==========")
 		project := os.Getenv("GOOGLE_CLOUD_PROJECT")
 		if project == "" {
-			log.Fatal("--compare requires GOOGLE_CLOUD_PROJECT")
+			fatal("--compare requires GOOGLE_CLOUD_PROJECT")
 		}
 		gcloud, err := gcloudBucketNames(ctx, project)
 		if err != nil {
-			log.Fatalf("gcloud reference: %v", err)
+			fatalf("gcloud reference: %v", err)
 		}
 		ours := bucketNamesSortedByTime(snippetResult)
 		if diff := compareSlices(ours, gcloud); diff != "" {
-			log.Fatalf("snippet result differs from gcloud:\n%s", diff)
+			fatalf("snippet result differs from gcloud:\n%s", diff)
 		}
 		fmt.Printf("✅ match: %d buckets in same chronological order as gcloud\n", len(ours))
 	}
@@ -206,30 +232,9 @@ func main() {
 	// 4. gcp_auth_status — proves creds.Source.Identity plumbing works
 	// end-to-end (JSON parse, userinfo lookup, structured output).
 	fmt.Println("\n========== gcp_auth_status ==========")
-	authRes, err := session.CallTool(ctx, &sdk.CallToolParams{
-		Name:      "gcp_auth_status",
-		Arguments: map[string]any{},
-	})
-	if err != nil {
-		log.Fatalf("gcp_auth_status call: %v", err)
-	}
-	var auth struct {
-		Mode      string `json:"mode"`
-		CredType  string `json:"credential_type"`
-		Email     string `json:"email"`
-		ProjectID string `json:"project_id"`
-	}
-	if authRes.StructuredContent == nil {
-		log.Fatal("gcp_auth_status: missing structuredContent")
-	}
-	if raw, e := json.Marshal(authRes.StructuredContent); e == nil {
-		_ = json.Unmarshal(raw, &auth)
-	}
-	if auth.Mode == "" {
-		log.Fatalf("gcp_auth_status: mode empty (structured=%v)", authRes.StructuredContent)
-	}
+	auth := callAuthStatus(ctx, session)
 	if auth.Email == "" {
-		log.Fatalf("gcp_auth_status: email empty — expected userinfo lookup to succeed for authorized_user creds (structured=%v)", authRes.StructuredContent)
+		fatalf("gcp_auth_status: email empty — expected userinfo lookup to succeed for authorized_user creds (got %+v)", auth)
 	}
 	fmt.Printf("  mode=%s credential_type=%s email=%s project_id=%s\n", auth.Mode, auth.CredType, auth.Email, auth.ProjectID)
 
@@ -237,36 +242,7 @@ func main() {
 	// and `go doc` inside the sandbox against /opt/kode-gopher-base
 	// returns non-empty output for a curated package.
 	fmt.Println("\n========== lookup_package_docs ==========")
-	docsRes, err := session.CallTool(ctx, &sdk.CallToolParams{
-		Name: "lookup_package_docs",
-		Arguments: map[string]any{
-			"package": "cloud.google.com/go/storage",
-			"symbol":  "Client",
-		},
-	})
-	if err != nil {
-		log.Fatalf("lookup_package_docs call: %v", err)
-	}
-	if docsRes.IsError {
-		log.Fatalf("lookup_package_docs returned IsError: %v", contentText(docsRes.Content))
-	}
-	var docs struct {
-		Package string `json:"package"`
-		Symbol  string `json:"symbol"`
-		Docs    string `json:"docs"`
-	}
-	if raw, e := json.Marshal(docsRes.StructuredContent); e == nil {
-		_ = json.Unmarshal(raw, &docs)
-	}
-	if !strings.Contains(docs.Docs, "type Client struct") {
-		log.Fatalf("lookup_package_docs: expected Docs to contain 'type Client struct'; got:\n%s", docs.Docs)
-	}
-	// Terse: first 3 lines is enough to confirm we got real godoc output.
-	summary := docs.Docs
-	if lines := strings.SplitN(summary, "\n", 4); len(lines) > 3 {
-		summary = strings.Join(lines[:3], "\n") + "\n  [...]"
-	}
-	fmt.Printf("  package=%s symbol=%s docs=\n    %s\n", docs.Package, docs.Symbol, strings.ReplaceAll(summary, "\n", "\n    "))
+	checkPackageDocs(ctx, session)
 
 	// 6. Multi-file snippet — the `files` MCP arg with a root file +
 	// helper subpackage. Proves normalize's multi-file plumbing works
@@ -284,32 +260,32 @@ func main() {
 		},
 	})
 	if err != nil {
-		log.Fatalf("multi-file call: %v", err)
+		fatalf("multi-file call: %v", err)
 	}
 	if mfRes.StructuredContent == nil {
-		log.Fatal("multi-file: missing structuredContent")
+		fatal("multi-file: missing structuredContent")
 	}
 	var mfOut executeGoCodeOutput
 	if raw, e := json.Marshal(mfRes.StructuredContent); e == nil {
 		if e2 := json.Unmarshal(raw, &mfOut); e2 != nil {
-			log.Fatalf("multi-file: decode structured: %v", e2)
+			fatalf("multi-file: decode structured: %v", e2)
 		}
 	}
 	if mfOut.ExitCode != 0 {
-		log.Fatalf("multi-file: exit=%d stderr=\n%s", mfOut.ExitCode, mfOut.Stderr)
+		fatalf("multi-file: exit=%d stderr=\n%s", mfOut.ExitCode, mfOut.Stderr)
 	}
 	if mfOut.Result == nil || mfOut.Result.Kind != "ok" {
-		log.Fatalf("multi-file: expected result.kind=ok, got %+v", mfOut.Result)
+		fatalf("multi-file: expected result.kind=ok, got %+v", mfOut.Result)
 	}
 	var mfVal struct {
 		Count   int      `json:"count"`
 		Buckets []string `json:"buckets"`
 	}
 	if err := json.Unmarshal(mfOut.Result.Value, &mfVal); err != nil {
-		log.Fatalf("multi-file: decode result.value: %v", err)
+		fatalf("multi-file: decode result.value: %v", err)
 	}
 	if mfVal.Count == 0 {
-		log.Fatalf("multi-file: expected >=1 bucket (project has none?); result=%s", string(mfOut.Result.Value))
+		fatalf("multi-file: expected >=1 bucket (project has none?); result=%s", string(mfOut.Result.Value))
 	}
 	// Formatter contract: each description must contain "d old)" — a signal
 	// the helper subpackage actually ran (not just the root file).
@@ -320,12 +296,78 @@ func main() {
 		}
 	}
 	if found == 0 {
-		log.Fatalf("multi-file: no bucket description carries the formatter's 'd old)' suffix — helper subpackage may not have shipped (result: %s)", string(mfOut.Result.Value))
+		fatalf("multi-file: no bucket description carries the formatter's 'd old)' suffix — helper subpackage may not have shipped (result: %s)", string(mfOut.Result.Value))
 	}
 	fmt.Printf("  result.kind=ok  buckets=%d formatter_applied=%d/%d first=%s\n",
 		mfVal.Count, found, mfVal.Count, mfVal.Buckets[0])
 
 	fmt.Println("\n✅ MCP smoketest complete")
+}
+
+type authStatus struct {
+	Mode      string `json:"mode"`
+	CredType  string `json:"credential_type"`
+	Email     string `json:"email"`
+	ProjectID string `json:"project_id"`
+}
+
+// callAuthStatus calls gcp_auth_status and decodes its structured
+// output, which must name a mode.
+func callAuthStatus(ctx context.Context, session *sdk.ClientSession) authStatus {
+	res, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "gcp_auth_status",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		fatalf("gcp_auth_status call: %v", err)
+	}
+	if res.StructuredContent == nil {
+		fatal("gcp_auth_status: missing structuredContent")
+	}
+	var auth authStatus
+	if raw, e := json.Marshal(res.StructuredContent); e == nil {
+		_ = json.Unmarshal(raw, &auth)
+	}
+	if auth.Mode == "" {
+		fatalf("gcp_auth_status: mode empty (structured=%v)", res.StructuredContent)
+	}
+	return auth
+}
+
+// checkPackageDocs proves lookup_package_docs registers, its args
+// validate, and `go doc` inside the sandbox against
+// /opt/kode-gopher-base returns real output for a curated package.
+func checkPackageDocs(ctx context.Context, session *sdk.ClientSession) {
+	docsRes, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "lookup_package_docs",
+		Arguments: map[string]any{
+			"package": "cloud.google.com/go/storage",
+			"symbol":  "Client",
+		},
+	})
+	if err != nil {
+		fatalf("lookup_package_docs call: %v", err)
+	}
+	if docsRes.IsError {
+		fatalf("lookup_package_docs returned IsError: %v", contentText(docsRes.Content))
+	}
+	var docs struct {
+		Package string `json:"package"`
+		Symbol  string `json:"symbol"`
+		Docs    string `json:"docs"`
+	}
+	if raw, e := json.Marshal(docsRes.StructuredContent); e == nil {
+		_ = json.Unmarshal(raw, &docs)
+	}
+	if !strings.Contains(docs.Docs, "type Client struct") {
+		fatalf("lookup_package_docs: expected Docs to contain 'type Client struct'; got:\n%s", docs.Docs)
+	}
+	// Terse: first 3 lines is enough to confirm we got real godoc output.
+	summary := docs.Docs
+	if lines := strings.SplitN(summary, "\n", 4); len(lines) > 3 {
+		summary = strings.Join(lines[:3], "\n") + "\n  [...]"
+	}
+	fmt.Printf("  package=%s symbol=%s docs=\n    %s\n", docs.Package, docs.Symbol, strings.ReplaceAll(summary, "\n", "\n    "))
 }
 
 // readSnippet reads a testdata source into a string for the
@@ -334,7 +376,7 @@ func main() {
 func readSnippet(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatalf("read %s: %v", path, err)
+		fatalf("read %s: %v", path, err)
 	}
 	return string(b)
 }
@@ -367,6 +409,7 @@ type executeGoCodeOutput struct {
 	Mode       string `json:"mode"`
 	ExitCode   int    `json:"exit_code"`
 	DurationMS int64  `json:"duration_ms"`
+	Tidied     bool   `json:"tidied"`
 	Stdout     string `json:"stdout"`
 	Stderr     string `json:"stderr"`
 	Result     *struct {
@@ -383,9 +426,13 @@ func callExecuteGoCode(ctx context.Context, s *sdk.ClientSession, path string) (
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	return callExecuteGoCodeSource(ctx, s, string(code))
+}
+
+func callExecuteGoCodeSource(ctx context.Context, s *sdk.ClientSession, code string) (*executeGoCodeOutput, error) {
 	res, err := s.CallTool(ctx, &sdk.CallToolParams{
 		Name:      "execute_go_code",
-		Arguments: map[string]any{"code": string(code)},
+		Arguments: map[string]any{"code": code},
 	})
 	if err != nil {
 		return nil, err
