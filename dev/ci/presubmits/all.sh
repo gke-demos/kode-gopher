@@ -24,7 +24,7 @@
 set -euo pipefail
 
 dir="$(cd "$(dirname "$0")" && pwd)"
-steps=(build vet fmt lint mod-tidy go-toolchain prompts sandbox-pin test vuln)
+steps=(build vet fmt lint mod-tidy go-toolchain prompts sandbox-pin agent-attribution test vuln)
 failed=()
 
 for step in "${steps[@]}"; do
