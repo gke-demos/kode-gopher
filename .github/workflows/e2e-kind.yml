@@ -1,0 +1,56 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# End to end on a kind cluster, with no Google credentials: kode-gopher
+# serve (stdio and streamable HTTP) runs snippets in real agent-sandbox
+# sandboxes. Everything is in dev/ci/e2e/kind.sh, which runs the same
+# locally. Not in ci.yml because it takes minutes and only matters for
+# changes to what runs: Go code, the sandbox image, the manifests.
+name: e2e-kind
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'sandbox/**'
+      - 'manifests/base/**'
+      - 'testdata/**'
+      - 'scripts/sandbox-image-tag.sh'
+      - 'dev/ci/e2e/**'
+      - '.github/workflows/e2e-kind.yml'
+  pull_request:
+    paths: *paths
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # A sandbox image build (when its sources changed) is the slow part.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # The script owns the cluster's lifecycle; this only installs kind.
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: v0.32.0
+      - name: kind e2e
+        run: dev/ci/e2e/kind.sh

@@ -35,6 +35,12 @@ What the presubmits check:
 | no agent attribution | `agent-attribution.sh` |
 | govulncheck | `vuln.sh` |
 
+PRs that touch Go code, the sandbox image, `manifests/base` or `testdata/` also run an end-to-end test on a kind cluster ([`.github/workflows/e2e-kind.yml`](./.github/workflows/e2e-kind.yml)). It has no Google credentials, so it covers what runs without them: `kode-gopher serve`, over stdio and over streamable HTTP, building and running snippets in real agent-sandbox sandboxes. It takes a few minutes, needs docker and kind, and isn't part of `make presubmit`. To run it locally:
+
+```bash
+dev/ci/e2e/kind.sh   # KEEP=1 keeps the cluster, BUILD=1 builds the sandbox image
+```
+
 The lint config includes a complexity ratchet (funlen, gocognit) pinned to today's worst function. Lower it when you split that function; never raise it.
 
 ### Commit messages: Conventional Commits

@@ -4,6 +4,7 @@
 
 # Smoketest scratch
 /.smoke/
+/.e2e/
 
 # Vendored deps (we use Go modules, not vendor)
 /vendor/
