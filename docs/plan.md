@@ -191,6 +191,12 @@ Goal: users add one URL to their MCP client and sign in with Google. They need n
    - after `kill -9` of the server, the orphaned claim was deleted at its last `shutdownTime`.
    Agent Identity vault spike, finished 2026-09-30: phases A and B passed, including silent renewal after expiry, provided the requested scopes match the stored grant exactly. Step 3 uses the vault for custody, with the sealed envelope as fallback.
 3. kode-gopher as a spec-compliant OAuth 2.1 authorization server fronting Google sign-in: PKCE (S256), RFC 8707 resource indicators, CIMD + DCR + pre-registered clients; stateless sealed tokens; allow-list by Google group (required) and domain; all Google-side settings per-deployment config.
+   Built 2026-10-01 as `internal/oauth` and `serve --auth=oauth` (flags in `docs/design-in-cluster.md > Step 3 as built`). Tested against fakes of Google sign-in, the vault and Cloud Identity:
+   - a go-sdk `AuthorizationCodeHandler` client signs in by CIMD, DCR and pre-registered, under both custody backends;
+   - the negative cases in the pass criteria each get the right OAuth error;
+   - a refresh is refused after removal from the allow-list or Google revocation;
+   - a vault grant from another Google account is refused.
+   Real Google sign-in, and Claude Code and MCP Inspector interop, move to step 4: they need the deployed issuer URL as a redirect URI on the OAuth client.
 4. GKE manifests (Gateway, cert, network policies including router lock-down) and `scripts/smoketest-http.sh`.
 5. Service-identity mode and the client-credentials extension (separate step).
 

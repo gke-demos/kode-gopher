@@ -141,8 +141,8 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 	}
 	envs := map[string]string{}
 	var runCreds *sandbox.Credentials
-	if s.cfg.Credentials != nil {
-		credFiles, credEnv, cErr := s.cfg.Credentials.Materialize(ctx)
+	if src := s.credentialsFor(req); src != nil {
+		credFiles, credEnv, cErr := src.Materialize(ctx)
 		if cErr != nil {
 			return toolError(fmt.Sprintf("materialize credentials: %v", cErr)), nil, nil
 		}
@@ -152,7 +152,7 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 		for k, v := range credEnv {
 			envs[k] = v
 		}
-		if m, ok := s.cfg.Credentials.(creds.TokenMinter); ok {
+		if m, ok := src.(creds.TokenMinter); ok {
 			tok, tErr := m.AccessToken(ctx)
 			if tErr != nil {
 				return toolError(fmt.Sprintf("credentials: %v", tErr)), nil, nil

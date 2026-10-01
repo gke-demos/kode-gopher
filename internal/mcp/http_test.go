@@ -25,7 +25,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/gke-demos/kode-gopher/internal/creds"
 )
 
 const testToken = "kg-test-token-0123456789abcdef0123456789"
@@ -199,4 +202,48 @@ func TestHTTPSessionSlots(t *testing.T) {
 		t.Fatalf("slots after closing one session = %d, want 1", n)
 	}
 	b.Close()
+}
+
+// Under OAuth, the credentials the verifier puts in TokenInfo replace
+// Config.Credentials for that request.
+func TestHTTPPerRequestCredentials(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing"))
+	s := New(Config{KubeContext: "kg-test-missing", OpenTimeout: 10 * time.Second})
+	verifier := func(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
+		if token != testToken {
+			return nil, auth.ErrInvalidToken
+		}
+		return &auth.TokenInfo{UserID: "111", Expiration: time.Now().Add(time.Hour), Extra: map[string]any{
+			creds.TokenInfoKey: &creds.OAuthUser{Token: "ya29.x", Expiry: time.Now().Add(time.Hour), Email: "alice@example.com", Project: "p1"},
+		}}, nil
+	}
+	var routed bool
+	ts := httptest.NewServer(s.httpHandler(HTTPOptions{
+		Protect: func(h http.Handler) http.Handler { return auth.RequireBearerToken(verifier, nil)(h) },
+		Routes:  http.HandlerFunc(func(http.ResponseWriter, *http.Request) { routed = true }),
+	}))
+	t.Cleanup(ts.Close)
+
+	cs, err := connect(t, ts.URL, testToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "gcp_auth_status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := res.Content[0].(*sdk.TextContent).Text
+	if want := "mode=oauth credential_type=authorized_user email=alice@example.com project_id=p1"; text != want {
+		t.Errorf("gcp_auth_status = %q, want %q", text, want)
+	}
+
+	resp, err := http.Get(ts.URL + "/.well-known/oauth-authorization-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !routed {
+		t.Error("non-MCP path didn't reach Routes")
+	}
 }

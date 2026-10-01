@@ -201,6 +201,18 @@ func (s *Server) slotFor(req *sdk.CallToolRequest) *slot {
 	return sl
 }
 
+// credentialsFor is the credential source for one tool call: the
+// request's own (OAuth: the signed-in user's Google token, put in the
+// TokenInfo by the verifier) if it has one, else Config.Credentials.
+func (s *Server) credentialsFor(req *sdk.CallToolRequest) creds.Source {
+	if req != nil && req.Extra != nil && req.Extra.TokenInfo != nil {
+		if src, ok := req.Extra.TokenInfo.Extra[creds.TokenInfoKey].(creds.Source); ok {
+			return src
+		}
+	}
+	return s.cfg.Credentials
+}
+
 // ensureSession lazy-opens the slot's sandbox.Session on first use and
 // reuses it on subsequent calls.
 func (s *Server) ensureSession(ctx context.Context, sl *slot) (*sandbox.Session, error) {

@@ -30,20 +30,21 @@ type GCPAuthStatusArgs struct{}
 // to decide whether the sandbox is properly credentialed before
 // spending a tool call on execute_go_code.
 type GCPAuthStatusOutput struct {
-	Mode      string `json:"mode"                       jsonschema:"'forwarded' (host ADC copied into sandbox), 'access-token' (a short-lived token minted by kode-gopher, served to each run by a metadata emulator in the sandbox), 'workload' (in-cluster KSA via metadata server), or 'none' (no credentials configured)."`
+	Mode      string `json:"mode"                       jsonschema:"'forwarded' (host ADC copied into sandbox), 'access-token' (a short-lived token minted by kode-gopher, served to each run by a metadata emulator in the sandbox), 'oauth' (the signed-in user's own short-lived Google token, served the same way), 'workload' (in-cluster KSA via metadata server), or 'none' (no credentials configured)."`
 	CredType  string `json:"credential_type,omitempty"  jsonschema:"For forwarded and access-token modes: 'authorized_user' or 'service_account' (access-token also 'metadata', when kode-gopher's own identity is Workload Identity). For workload mode: 'metadata'."`
 	Email     string `json:"email,omitempty"            jsonschema:"Best-effort identity email. Empty means lookup failed or wasn't possible."`
 	ProjectID string `json:"project_id,omitempty"       jsonschema:"GCP project associated with these credentials (ADC quota_project_id, or $GOOGLE_CLOUD_PROJECT)."`
 }
 
-func (s *Server) handleGCPAuthStatus(ctx context.Context, _ *sdk.CallToolRequest, _ GCPAuthStatusArgs) (*sdk.CallToolResult, *GCPAuthStatusOutput, error) {
-	if s.cfg.Credentials == nil {
+func (s *Server) handleGCPAuthStatus(ctx context.Context, req *sdk.CallToolRequest, _ GCPAuthStatusArgs) (*sdk.CallToolResult, *GCPAuthStatusOutput, error) {
+	src := s.credentialsFor(req)
+	if src == nil {
 		out := &GCPAuthStatusOutput{Mode: "none"}
 		return &sdk.CallToolResult{
 			Content: []sdk.Content{&sdk.TextContent{Text: "mode=none (no credentials source configured)"}},
 		}, out, nil
 	}
-	id, err := s.cfg.Credentials.Identity(ctx)
+	id, err := src.Identity(ctx)
 	out := &GCPAuthStatusOutput{
 		Mode:      id.Mode,
 		CredType:  id.CredType,
@@ -67,4 +68,4 @@ func (s *Server) handleGCPAuthStatus(ctx context.Context, _ *sdk.CallToolRequest
 	}, out, nil
 }
 
-const gcpAuthStatusDescription = `Report the sandbox's GCP credential identity: mode (forwarded/workload/none), credential type (authorized_user/service_account/metadata), identity email, and project ID. Zero-arg tool. Use before execute_go_code to confirm the sandbox will authenticate as the expected identity — especially useful after a token revocation or when debugging a "why did my API call return PermissionDenied" scenario.`
+const gcpAuthStatusDescription = `Report the sandbox's GCP credential identity: mode (forwarded/access-token/oauth/workload/none), credential type (authorized_user/service_account/metadata), identity email, and project ID. Zero-arg tool. Use before execute_go_code to confirm the sandbox will authenticate as the expected identity — especially useful after a token revocation or when debugging a "why did my API call return PermissionDenied" scenario.`
