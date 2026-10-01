@@ -1,0 +1,133 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The kode-gopher MCP server (server/Dockerfile), behind the Gateway in
+# gateway.yaml.
+#
+# One replica, replaced with Recreate: MCP sessions (each with its own
+# sandbox) and the OAuth replay cache live in memory, so two pods would
+# split them. A client whose pod goes away re-initializes; the claims
+# it held expire within --claim-lease.
+#
+# This is --auth=static: one operator-issued bearer token, from the
+# Secret kode-gopher-token (key `token`, 32+ characters), and snippets
+# run as kode-gopher's own Workload Identity. The gke-server-oauth
+# overlay switches to Google sign-in. scripts/deploy-gke-server.sh
+# creates the Secret and applies either.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kode-gopher
+  labels:
+    app: kode-gopher
+spec:
+  type: ClusterIP
+  selector:
+    app: kode-gopher
+    component: server
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kode-gopher
+  labels:
+    app: kode-gopher
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kode-gopher
+  template:
+    metadata:
+      labels:
+        # The SandboxTemplate's networkPolicy admits sandbox ingress
+        # from pods with app: kode-gopher. component: server tells the
+        # server's pods apart from other kode-gopher pods (exec jobs,
+        # test pods) for the Service and network policy.
+        app: kode-gopher
+        component: server
+    spec:
+      serviceAccountName: kode-gopher
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Sessions end on SIGTERM, closing their sandboxes.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: kode-gopher
+          image: ghcr.io/gke-demos/kode-gopher/server:main
+          imagePullPolicy: Always
+          args:
+            - serve
+            - --transport=http
+            - --in-cluster
+            - --namespace=$(POD_NAMESPACE)
+            - --addr=:8080
+            - --credentials=access-token
+            - --auth=static
+            - --auth-token-file=/etc/kode-gopher/token/token
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: token
+              mountPath: /etc/kode-gopher/token
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: token
+          secret:
+            secretName: kode-gopher-token
+        - name: tmp
+          emptyDir: {}

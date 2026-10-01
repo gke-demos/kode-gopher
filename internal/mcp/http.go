@@ -92,11 +92,13 @@ func (s *Server) httpHandler(opts HTTPOptions) http.Handler {
 		SessionTimeout: opts.SessionTimeout,
 	})
 	mux := http.NewServeMux()
-	protect := opts.Protect
-	if protect == nil {
-		protect = auth.RequireBearerToken(opts.Verifier, nil)
+	var h http.Handler
+	if opts.Protect != nil {
+		h = opts.Protect(mcpHandler)
+	} else {
+		h = bearerChallenge(auth.RequireBearerToken(opts.Verifier, nil), mcpHandler)
 	}
-	mux.Handle("/mcp", protect(mcpHandler))
+	mux.Handle("/mcp", h)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -104,6 +106,22 @@ func (s *Server) httpHandler(opts HTTPOptions) http.Handler {
 		mux.Handle("/", opts.Routes)
 	}
 	return mux
+}
+
+// bearerChallenge makes protect's 401s carry `WWW-Authenticate: Bearer`
+// (RFC 6750 section 3). go-sdk only writes the header with a resource
+// metadata URL, which static auth doesn't have. The header is set up
+// front and dropped once the token verifies, so the MCP handler gets
+// the server's own ResponseWriter, Flusher and all.
+func bearerChallenge(protect func(http.Handler) http.Handler, next http.Handler) http.Handler {
+	inner := protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Del("WWW-Authenticate")
+		next.ServeHTTP(w, r)
+	}))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		inner.ServeHTTP(w, r)
+	})
 }
 
 // StaticTokenVerifier accepts exactly token, as user. For a single

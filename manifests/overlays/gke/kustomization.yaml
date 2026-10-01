@@ -29,6 +29,8 @@
 #     nodes. Builds are CPU-bound under gVisor and ~3x faster than on
 #     the default class's E2-class nodes.
 #   - Warm pool at 2 replicas (base: 1).
+#   - router-networkpolicy.yaml: nothing in the cluster can reach the
+#     sandbox-router; local kode-gopher reaches it by port-forward.
 #   - Pod- and container-level securityContext — required by
 #     Autopilot's strict pod-security policy (non-root, no privilege
 #     escalation, dropped capabilities, RuntimeDefault seccomp).
@@ -44,6 +46,7 @@ namespace: codemode
 resources:
   - ../../base
   - computeclass.yaml
+  - router-networkpolicy.yaml
 
 patches:
   - target:

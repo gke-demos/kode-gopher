@@ -32,10 +32,12 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  packages: write   # push to GHCR
+  id-token: write   # cosign keyless signing
 
 env:
   IMAGE: ghcr.io/gke-demos/kode-gopher/sandbox
+  DESCRIPTION: kode-gopher sandbox image - Go toolchain, prewarmed module and build caches, and sandbox-server.
 
 jobs:
   build:
@@ -72,6 +74,7 @@ jobs:
         run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:${{ steps.tag.outputs.tag }}"
 
       - name: Build (and push on main)
+        id: build
         if: steps.exists.outputs.exists != 'true'
         uses: docker/build-push-action@v7
         with:
@@ -82,3 +85,27 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
             ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.title=kode-gopher-sandbox
+            org.opencontainers.image.description=${{ env.DESCRIPTION }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+          annotations: |
+            org.opencontainers.image.description=${{ env.DESCRIPTION }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      # Images built before signing was added stay unsigned; each new
+      # content tag is signed once, when it's built. Verify with
+      #   cosign verify ghcr.io/gke-demos/kode-gopher/sandbox:<tag> \
+      #     --certificate-identity-regexp '^https://github.com/gke-demos/kode-gopher/' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Install cosign
+        if: github.event_name != 'pull_request' && steps.exists.outputs.exists != 'true'
+        uses: sigstore/cosign-installer@v4.1.2  # no floating major tag upstream
+
+      - name: Sign
+        if: github.event_name != 'pull_request' && steps.exists.outputs.exists != 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"

@@ -89,11 +89,14 @@ All smoketests are idempotent and reuse infra across runs.
 | [`internal/prewarm`](./internal/prewarm) | standalone Go module imported at image build to populate `$GOCACHE`; committed `go.mod`+`go.sum` pin versions |
 | [`internal/prompts`](./internal/prompts) | generated `system.md` (LLM system prompt) + `description.go` (execute_go_code tool description); regenerate via `make prompts` |
 | [`sandbox/Dockerfile`](./sandbox/Dockerfile) | the sandbox image: Go toolchain, `sandbox-server`, prewarmed cache |
+| [`server/Dockerfile`](./server/Dockerfile) | the in-cluster server image: static `kode-gopher` on distroless, amd64 and arm64 |
 | [`manifests/base`](./manifests/base) | kustomize base (kind-compatible): v1beta1 SandboxTemplate with network policy, SandboxWarmPool `go-runtime-pool`, per-namespace sandbox-router |
-| [`manifests/overlays/gke`](./manifests/overlays/gke) | GKE Autopilot overlay: gVisor + securityContext + pinned image + pool of 2 + C3-first ComputeClass |
+| [`manifests/overlays/gke`](./manifests/overlays/gke) | GKE Autopilot overlay: gVisor + securityContext + pinned image + pool of 2 + C3-first ComputeClass + router lock-down |
+| [`manifests/overlays/gke-server`](./manifests/overlays/gke-server) | in-cluster kode-gopher (`docs/design-in-cluster.md`): Deployment, Role, Gateway with managed cert, network policy; `gke-server-oauth` adds Google sign-in. Deploy with [`scripts/deploy-gke-server.sh`](./scripts/deploy-gke-server.sh) |
 | [`scripts/smoketest-kind.sh`](./scripts/smoketest-kind.sh) | local-kind direct-CLI verification |
 | [`scripts/smoketest-gke.sh`](./scripts/smoketest-gke.sh) | GKE Autopilot direct-CLI verification |
 | [`scripts/smoketest-mcp.sh`](./scripts/smoketest-mcp.sh) | MCP-layer verification against either substrate |
+| [`scripts/smoketest-http.sh`](./scripts/smoketest-http.sh) | in-cluster kode-gopher over streamable HTTP, including negative auth cases |
 | [`experiments/yaegi-poc`](./experiments/yaegi-poc) | Slice 6 proof of concept (shelved) — Yaegi interpreter as an alternative runtime, plus the `kg-difftest` corpus that ruled it out |
 
 ## Built on

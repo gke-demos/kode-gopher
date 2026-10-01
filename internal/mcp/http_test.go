@@ -121,8 +121,23 @@ func TestHTTPAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("no token: status %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") != "Bearer" {
+		t.Errorf("no token: status %d, WWW-Authenticate %q; want 401, Bearer", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
+	}
+
+	// A verified request doesn't carry the challenge.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("WWW-Authenticate") != "" {
+		t.Errorf("valid token: status %d, WWW-Authenticate %q; want 200 and none", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 	}
 
 	if _, err := connect(t, ts.URL, "wrong"); err == nil {
