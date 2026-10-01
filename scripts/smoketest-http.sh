@@ -18,7 +18,7 @@
 # scripts/smoketest-http.sh — end to end against in-cluster kode-gopher
 # (scripts/deploy-gke-server.sh) over streamable HTTP.
 #
-# Under --auth=static (the Secret kode-gopher-token exists):
+# Under --auth=static (read from the deployment's args):
 #   - no token and a wrong token get 401 with a Bearer challenge;
 #   - initialize, tools/list, gcp_auth_status (mode=access-token, or
 #     service when deployed with SERVICE_ACCOUNT);
@@ -83,7 +83,10 @@ done
 [[ -z "$CC_FILE" || -f "$CC_FILE" ]] || die "no such file: $CC_FILE"
 k -n "$NS" rollout status deployment/kode-gopher --timeout=60s
 
-if k -n "$NS" get secret kode-gopher-token >/dev/null 2>&1; then
+# The deployment's own --auth flag, not which Secrets exist: switching
+# a deployment from static to oauth leaves kode-gopher-token behind.
+args="$(k -n "$NS" get deployment kode-gopher -o jsonpath='{.spec.template.spec.containers[0].args[*]}')"
+if [[ " $args " != *" --auth=oauth "* ]]; then
   AUTH=static
   # Handed to python in the environment; never printed.
   KG_TOKEN="$(k -n "$NS" get secret kode-gopher-token -o jsonpath='{.data.token}' \

@@ -358,7 +358,9 @@ Two ways to run snippets as a Google service account rather than a user. Both mi
 **Checks on `kg-sandbox`** (2026-10-01), with the step 5 image:
 - `--credentials=access-token`: `scripts/smoketest-http.sh` passes as before.
 - `--credentials=service` naming a service account that doesn't exist: `gcp_auth_status` reports `mode=service` and the account. `execute_go_code` returns IAM's error ("Gaia id not found"), which shows that kode-gopher reached the IAM Credentials API as its Workload Identity through the network policy.
-- Not yet run: a real impersonated run and the smoketest's `--client-credentials` checks. Both need a test service account with the token-creator grant for the KSA.
+- With a test service account `kg-runner` (no roles of its own; the KSA has `roles/iam.serviceAccountTokenCreator` on it):
+  - `SERVICE_ACCOUNT=kg-runner@… scripts/deploy-gke-server.sh` (static auth): `scripts/smoketest-http.sh` passes, and the snippet's token belongs to kg-runner.
+  - `--auth=oauth` (sealed custody, a pre-registered client bound to kg-runner): `scripts/smoketest-http.sh --client-credentials` passes. A wrong secret gets `invalid_client`, the token comes with no refresh token, and the snippet runs as kg-runner.
 
 ## Code changes
 

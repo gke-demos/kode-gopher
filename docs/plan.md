@@ -203,7 +203,7 @@ Goal: users add one URL to their MCP client and sign in with Google. They need n
    Built 2026-10-01 (`docs/design-in-cluster.md > Step 5 as built`):
    - `serve --credentials=service --service-account=<gsa>` runs every snippet as an impersonated GSA;
    - pre-registered clients with a `service_account` get tokens through the `client_credentials` grant.
-   Tested against a fake IAM Credentials API, with go-sdk's `ClientCredentialsHandler` end to end. On `kg-sandbox`, the deployment reached IAM as its Workload Identity. A real impersonated run waits on a test GSA with the token-creator grant.
+   Tested against a fake IAM Credentials API, with go-sdk's `ClientCredentialsHandler` end to end. On `kg-sandbox`, with a test GSA, both service-identity mode and the client-credentials grant ran snippets as that account (`scripts/smoketest-http.sh`, with and without `--client-credentials`).
 
 ## Critical files for MVP (slice 0 + slice 1)
 
