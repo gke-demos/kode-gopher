@@ -51,7 +51,7 @@ func runServe(args []string) int {
 	sessionTO := fs.Duration("session-timeout", 15*time.Minute, "http: end MCP sessions idle this long, closing their sandboxes")
 	lease := fs.Duration("claim-lease", 10*time.Minute, "http: sandbox claims expire this long after the last renewal, so a crashed server's sandboxes go away")
 	maxPerUser := fs.Int("max-sandboxes-per-user", 2, "http: open sandboxes (MCP sessions with a sandbox) allowed per user; 0 = no cap")
-	credMode := fs.String("credentials", credForwarded, "how the snippet gets Google credentials: forwarded (copy local ADC into the sandbox) or access-token (mint a short-lived token from ADC and serve it to the run only; needs --in-cluster)")
+	credCfg := addCredFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: kode-gopher serve [flags]\n\nMCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_status and lookup_package_docs.\n\n")
 		fs.PrintDefaults()
@@ -85,7 +85,7 @@ func runServe(args []string) int {
 		return 2
 	}
 
-	credSrc, err := credentialSource(ctx, *credMode, *inCluster)
+	credSrc, err := credCfg.source(ctx, *inCluster)
 	if err != nil {
 		log.Printf("mcp serve: %v", err)
 		return 2

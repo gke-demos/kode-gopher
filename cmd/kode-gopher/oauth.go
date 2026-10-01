@@ -21,10 +21,12 @@ import (
 	"flag"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"golang.org/x/oauth2/google"
 
+	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/oauth"
 )
 
@@ -53,7 +55,7 @@ func addOAuthFlags(fs *flag.FlagSet) *oauthFlags {
 		authProvider: fs.String("oauth-vault-auth-provider", "", "oauth, vault custody: projects/<p>/locations/<l>/authProviders/<name>"),
 		allowDomains: fs.String("oauth-allow-domains", "", "oauth: comma-separated Workspace domains (the ID token's hd claim) to admit"),
 		allowGroups:  fs.String("oauth-allow-groups", "", "oauth: comma-separated Google group emails to admit (nested membership counts; needs the Groups Reader admin role)"),
-		clientsFile:  fs.String("oauth-clients-file", "", "oauth: JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris})"),
+		clientsFile:  fs.String("oauth-clients-file", "", "oauth: JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris}, or {client_id, client_secret, service_account} for the client_credentials grant)"),
 		openReg:      fs.Bool("oauth-open-registration", true, "oauth: accept dynamically registered (DCR) and Client ID Metadata Document clients, not just pre-registered ones"),
 		project:      fs.String("project", "", "oauth: project reported to snippets as GOOGLE_CLOUD_PROJECT"),
 		quotaProject: fs.String("quota-project", "", "oauth: quota project reported to snippets as GOOGLE_CLOUD_QUOTA_PROJECT"),
@@ -62,8 +64,9 @@ func addOAuthFlags(fs *flag.FlagSet) *oauthFlags {
 
 var authProviderRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authProviders/[^/]+$`)
 
-// server builds the authorization server. Calls to the vault and Cloud
-// Identity use kode-gopher's own ADC (Workload Identity in a pod).
+// server builds the authorization server. Calls to the vault, Cloud
+// Identity and (for client-credentials clients) the IAM Credentials API
+// use kode-gopher's own ADC (Workload Identity in a pod).
 func (f *oauthFlags) server(ctx context.Context) (*oauth.Server, error) {
 	if *f.issuer == "" || *f.googleClient == "" || *f.keyring == "" {
 		return nil, fmt.Errorf("--auth=oauth needs --oauth-issuer, --oauth-google-client-file and --oauth-keyring-file")
@@ -101,9 +104,15 @@ func (f *oauthFlags) server(ctx context.Context) (*oauth.Server, error) {
 		allow.GroupChecker = &oauth.CloudIdentityGroups{Client: hc}
 	}
 	var clients []oauth.StaticClient
+	var serviceTokens oauth.ServiceTokens
 	if *f.clientsFile != "" {
 		if clients, err = oauth.LoadStaticClients(*f.clientsFile); err != nil {
 			return nil, err
+		}
+		if slices.ContainsFunc(clients, func(c oauth.StaticClient) bool { return c.ServiceAccount != "" }) {
+			if serviceTokens, err = creds.NewImpersonator(ctx); err != nil {
+				return nil, fmt.Errorf("service token minter: %w", err)
+			}
 		}
 	}
 	return oauth.New(oauth.Config{
@@ -113,6 +122,7 @@ func (f *oauthFlags) server(ctx context.Context) (*oauth.Server, error) {
 		Allow:            allow,
 		Keys:             keys,
 		Clients:          clients,
+		ServiceTokens:    serviceTokens,
 		OpenRegistration: *f.openReg,
 		Project:          *f.project,
 		QuotaProject:     *f.quotaProject,

@@ -37,6 +37,10 @@ func TestOAuthUser(t *testing.T) {
 	if id, _ := u.Identity(ctx); id.Mode != "oauth" || id.Email != "a@example.com" || id.ProjectID != "p" {
 		t.Errorf("Identity = %+v", id)
 	}
+	u.ServiceAccount = true
+	if id, _ := u.Identity(ctx); id.Mode != "service" || id.CredType != "service_account" {
+		t.Errorf("client-credentials Identity = %+v", id)
+	}
 	u.Expiry = time.Now().Add(-time.Second)
 	if _, err := u.AccessToken(ctx); err == nil {
 		t.Error("expired token handed out")

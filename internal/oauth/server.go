@@ -72,6 +72,9 @@ type Config struct {
 	Keys *Keyring
 	// Clients are pre-registered. They skip kode-gopher's consent page.
 	Clients []StaticClient
+	// ServiceTokens mints tokens for client-credentials clients' service
+	// accounts. Required if any client has a ServiceAccount.
+	ServiceTokens ServiceTokens
 	// OpenRegistration accepts DCR and CIMD clients. Off: only Clients.
 	OpenRegistration bool
 	// Project and QuotaProject are reported to snippets as
@@ -94,8 +97,10 @@ type Server struct {
 	keys     *Keyring
 	google   *google
 	static   map[string]StaticClient
-	cimd     *cimdFetcher
-	used     *replayCache
+	// serviceClients: some client may use the client_credentials grant.
+	serviceClients bool
+	cimd           *cimdFetcher
+	used           *replayCache
 }
 
 // New validates cfg and builds a Server.
@@ -135,7 +140,14 @@ func New(cfg Config) (*Server, error) {
 		if _, dup := s.static[c.ID]; dup {
 			return nil, fmt.Errorf("oauth: duplicate client %q", c.ID)
 		}
+		if err := c.validate(); err != nil {
+			return nil, fmt.Errorf("oauth: %w", err)
+		}
 		s.static[c.ID] = c
+		s.serviceClients = s.serviceClients || c.ServiceAccount != ""
+	}
+	if s.serviceClients && cfg.ServiceTokens == nil {
+		return nil, errors.New("oauth: client-credentials clients need a service token minter")
 	}
 	return s, nil
 }
@@ -194,6 +206,9 @@ func (s *Server) handleServerMetadata(w http.ResponseWriter, _ *http.Request) {
 		"token_endpoint_auth_methods_supported":          []string{"none", "client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":               []string{"S256"},
 		"authorization_response_iss_parameter_supported": true,
+	}
+	if s.serviceClients {
+		m["grant_types_supported"] = []string{"authorization_code", "refresh_token", "client_credentials"}
 	}
 	if s.cfg.OpenRegistration {
 		m["registration_endpoint"] = s.cfg.Issuer + "/register"

@@ -30,8 +30,9 @@ limitations under the License.
 //
 // Implementations: Forwarded (desktop / gcloud ADC copied into the
 // sandbox), Minted (short-lived access tokens served to the run through
-// sandbox-server's metadata emulator; a TokenMinter), and Workload (a
-// stub from before the in-cluster design).
+// sandbox-server's metadata emulator; a TokenMinter), Service (the same,
+// for one impersonated service account) and OAuthUser (one HTTP
+// request's own token).
 package creds
 
 import (
@@ -46,21 +47,24 @@ import (
 type Identity struct {
 	// Mode is the credential-forwarding shape: "forwarded" means the
 	// host copied ADC into the sandbox; "access-token" means each run
-	// gets a token minted by kode-gopher (Minted); "workload" means the sandbox
-	// pod uses its bound KSA/GSA via the metadata server; "none"
-	// means there are no forwarded credentials (GCP calls will fail).
+	// gets a token minted by kode-gopher (Minted); "service" means each
+	// run gets a token for a configured service account (Service, or a
+	// client-credentials OAuthUser); "oauth" means the signed-in user's
+	// own token (OAuthUser); "none" means there are no forwarded
+	// credentials (GCP calls will fail).
 	Mode string `json:"mode"`
 
 	// CredType echoes ADC's `type` field ("authorized_user" or
-	// "service_account") when Mode=forwarded, or "metadata" when
-	// Mode=workload. Empty for Mode=none.
+	// "service_account") when Mode=forwarded or access-token, or
+	// "metadata" when kode-gopher's ADC is the metadata server. Empty for
+	// Mode=none.
 	CredType string `json:"credential_type,omitempty"`
 
 	// Email is the identity the sandbox runs as. For service_account
 	// creds this comes from the JSON's client_email field. For
 	// authorized_user creds it comes from an OAuth2 userinfo lookup.
-	// For workload mode it comes from the metadata server. May be
-	// empty on lookup failure.
+	// For metadata credentials it comes from the metadata server. May
+	// be empty on lookup failure.
 	Email string `json:"email,omitempty"`
 
 	// ProjectID is the GCP project associated with these credentials

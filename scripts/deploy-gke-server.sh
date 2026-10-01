@@ -42,9 +42,18 @@
 #                         (gcloud config get-value project)
 #   IMAGE                 server image (ghcr.io/gke-demos/kode-gopher/server:main)
 #   KG_HOST               public hostname (<ip with dashes>.sslip.io)
+#   SERVICE_ACCOUNT       run snippets as this Google service account
+#                         (--credentials=service) instead of kode-gopher's
+#                         own Workload Identity; the KSA needs
+#                         roles/iam.serviceAccountTokenCreator on it.
+#                         Static auth only: under oauth every request
+#                         carries its user's or client's own token
 #   oauth only:
 #   GOOGLE_CLIENT_FILE    the Google OAuth client JSON (required on first deploy)
-#   CLIENTS_FILE          pre-registered clients JSON (none)
+#   CLIENTS_FILE          pre-registered clients JSON (none); a client with
+#                         a service_account uses the client_credentials
+#                         grant, and the KSA needs
+#                         roles/iam.serviceAccountTokenCreator on that account
 #   ALLOW_DOMAINS         comma-separated hd domains to admit
 #   ALLOW_GROUPS          comma-separated Google groups to admit
 #   CUSTODY               vault or sealed (vault)
@@ -60,7 +69,7 @@ while [[ $# -gt 0 ]]; do
     --auth)    AUTH="$2"; shift 2;;
     --auth=*)  AUTH="${1#--auth=}"; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '17,51p' "$0"; exit 0;;
+    -h|--help) sed -n '17,60p' "$0"; exit 0;;
     *)         echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -92,6 +101,7 @@ case "$AUTH" in
   oauth)  OVERLAY="$REPO_ROOT/manifests/overlays/gke-server-oauth";;
   *)      die "--auth must be static or oauth, got $AUTH";;
 esac
+[[ -z "${SERVICE_ACCOUNT:-}" || "$AUTH" == static ]] || die "SERVICE_ACCOUNT is for --auth=static (OAuth clients name their own in CLIENTS_FILE)"
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
 [[ -n "$PROJECT" ]] || die "PROJECT unset and gcloud has no default project"
 k get ns "$NS" >/dev/null || die "namespace $NS not found"
@@ -192,6 +202,10 @@ if auth == "oauth":
         if env(var):
             args.append(flag + "=" + env(var))
 ops = [{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": image}]
+if env("SERVICE_ACCOUNT"):
+    ops += [{"op": "test", "path": "/spec/template/spec/containers/0/args/5", "value": "--credentials=access-token"},
+            {"op": "replace", "path": "/spec/template/spec/containers/0/args/5", "value": "--credentials=service"}]
+    args.append("--service-account=" + env("SERVICE_ACCOUNT"))
 ops += [{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": a} for a in args]
 patches.append({"target": {"kind": "Deployment", "name": "kode-gopher"}, "patch": json.dumps(ops)})
 

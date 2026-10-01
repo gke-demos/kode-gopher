@@ -32,12 +32,18 @@ const TokenInfoKey = "kode-gopher/credentials" //nolint:gosec // a map key, not 
 // It's built per request, holds no refresh token, and each run gets the
 // token through sandbox-server's metadata emulator (so it needs
 // in-cluster connectivity, like Minted).
+//
+// A client-credentials token (no user) has the same shape, with the
+// token of the service account configured for that client.
 type OAuthUser struct {
 	Token        string
 	Expiry       time.Time
 	Email        string
 	Project      string
 	QuotaProject string
+	// ServiceAccount marks a client-credentials token: Email is the
+	// service account, and Identity reports mode=service.
+	ServiceAccount bool
 }
 
 // Materialize implements Source: nothing goes into the sandbox as files
@@ -62,5 +68,8 @@ func (u *OAuthUser) AccessToken(_ context.Context) (AccessToken, error) {
 
 // Identity implements Source.
 func (u *OAuthUser) Identity(_ context.Context) (Identity, error) {
+	if u.ServiceAccount {
+		return Identity{Mode: "service", CredType: "service_account", Email: u.Email, ProjectID: u.Project}, nil
+	}
 	return Identity{Mode: "oauth", CredType: "authorized_user", Email: u.Email, ProjectID: u.Project}, nil
 }
