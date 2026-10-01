@@ -200,6 +200,10 @@ Goal: users add one URL to their MCP client and sign in with Google. They need n
 4. GKE manifests (Gateway, cert, network policies including router lock-down) and `scripts/smoketest-http.sh`.
    Built 2026-10-01 as `manifests/overlays/gke-server` (and `gke-server-oauth`), `scripts/deploy-gke-server.sh` and the server image `server/Dockerfile` (`docs/design-in-cluster.md > Step 4 as built`). Static-token deployment and the network policies passed on `kg-sandbox`. Still to do: real Google sign-in through the deployed issuer, with Claude Code and MCP Inspector, which needs the issuer's `/callback` on the Google OAuth client.
 5. Service-identity mode and the client-credentials extension (separate step).
+   Built 2026-10-01 (`docs/design-in-cluster.md > Step 5 as built`):
+   - `serve --credentials=service --service-account=<gsa>` runs every snippet as an impersonated GSA;
+   - pre-registered clients with a `service_account` get tokens through the `client_credentials` grant.
+   Tested against a fake IAM Credentials API, with go-sdk's `ClientCredentialsHandler` end to end. On `kg-sandbox`, the deployment reached IAM as its Workload Identity. A real impersonated run waits on a test GSA with the token-creator grant.
 
 ## Critical files for MVP (slice 0 + slice 1)
 

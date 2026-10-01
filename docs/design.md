@@ -96,6 +96,8 @@ Inside the sandbox, `google.FindDefaultCredentials(ctx)` reads that file, exchan
 We fail fast if the refresh fails (deleted ADC file, revoked token, malformed JSON) with a clear `needs_relogin` error rather than letting a stale token reach the SDK.
 
 ### `workload` (in-cluster / service deployments)
+Superseded: in-cluster kode-gopher serves each run a short-lived token through a metadata emulator in the sandbox, as the signed-in user or, in service-identity mode, an impersonated service account (`docs/design-in-cluster.md`, section 4 and "Step 5 as built"). The original plan follows.
+
 No credentials are materialized into the sandbox. The pod is bound to a GSA via Workload Identity Federation; `google.FindDefaultCredentials(ctx)` inside the sandbox hits the metadata server on `169.254.169.254` and gets short-lived tokens for that GSA. Calls happen as the GSA.
 
 ### Why not 3LO in our own binary?
@@ -194,7 +196,7 @@ kode-gopher/
 │   ├── creds/
 │   │   ├── source.go        # CredentialSource interface: Mode/IdentityHint/MaterializeForSandbox/Expiry
 │   │   ├── forwarded.go     # reads ~/.config/gcloud/application_default_credentials.json
-│   │   ├── workload.go      # no-op materialize; identity from metadata server
+│   │   ├── service.go       # impersonated service account; tokens via the metadata emulator
 │   │   └── resolve.go       # auto/forwarded/workload mode resolution
 │   ├── curated/
 │   │   └── packages.go      # single source of truth: pre-cached GCP packages

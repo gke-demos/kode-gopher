@@ -98,7 +98,7 @@ func runExec(args []string) int {
 	keep := fs.Bool("keep", false, "leave the sandbox alive on exit (Disconnect) instead of deleting it (Close)")
 	extraImports := fs.String("extra-imports", "", "comma-separated import paths to add as blank imports (forces `go mod tidy` to resolve them)")
 	inCluster := fs.Bool("in-cluster", false, "dial sandboxes by their in-cluster Service instead of port-forwarding (kode-gopher running in the cluster)")
-	credMode := fs.String("credentials", credForwarded, "how the snippet gets Google credentials: forwarded (copy local ADC into the sandbox) or access-token (mint a short-lived token from ADC and serve it to the run only; needs --in-cluster)")
+	credCfg := addCredFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: kode-gopher exec [flags] <file.go>\n\n")
 		fs.PrintDefaults()
@@ -112,7 +112,7 @@ func runExec(args []string) int {
 	}
 	path := fs.Arg(0)
 
-	exitCode, err := run(path, *namespace, *kubeCtx, *openTO, *execTO, *claim, *keep, splitCSV(*extraImports), *inCluster, *credMode)
+	exitCode, err := run(path, *namespace, *kubeCtx, *openTO, *execTO, *claim, *keep, splitCSV(*extraImports), *inCluster, credCfg)
 	if err != nil {
 		log.Printf("%v", err)
 		return 1
@@ -136,7 +136,7 @@ func splitCSV(s string) []string {
 	return out
 }
 
-func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Duration, claim string, keep bool, extraImports []string, inCluster bool, credMode string) (int, error) {
+func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Duration, claim string, keep bool, extraImports []string, inCluster bool, credCfg *credFlags) (int, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", path, err)
@@ -160,7 +160,7 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	credSrc, err := credentialSource(ctx, credMode, inCluster)
+	credSrc, err := credCfg.source(ctx, inCluster)
 	if err != nil {
 		return 0, err
 	}
@@ -284,20 +284,48 @@ func fileKeys(m map[string][]byte) []string {
 const (
 	credForwarded   = "forwarded"
 	credAccessToken = "access-token"
+	credService     = "service"
 )
 
-// credentialSource builds the --credentials source. access-token needs
+// credFlags are exec's and serve's --credentials settings.
+type credFlags struct {
+	mode           *string
+	serviceAccount *string
+}
+
+func addCredFlags(fs *flag.FlagSet) *credFlags {
+	return &credFlags{
+		mode:           fs.String("credentials", credForwarded, "how the snippet gets Google credentials: forwarded (copy local ADC into the sandbox), access-token (mint a short-lived token from ADC and serve it to the run only), or service (the same, for --service-account, impersonated with ADC); access-token and service need --in-cluster"),
+		serviceAccount: fs.String("service-account", "", "--credentials=service: the Google service account snippets run as; kode-gopher's ADC needs roles/iam.serviceAccountTokenCreator on it"),
+	}
+}
+
+// source builds the --credentials source. access-token and service need
 // in-cluster connectivity: the token travels with the run request
 // straight to the sandbox's Service.
-func credentialSource(ctx context.Context, mode string, inCluster bool) (creds.Source, error) {
+func (f *credFlags) source(ctx context.Context, inCluster bool) (creds.Source, error) {
+	mode := *f.mode
+	if *f.serviceAccount != "" && mode != credService {
+		return nil, fmt.Errorf("--service-account needs --credentials=%s", credService)
+	}
 	switch mode {
 	case credForwarded:
 		return creds.NewForwarded(localADCPath(), forwardedEnv), nil
-	case credAccessToken:
+	case credAccessToken, credService:
 		if !inCluster {
-			return nil, fmt.Errorf("--credentials=%s needs --in-cluster", credAccessToken)
+			return nil, fmt.Errorf("--credentials=%s needs --in-cluster", mode)
 		}
-		return creds.NewMinted(ctx)
+		if mode == credAccessToken {
+			return creds.NewMinted(ctx)
+		}
+		if *f.serviceAccount == "" {
+			return nil, fmt.Errorf("--credentials=%s needs --service-account", credService)
+		}
+		imp, err := creds.NewImpersonator(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return creds.NewService(imp, *f.serviceAccount, os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GOOGLE_CLOUD_QUOTA_PROJECT"))
 	}
-	return nil, fmt.Errorf("--credentials must be %q or %q, got %q", credForwarded, credAccessToken, mode)
+	return nil, fmt.Errorf("--credentials must be %q, %q or %q, got %q", credForwarded, credAccessToken, credService, mode)
 }

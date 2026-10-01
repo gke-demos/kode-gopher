@@ -259,7 +259,7 @@ Why an emulator rather than the real metadata server:
 
 This also fixes `docs/design.md > workload`, which predates slice 8's policy.
 
-**Service-identity mode** (optional, later): a deployment can run every snippet as one GSA. kode-gopher uses its own Workload Identity to mint the token and feeds the same emulator. It suits demos and single-tenant tools. The only code difference is where the token comes from.
+**Service-identity mode** (step 5): a deployment can run every snippet as one GSA. kode-gopher uses its own Workload Identity to mint the token and feeds the same emulator. It suits demos and single-tenant tools. The only code difference is where the token comes from.
 
 ### 5. Network policy
 
@@ -279,7 +279,8 @@ The router's deny-all ingress policy (the earlier proposal) lands here too. The 
   - no cluster-wide grants.
 - **Workload Identity for kode-gopher itself:**
   - `secretmanager.versions.access` on the OAuth client secret and the token-sealing key;
-  - nothing else in user mode.
+  - nothing else in user mode;
+  - in service-identity mode, and for each client-credentials client's service account, `roles/iam.serviceAccountTokenCreator` on that service account only.
 - **Users** need no Kubernetes RBAC at all.
 
 ### 7. What doesn't change
@@ -332,6 +333,33 @@ Checked on `kg-sandbox` on 2026-10-01:
 - From a pod in another namespace, the router, the kode-gopher Service and a sandbox pod all timed out, while a public URL answered.
 - `kode-gopher exec` over stdio (port-forward to the locked-down router) still listed the project's buckets.
 
+### Step 5 as built
+
+Two ways to run snippets as a Google service account rather than a user. Both mint the account's token through the IAM Credentials API (`generateAccessToken`, cloud-platform scope, 1 h) as kode-gopher's own Workload Identity, and feed it to the sandbox's metadata emulator like any other run token. `creds.Impersonator` caches one token per account and mints again 5 min before expiry. The KSA needs `roles/iam.serviceAccountTokenCreator` on each account, and nothing project-wide.
+
+**Service-identity mode:** `serve --credentials=service --service-account=<gsa>` (`SERVICE_ACCOUNT=<gsa>` for `scripts/deploy-gke-server.sh`). Every snippet runs as that account. It's meant for `--auth=static`; under `--auth=oauth` each request already carries its own credentials. `gcp_auth_status` reports `mode=service, credential_type=service_account, email=<gsa>`, with the project taken from the account's email unless `GOOGLE_CLOUD_PROJECT` is set. This replaces the `creds.Workload` stub, which predated the in-cluster design. Without `--service-account`, `--credentials=access-token` still runs snippets as kode-gopher's own Workload Identity.
+
+**Client-credentials grant** (RFC 6749 §4.4), for CI and automation:
+- A pre-registered client with a `service_account` in `--oauth-clients-file`:
+  ```json
+  [{"client_id": "ci", "client_secret": "<random>", "client_name": "CI", "service_account": "runner@<project>.iam.gserviceaccount.com"}]
+  ```
+  It must have a secret and no `redirect_uris`, so it can't sign users in. User clients can't use the grant: `unauthorized_client`.
+- `POST /token` with `grant_type=client_credentials` (secret by Basic or form) returns an access token only. There's no refresh token (§4.4.3); the client asks again.
+  - `scope` may only be `kode-gopher:execute` (the default), or `invalid_scope`.
+  - `resource`, if sent, must be the MCP endpoint, or `invalid_target`.
+  - If minting fails, `server_error`, with the IAM error logged.
+- The sealed access token has the same shape as a user's, with the service account's Google token inside, `mode=service`, and subject `client:<client_id>`. MCP sessions and the per-user sandbox cap bind to that subject.
+- At each request the verifier also checks that the client still exists with the same service account. Removing it, or changing its account, revokes its tokens at once.
+- Authorization-server metadata adds `client_credentials` to `grant_types_supported` when such a client is configured.
+- The allow-list doesn't apply: an operator who pre-registers the client has admitted it.
+- go-sdk's `extauth.ClientCredentialsHandler` connects unchanged (`internal/oauth/client_credentials_test.go`).
+
+**Checks on `kg-sandbox`** (2026-10-01), with the step 5 image:
+- `--credentials=access-token`: `scripts/smoketest-http.sh` passes as before.
+- `--credentials=service` naming a service account that doesn't exist: `gcp_auth_status` reports `mode=service` and the account. `execute_go_code` returns IAM's error ("Gaia id not found"), which shows that kode-gopher reached the IAM Credentials API as its Workload Identity through the network policy.
+- Not yet run: a real impersonated run and the smoketest's `--client-credentials` checks. Both need a test service account with the token-creator grant for the KSA.
+
 ## Code changes
 
 | Area | Change |
@@ -339,7 +367,7 @@ Checked on `kg-sandbox` on 2026-10-01:
 | `internal/sandbox` | `Options.Connectivity`: in-cluster service when running in a pod; claim lifecycle patch and lease renewal; direct `/execute` with credentials for the run step |
 | `internal/mcp` | HTTP transport; per-session sandbox map keyed by `Mcp-Session-Id` and bound to user; per-user session cap |
 | `internal/oauth` (new) | Authorization server: metadata, register, authorize, callback, token; sealed tokens; custody interface; allow-list (Cloud Identity group check, `hd` domain check) |
-| `internal/creds` | `OAuthUser` source (the request's Google access token, unsealed from its kode-gopher access token); `Workload` source for service-identity mode |
+| `internal/creds` | `OAuthUser` source (the request's Google access token, unsealed from its kode-gopher access token); `Service` source and `Impersonator` for service-identity mode and client credentials |
 | `cmd/sandbox-server` | Optional `credentials` field on `/execute`, held in memory for that command; metadata emulator on 127.0.0.1 |
 | `manifests/overlays/gke-server` (new) | Deployment, Service, Gateway + HTTPRoute + cert, KSA + Role, network policies, Secret Manager refs |
 | `scripts/smoketest-http.sh` (new) | End-to-end over HTTP with a pre-minted test token; negative auth cases |

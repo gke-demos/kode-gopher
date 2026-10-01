@@ -20,9 +20,11 @@
 #
 # Under --auth=static (the Secret kode-gopher-token exists):
 #   - no token and a wrong token get 401 with a Bearer challenge;
-#   - initialize, tools/list, gcp_auth_status (mode=access-token);
+#   - initialize, tools/list, gcp_auth_status (mode=access-token, or
+#     service when deployed with SERVICE_ACCOUNT);
 #   - execute_go_code runs a snippet that gets a token from the
-#     sandbox's metadata emulator, with no ADC file in the sandbox;
+#     sandbox's metadata emulator, with no ADC file in the sandbox (in
+#     service mode, as the service account);
 #   - a second session, and DELETE ends both.
 # Under --auth=oauth, the parts that need no browser:
 #   - protected-resource and authorization-server metadata;
@@ -30,7 +32,10 @@
 #   - DCR, then /authorize refusing no PKCE, plain PKCE, a token
 #     response and another resource (error redirects), and an unknown
 #     redirect_uri (error page, no redirect);
-#   - /token refusing a made-up code with invalid_grant.
+#   - /token refusing a made-up code with invalid_grant;
+#   - with --client-credentials: a wrong secret is refused, then the
+#     client's token (no refresh token) runs the static-mode session
+#     checks as its service account (mode=service).
 #
 # Flags:
 #   --port-forward   reach the Service through kubectl port-forward
@@ -39,6 +44,9 @@
 #   --url <base>     base URL (https://<kode-gopher-ip>.sslip.io)
 #   --file <path>    also run this Go snippet (e.g.
 #                    testdata/list_buckets_snippet.go) and print its result
+#   --client-credentials <path>
+#                    oauth: JSON {"client_id", "client_secret"} of a
+#                    pre-registered client-credentials client
 #
 # Env: KUBECONFIG, CONTEXT (passed as --context), PROJECT.
 
@@ -48,12 +56,14 @@ NS=codemode
 PORT_FORWARD=0
 BASE=""
 FILE=""
+CC_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port-forward) PORT_FORWARD=1; shift;;
     --url)          BASE="$2"; shift 2;;
     --file)         FILE="$2"; shift 2;;
-    -h|--help)      sed -n '17,43p' "$0"; exit 0;;
+    --client-credentials) CC_FILE="$2"; shift 2;;
+    -h|--help)      sed -n '17,52p' "$0"; exit 0;;
     *)              echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -70,6 +80,7 @@ for bin in kubectl python3; do
   command -v "$bin" >/dev/null 2>&1 || die "missing prerequisite: $bin"
 done
 [[ -z "$FILE" || -f "$FILE" ]] || die "no such file: $FILE"
+[[ -z "$CC_FILE" || -f "$CC_FILE" ]] || die "no such file: $CC_FILE"
 k -n "$NS" rollout status deployment/kode-gopher --timeout=60s
 
 if k -n "$NS" get secret kode-gopher-token >/dev/null 2>&1; then
@@ -103,10 +114,10 @@ fi
 echo "base=$BASE  auth=$AUTH"
 
 step "checks"
-python3 - "$BASE" "$AUTH" "$FILE" <<'PY'
+python3 - "$BASE" "$AUTH" "$FILE" "$CC_FILE" <<'PY'
 import base64, hashlib, json, os, secrets, sys, urllib.error, urllib.parse, urllib.request
 
-base, auth, extra = sys.argv[1:4]
+base, auth, extra, cc_file = sys.argv[1:5]
 failed = []
 
 
@@ -185,29 +196,7 @@ def tool(s, name, args):
     return result.get("structuredContent"), result
 
 
-init_body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "smoketest-http", "version": "0"}}}
-accept = {"Accept": "application/json, text/event-stream"}
-
-status, headers, _ = http("POST", "/mcp", init_body, accept)
-challenge = headers.get("WWW-Authenticate", "")
-check("no token: 401 Bearer", status == 401 and challenge.startswith("Bearer"), (status, challenge))
-
-if auth == "static":
-    status, headers, _ = http("POST", "/mcp", init_body, {**accept, "Authorization": "Bearer " + "x" * 43})
-    check("wrong token: 401", status == 401, status)
-
-    s = Session(os.environ["KG_TOKEN"])
-    check("initialize", s.init[0] == 200 and s.h["Mcp-Session-Id"] != "", s.init)
-    status, result, text = s.call("tools/list", {})
-    names = sorted(t["name"] for t in (result or {}).get("tools", []))
-    check("tools/list", {"execute_go_code", "gcp_auth_status"} <= set(names), names or text)
-
-    st, raw = tool(s, "gcp_auth_status", {})
-    check("gcp_auth_status: access-token", (st or {}).get("mode") == "access-token", raw)
-    print("     ", json.dumps(st))
-
-    snippet = '''package kode_gopher_snippet
+SNIPPET = '''package kode_gopher_snippet
 
 import (
 	"context"
@@ -237,10 +226,28 @@ func run(ctx context.Context) (any, error) {
 	}, nil
 }
 '''
-    st, raw = tool(s, "execute_go_code", {"code": snippet})
+
+
+def session_checks(token, modes):
+    """initialize, tools, gcp_auth_status in modes, the metadata-emulator
+    snippet, the --file snippet, a second session and DELETE."""
+    s = Session(token)
+    check("initialize", s.init[0] == 200 and s.h["Mcp-Session-Id"] != "", s.init)
+    status, result, text = s.call("tools/list", {})
+    names = sorted(t["name"] for t in (result or {}).get("tools", []))
+    check("tools/list", {"execute_go_code", "gcp_auth_status"} <= set(names), names or text)
+
+    st, raw = tool(s, "gcp_auth_status", {})
+    who = st or {}
+    check("gcp_auth_status: " + " or ".join(modes), who.get("mode") in modes, raw)
+    print("     ", json.dumps(st))
+
+    st, raw = tool(s, "execute_go_code", {"code": SNIPPET})
     v = (((st or {}).get("result") or {}).get("value")) or {}
     check("execute_go_code: token from the metadata emulator, no ADC file",
           v.get("token_valid") is True and v.get("adc_env") == "" and v.get("adc_file") is False, raw)
+    if who.get("mode") == "service":
+        check("execute_go_code: runs as " + str(who.get("email")), v.get("email") == who.get("email"), v)
     print("      build_ms=%s duration_ms=%s value=%s" % ((st or {}).get("build_ms"), (st or {}).get("duration_ms"), json.dumps(v)))
 
     if extra:
@@ -248,13 +255,28 @@ func run(ctx context.Context) (any, error) {
         check("execute_go_code: " + extra, (st or {}).get("exit_code") == 0, raw)
         print(json.dumps(st, indent=2)[:4000])
 
-    s2 = Session(os.environ["KG_TOKEN"])
+    s2 = Session(token)
     check("second session", s2.init[0] == 200 and s2.h["Mcp-Session-Id"] not in ("", s.h["Mcp-Session-Id"]), s2.init)
     for sess in (s, s2):
         code = sess.close()
         check("DELETE session", code in (200, 202, 204), code)
     status, result, text = s.call("tools/list", {})
     check("deleted session refused", status == 404, (status, text))
+
+
+init_body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "smoketest-http", "version": "0"}}}
+accept = {"Accept": "application/json, text/event-stream"}
+
+status, headers, _ = http("POST", "/mcp", init_body, accept)
+challenge = headers.get("WWW-Authenticate", "")
+check("no token: 401 Bearer", status == 401 and challenge.startswith("Bearer"), (status, challenge))
+
+if auth == "static":
+    status, headers, _ = http("POST", "/mcp", init_body, {**accept, "Authorization": "Bearer " + "x" * 43})
+    check("wrong token: 401", status == 401, status)
+
+    session_checks(os.environ["KG_TOKEN"], ("access-token", "service"))
 
 else:
     check("401 points at resource metadata", "resource_metadata=" in challenge, challenge)
@@ -303,6 +325,21 @@ else:
                                                    "redirect_uri": redirect, "client_id": "x", "code_verifier": "v" * 43})
     err = json.loads(text).get("error") if text.startswith("{") else text
     check("/token made-up code: 400", status in (400, 401) and err in ("invalid_grant", "invalid_client"), (status, text))
+
+    if cc_file:
+        cc = json.load(open(cc_file))
+        cid, csecret = cc["client_id"], cc["client_secret"]
+        status, _, text = http("POST", "/token", form={"grant_type": "client_credentials", "client_id": cid,
+                                                       "client_secret": csecret + "x"})
+        check("client_credentials wrong secret: 401 invalid_client",
+              status == 401 and json.loads(text).get("error") == "invalid_client", (status, text))
+        status, _, text = http("POST", "/token", form={"grant_type": "client_credentials", "client_id": cid,
+                                                       "client_secret": csecret, "resource": base + "/mcp"})
+        tok = json.loads(text) if status == 200 else {}
+        check("client_credentials: access token, no refresh token",
+              tok.get("access_token") and "refresh_token" not in tok, (status, text[:200]))
+        if tok.get("access_token"):
+            session_checks(tok["access_token"], ("service",))
 
 print()
 if failed:

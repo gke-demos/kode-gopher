@@ -42,6 +42,9 @@ type client struct {
 	RedirectURIs []string
 	// Secret is set only for pre-registered confidential clients.
 	Secret string
+	// ServiceAccount is set only for pre-registered client-credentials
+	// clients.
+	ServiceAccount string
 }
 
 // StaticClient is a pre-registered client, from the clients file.
@@ -51,7 +54,12 @@ type StaticClient struct {
 	// /token (client_secret_basic or client_secret_post).
 	Secret       string   `json:"client_secret,omitempty"`
 	Name         string   `json:"client_name,omitempty"`
-	RedirectURIs []string `json:"redirect_uris"`
+	RedirectURIs []string `json:"redirect_uris,omitempty"`
+	// ServiceAccount makes this a client-credentials client (RFC 6749
+	// §4.4, for automation with no user): it gets tokens with its
+	// secret alone, and snippets run as this Google service account. It
+	// needs a secret and no redirect_uris, so it can't sign users in.
+	ServiceAccount string `json:"service_account,omitempty"`
 }
 
 // LoadStaticClients reads a JSON array of StaticClient.
@@ -65,11 +73,25 @@ func LoadStaticClients(path string) ([]StaticClient, error) {
 		return nil, fmt.Errorf("parse clients %s: %w", path, err)
 	}
 	for _, c := range cs {
-		if c.ID == "" || isSealed(c.ID) || strings.HasPrefix(c.ID, "https://") || len(c.RedirectURIs) == 0 {
-			return nil, fmt.Errorf("clients %s: client %q needs a plain client_id and redirect_uris", path, c.ID)
+		if err := c.validate(); err != nil {
+			return nil, fmt.Errorf("clients %s: %w", path, err)
 		}
 	}
 	return cs, nil
+}
+
+func (c StaticClient) validate() error {
+	switch {
+	case c.ID == "" || isSealed(c.ID) || strings.HasPrefix(c.ID, "https://"):
+		return fmt.Errorf("client %q needs a plain client_id", c.ID)
+	case c.ServiceAccount == "" && len(c.RedirectURIs) == 0:
+		return fmt.Errorf("client %q needs redirect_uris (or a service_account, for client credentials)", c.ID)
+	case c.ServiceAccount != "" && (c.Secret == "" || len(c.RedirectURIs) > 0):
+		return fmt.Errorf("client %q has a service_account, so it needs a client_secret and no redirect_uris", c.ID)
+	case c.ServiceAccount != "" && !strings.Contains(c.ServiceAccount, "@"):
+		return fmt.Errorf("client %q: service_account %q isn't an email", c.ID, c.ServiceAccount)
+	}
+	return nil
 }
 
 // dcrClient is a dynamically registered client, sealed into its own
@@ -86,7 +108,7 @@ var errUnknownClient = errors.New("unknown client")
 // sealed DCR registration, or a CIMD URL.
 func (s *Server) resolveClient(ctx context.Context, id string) (*client, error) {
 	if c, ok := s.static[id]; ok {
-		return &client{ID: c.ID, Name: c.Name, RedirectURIs: c.RedirectURIs, Secret: c.Secret}, nil
+		return &client{ID: c.ID, Name: c.Name, RedirectURIs: c.RedirectURIs, Secret: c.Secret, ServiceAccount: c.ServiceAccount}, nil
 	}
 	if !s.cfg.OpenRegistration {
 		return nil, errUnknownClient

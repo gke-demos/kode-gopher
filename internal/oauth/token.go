@@ -60,6 +60,8 @@ type accessPayload struct {
 	Token    string `json:"t"`
 	TokenExp int64  `json:"te"`
 	Exp      int64  `json:"e"`
+	// Mode is modeService for a client-credentials token, else empty.
+	Mode string `json:"m,omitempty"`
 }
 
 // refreshPayload is a sealed kode-gopher refresh token. Secret is the
@@ -107,8 +109,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		resp, terr = s.exchangeCode(r, c)
 	case "refresh_token":
 		resp, terr = s.refreshTokens(r.Context(), r, c)
+	case "client_credentials":
+		resp, terr = s.clientCredentials(r, c)
 	default:
-		terr = &tokenError{Code: "unsupported_grant_type", Desc: "authorization_code and refresh_token only"}
+		terr = &tokenError{Code: "unsupported_grant_type", Desc: "authorization_code, refresh_token and client_credentials only"}
 	}
 	if terr != nil {
 		writeTokenError(w, terr)
@@ -222,19 +226,12 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 // token never outlives the Google token inside it.
 func (s *Server) issueTokens(u User, clientID, aud, scope string, g *Grant) (map[string]any, *tokenError) {
 	now := time.Now()
-	exp := now.Add(accessTTL)
-	if limit := g.Expiry.Add(-time.Minute); limit.Before(exp) {
-		exp = limit
-	}
-	if !exp.After(now) {
-		return nil, &tokenError{Code: "server_error", Desc: "the Google access token is already spent"}
-	}
-	at, err := s.keys.seal(purposeAccess, accessPayload{
+	at, exp, terr := s.sealAccess(accessPayload{
 		Sub: u.Sub, Email: u.Email, ClientID: clientID, Aud: aud, Scope: scope,
-		Token: g.AccessToken, TokenExp: g.Expiry.Unix(), Exp: exp.Unix(),
-	})
-	if err != nil {
-		return nil, &tokenError{Code: "server_error", Desc: "couldn't seal the access token"}
+		Token: g.AccessToken, TokenExp: g.Expiry.Unix(),
+	}, now)
+	if terr != nil {
+		return nil, terr
 	}
 	rt, err := s.keys.seal(purposeRefresh, refreshPayload{
 		User: u, ClientID: clientID, Aud: aud, Scope: scope, Secret: g.Secret,
@@ -250,6 +247,24 @@ func (s *Server) issueTokens(u User, clientID, aud, scope string, g *Grant) (map
 		"refresh_token": rt,
 		"scope":         scope,
 	}, nil
+}
+
+// sealAccess sets p's expiry, accessTTL from now but never past the
+// Google token inside it, and seals it.
+func (s *Server) sealAccess(p accessPayload, now time.Time) (string, time.Time, *tokenError) {
+	exp := now.Add(accessTTL)
+	if limit := time.Unix(p.TokenExp, 0).Add(-time.Minute); limit.Before(exp) {
+		exp = limit
+	}
+	if !exp.After(now) {
+		return "", time.Time{}, &tokenError{Code: "server_error", Desc: "the Google access token is already spent"}
+	}
+	p.Exp = exp.Unix()
+	at, err := s.keys.seal(purposeAccess, p)
+	if err != nil {
+		return "", time.Time{}, &tokenError{Code: "server_error", Desc: "couldn't seal the access token"}
+	}
+	return at, exp, nil
 }
 
 func writeTokenError(w http.ResponseWriter, e *tokenError) {
@@ -339,8 +354,9 @@ func checkRegistration(redirects, grants, responses []string) string {
 }
 
 // Verifier checks kode-gopher access tokens at the MCP endpoint. The
-// TokenInfo's UserID is the Google sub (sessions bind to it), and its
-// Extra carries the request's creds.OAuthUser.
+// TokenInfo's UserID is the Google sub, or "client:<id>" for a
+// client-credentials token (sessions bind to it), and its Extra carries
+// the request's creds.OAuthUser.
 func (s *Server) Verifier() auth.TokenVerifier {
 	return func(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 		var p accessPayload
@@ -351,16 +367,25 @@ func (s *Server) Verifier() auth.TokenVerifier {
 		if time.Now().After(exp) || p.Aud != s.resource {
 			return nil, auth.ErrInvalidToken
 		}
+		service := p.Mode == modeService
+		if service && !s.serviceClientCurrent(&p) {
+			return nil, auth.ErrInvalidToken
+		}
+		project := s.cfg.Project
+		if service && project == "" {
+			project = creds.ServiceAccountProject(p.Email)
+		}
 		return &auth.TokenInfo{
 			Scopes:     strings.Fields(p.Scope),
 			Expiration: exp,
 			UserID:     p.Sub,
 			Extra: map[string]any{creds.TokenInfoKey: &creds.OAuthUser{
-				Token:        p.Token,
-				Expiry:       time.Unix(p.TokenExp, 0),
-				Email:        p.Email,
-				Project:      s.cfg.Project,
-				QuotaProject: s.cfg.QuotaProject,
+				Token:          p.Token,
+				Expiry:         time.Unix(p.TokenExp, 0),
+				Email:          p.Email,
+				Project:        project,
+				QuotaProject:   s.cfg.QuotaProject,
+				ServiceAccount: service,
 			}},
 		}, nil
 	}
