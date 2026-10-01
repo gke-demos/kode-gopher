@@ -118,7 +118,7 @@ jobs:
 
       - name: Install cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2  # no floating major tag upstream
 
       # By digest: tags move, and one signature covers every tag on it.
       - name: Sign

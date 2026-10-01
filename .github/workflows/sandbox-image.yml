@@ -102,7 +102,7 @@ jobs:
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - name: Install cosign
         if: github.event_name != 'pull_request' && steps.exists.outputs.exists != 'true'
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2  # no floating major tag upstream
 
       - name: Sign
         if: github.event_name != 'pull_request' && steps.exists.outputs.exists != 'true'

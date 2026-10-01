@@ -62,7 +62,7 @@ jobs:
           cat "${RUNNER_TEMP}/release-notes.md"
       - name: Install cosign
         if: env.PUBLISH == 'true'
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2  # no floating major tag upstream
       - name: GoReleaser (publish)
         if: env.PUBLISH == 'true'
         uses: goreleaser/goreleaser-action@v7
