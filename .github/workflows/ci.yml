@@ -75,6 +75,8 @@ jobs:
         run: dev/ci/presubmits/mod-tidy.sh
       - name: Go toolchain pins agree
         run: dev/ci/presubmits/go-toolchain.sh --running
+      - name: Release notes extract from CHANGELOG.md
+        run: dev/ci/presubmits/release-notes.sh
       # No cache: @latest should pick up new govulncheck releases.
       - name: govulncheck
         run: dev/ci/presubmits/vuln.sh

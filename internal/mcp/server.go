@@ -34,10 +34,8 @@ import (
 
 	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/sandbox"
+	"github.com/gke-demos/kode-gopher/internal/version"
 )
-
-// Version is what the server advertises to clients.
-const Version = "0.1.0"
 
 // Config is everything Server needs to know to open and drive a
 // sandbox.Session. Zero-value fields fall back to sensible defaults.
@@ -136,7 +134,7 @@ func New(cfg Config) *Server {
 func (s *Server) newSDKServer() *sdk.Server {
 	srv := sdk.NewServer(&sdk.Implementation{
 		Name:    "kode-gopher",
-		Version: Version,
+		Version: version.Effective(),
 	}, nil)
 	sdk.AddTool(srv, &sdk.Tool{
 		Name:        "execute_go_code",

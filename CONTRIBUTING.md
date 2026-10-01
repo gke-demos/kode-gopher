@@ -17,7 +17,8 @@ kode-gopher follows the same process as [go-steer/core-agent](https://github.com
    make presubmit   # dev/ci/presubmits/all.sh
    ```
    CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs the same scripts under [`dev/ci/presubmits/`](./dev/ci/presubmits), so green locally means green remotely. A new check is a script there, wired into both `all.sh` and a `ci.yml` job.
-3. Open the PR against `main` as ready for review. PRs are squash-merged, so the PR title becomes the commit subject on `main`.
+3. If the change is user-visible (a `feat:` or `fix:`, or anything else a user of the CLI, the MCP server or the manifests would notice), add an entry under `## [Unreleased]` in [`CHANGELOG.md`](./CHANGELOG.md), linking the PR or issue. Those entries become the release notes; see [`docs/release-process.md`](./docs/release-process.md).
+4. Open the PR against `main` as ready for review. PRs are squash-merged, so the PR title becomes the commit subject on `main`.
 
 What the presubmits check:
 
@@ -30,6 +31,7 @@ What the presubmits check:
 | Go pins (go.mod `toolchain`, `sandbox/Dockerfile`, workflows) agree | `go-toolchain.sh` |
 | `internal/prompts/` regenerated (`make prompts`) | `prompts.sh` |
 | GKE overlay pins the current sandbox image (`make sandbox-pin`) | `sandbox-pin.sh` |
+| `dev/release/notes.sh` extracts release notes from `CHANGELOG.md` | `release-notes.sh` |
 | no agent attribution | `agent-attribution.sh` |
 | govulncheck | `vuln.sh` |
 
