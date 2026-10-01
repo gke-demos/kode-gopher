@@ -83,8 +83,9 @@ var deadSessionPhrases = []string{
 // without our sentinel prefix showing up multiple times in the chain.
 type sessionDeadError struct{ orig error }
 
-func (e *sessionDeadError) Error() string          { return e.orig.Error() }
-func (e *sessionDeadError) Is(target error) bool   { return target == ErrSessionDead }
-func (e *sessionDeadError) Unwrap() error          { return e.orig }
+func (e *sessionDeadError) Error() string        { return e.orig.Error() }
+func (e *sessionDeadError) Is(target error) bool { return target == ErrSessionDead }
+func (e *sessionDeadError) Unwrap() error        { return e.orig }
+
 // Cause is a common helper convention for extracting the wrapped error.
 func (e *sessionDeadError) Cause() error { return e.orig }

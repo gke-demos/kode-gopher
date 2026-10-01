@@ -82,10 +82,11 @@ func main() {
 
 	log.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+	err = httpSrv.Shutdown(shutdownCtx)
+	cancel()
+	if err != nil {
 		log.Error("shutdown failed", "err", err)
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // exiting; the deferred signal stop is moot
 	}
 }
 

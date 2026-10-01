@@ -1,0 +1,156 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# golangci-lint v2 config for kode-gopher. Mirrors go-steer/core-agent's
+# and go-steer/mast's dev/tools/.golangci.yml (same conservative linter
+# set, same settings, same complexity ratchet) minus their repo-specific
+# path exclusions, so the repos enforce the same bar.
+#
+# Run with:   dev/tools/lint-go
+# Auto-fix:   dev/tools/lint-go --fix
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # Bug-finders we never want to silence.
+    - errcheck       # unchecked errors
+    - govet          # core vet rules
+    - ineffassign    # ineffectual assignments
+    - staticcheck    # massive bug+style ruleset (now includes stylecheck + gosimple)
+    - unused         # dead code
+
+    # Quality-of-life.
+    - misspell       # common typos in identifiers/comments
+    - unconvert      # unnecessary type conversions
+    - unparam        # unused function parameters
+    - gocritic       # opinionated extra rules; many useful, low false-positive
+
+    # Compliance.
+    - goheader       # enforces the Apache 2.0 boilerplate on every .go file
+
+    # Security.
+    - gosec          # OWASP-style checks (nosec via // #nosec)
+
+    # Complexity ratchet. NOT a style standard: the thresholds under
+    # settings are pinned to today's worst in-tree function, so existing
+    # code passes and only something worse can land. Lower them as code
+    # is split up; never raise them.
+    - funlen         # function length: physical lines + statement count
+    - gocognit       # cognitive complexity (nesting-weighted)
+
+  exclusions:
+    # Generated code shouldn't fail the lint.
+    generated: lax
+    presets:
+      - common-false-positives
+      - legacy
+    rules:
+      # Tests can be looser about errcheck (eg. defer f.Close()) and
+      # have permission to use weak random / hardcoded creds.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - unparam
+      # The ratchet is for production code; table-driven tests are long
+      # by design.
+      - path: _test\.go
+        linters:
+          - funlen
+          - gocognit
+      # The one ratchet exemption, as core-agent exempts its `run`: the
+      # MCP smoketest's main is a 248-line / 148-statement /
+      # complexity-90 linear script of checks. Exempting it lets the
+      # thresholds track real production code.
+      - path: cmd/mcp-smoketest/main\.go
+        linters:
+          - funlen
+          - gocognit
+
+  settings:
+    errcheck:
+      # Noise patterns where checking the error has no useful action:
+      # writing to stderr for a diagnostic, closing a file in defer,
+      # or best-effort cleanup of a temp file. The `_ =` boilerplate
+      # is worse than the missed check here.
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+        - (*os.File).Close
+        - os.Remove
+    gocritic:
+      disabled-checks:
+        # "ifElseChain" pushes us toward switch statements that aren't
+        # always clearer; let the author choose.
+        - ifElseChain
+        # commentFormatting is noisy for // TODO style markers.
+        - commentFormatting
+    gosec:
+      excludes:
+        # G104 (errcheck) is already covered by errcheck linter.
+        - G104
+        # G306 (WriteFile permissions): we deliberately use 0o644 for
+        # scaffolded files so they behave like normal repo files.
+        - G306
+    # Complexity ratchet: today's worst in-tree function, all three
+    # (*Server).handleExecuteGoCode in internal/mcp/execute_go_code.go.
+    # Re-measure by temporarily setting a threshold to something small
+    # (e.g. 20) and running `dev/tools/lint-go --enable-only funlen,gocognit`.
+    # Lower when the worst offender is split; never raise.
+    funlen:
+      lines: 116
+      statements: 58
+      # Comment lines don't count: documenting a function should never
+      # push it over.
+      ignore-comments: true
+    gocognit:
+      min-complexity: 35
+    goheader:
+      # Enforced on every .go file.
+      template: |-
+        Copyright {{ YEAR-RANGE }} Google LLC
+
+        Licensed under the Apache License, Version 2.0 (the "License");
+        you may not use this file except in compliance with the License.
+        You may obtain a copy of the License at
+
+            http://www.apache.org/licenses/LICENSE-2.0
+
+        Unless required by applicable law or agreed to in writing, software
+        distributed under the License is distributed on an "AS IS" BASIS,
+        WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+        See the License for the specific language governing permissions and
+        limitations under the License.
+
+formatters:
+  enable:
+    - gofmt          # canonical formatting
+    - goimports      # import grouping + missing imports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/gke-demos/kode-gopher
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

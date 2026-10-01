@@ -44,9 +44,9 @@ func TestNeedsTar(t *testing.T) {
 
 func TestBuildTar_EmitsParentDirsThenFiles(t *testing.T) {
 	files := map[string][]byte{
-		"main.go":           []byte("package main\n"),
-		"sub/x.go":          []byte("package sub\n"),
-		"sub/inner/y.go":    []byte("package inner\n"),
+		"main.go":        []byte("package main\n"),
+		"sub/x.go":       []byte("package sub\n"),
+		"sub/inner/y.go": []byte("package inner\n"),
 	}
 	archive, err := buildTar(files)
 	if err != nil {

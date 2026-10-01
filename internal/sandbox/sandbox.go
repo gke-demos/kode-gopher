@@ -344,7 +344,7 @@ func postExecute(ctx context.Context, hc *http.Client, baseURL, command string, 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return nil, &sb.HTTPError{StatusCode: resp.StatusCode, Body: string(body), Operation: "run"}

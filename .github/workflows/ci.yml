@@ -6,6 +6,12 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
+# CI for kode-gopher. Every step runs a script under dev/ci/presubmits/,
+# the same scripts dev/ci/presubmits/all.sh runs locally, so a local
+# all.sh pass means CI passes. Don't add inline check steps here: add a
+# script under dev/ci/presubmits/, then wire it into a job below AND into
+# all.sh. The split into parallel jobs (core-agent's and mast's shape)
+# buys wall-clock and per-check status only.
 name: ci
 
 on:
@@ -13,21 +19,62 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  go:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test ./...
-      - run: make prompts-check
-      # The GKE overlay must pin the sandbox image the current sources
-      # build to; sandbox-image.yml publishes it on merge.
-      - run: make sandbox-pin-check
+      - name: Build
+        run: dev/ci/presubmits/build.sh
+      - name: Vet
+        run: dev/ci/presubmits/vet.sh
+      - name: Format
+        run: dev/ci/presubmits/fmt.sh
+      - name: Test (-race)
+        run: dev/ci/presubmits/test.sh
+      - name: Prompts are regenerated
+        run: dev/ci/presubmits/prompts.sh
+      - name: GKE overlay pins the sandbox image
+        run: dev/ci/presubmits/sandbox-pin.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Cache the compiled golangci-lint binary. Keep the key's version in
+      # sync with GOLANGCI_LINT_VERSION in dev/tools/lint-go: ensure_tool
+      # finds the cached binary on GOBIN and skips the slow go install.
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/bin/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-v2.12.1
+      - name: golangci-lint
+        run: dev/ci/presubmits/lint.sh
+
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: go mod tidy is clean
+        run: dev/ci/presubmits/mod-tidy.sh
+      - name: Go toolchain pins agree
+        run: dev/ci/presubmits/go-toolchain.sh --running
+      # No cache: @latest should pick up new govulncheck releases.
+      - name: govulncheck
+        run: dev/ci/presubmits/vuln.sh

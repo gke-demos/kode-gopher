@@ -33,7 +33,7 @@ import (
 const (
 	sandboxADCRelPath = ".kode-gopher/creds/adc.json"
 	sandboxADCAbsPath = "/app/.kode-gopher/creds/adc.json"
-	appCredsEnv       = "GOOGLE_APPLICATION_CREDENTIALS"
+	appCredsEnv       = "GOOGLE_APPLICATION_CREDENTIALS" // #nosec G101 -- an env var name, not a credential
 )
 
 // Forwarded is the desktop / personal-use credential source: reads the
@@ -158,7 +158,7 @@ func (f *Forwarded) lookupIdentity(ctx context.Context) (Identity, error) {
 // authorized_user creds (service accounts already carry client_email
 // in the JSON).
 func fetchUserEmail(ctx context.Context, adcJSON []byte) (string, error) {
-	creds, err := google.CredentialsFromJSON(ctx, adcJSON, "https://www.googleapis.com/auth/userinfo.email")
+	creds, err := google.CredentialsFromJSONWithType(ctx, adcJSON, google.AuthorizedUser, "https://www.googleapis.com/auth/userinfo.email")
 	if err != nil {
 		return "", fmt.Errorf("credentials from JSON: %w", err)
 	}
@@ -176,7 +176,7 @@ func fetchUserEmail(ctx context.Context, adcJSON []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("userinfo GET: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("userinfo status %d", resp.StatusCode)
 	}
