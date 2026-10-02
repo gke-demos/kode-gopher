@@ -92,6 +92,14 @@ spec:
       # controller's default anyway, and the GKE addon's admission
       # policy rejects templates that mount the token.
       automountServiceAccountToken: false
+      # No Kubernetes service links: without this, every Service in the
+      # namespace (kode-gopher, sandbox-router-svc, ...) shows up in the
+      # snippet's environment as *_SERVICE_HOST/_PORT variables. They
+      # aren't secrets, and network policy blocks those addresses, but
+      # they map the cluster for code that has no use for them. The
+      # kubelet still sets KUBERNETES_SERVICE_HOST/PORT (the API
+      # server), whatever this says.
+      enableServiceLinks: false
       containers:
         - name: go-runtime
           image: kode-gopher-sandbox:latest

@@ -20,7 +20,8 @@ limitations under the License.
 // proves a curated Google Cloud package compiles from the sandbox's
 // prewarmed cache (no go mod tidy) and that the wrapper returns a
 // structured result. It also reports whether any credentials reached the
-// sandbox, which they mustn't when kode-gopher has none.
+// sandbox, which they mustn't when kode-gopher has none, and whether
+// Kubernetes service links did (the template turns them off).
 package kode_gopher_snippet
 
 import (
@@ -43,5 +44,6 @@ func run(ctx context.Context) (any, error) {
 		"bucket":             c.Bucket("kode-gopher-offline").BucketName(),
 		"scope":              storage.ScopeReadOnly,
 		"adc_in_environment": os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "",
+		"service_links":      os.Getenv("SANDBOX_ROUTER_SVC_SERVICE_HOST") != "",
 	}, nil
 }

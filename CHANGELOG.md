@@ -20,6 +20,10 @@ Everything built so far, before the first tagged release. Slice details are in [
 - **MCP server (slice 2).** `kode-gopher serve` exposes `execute_go_code` over stdio.
 - **CLI and result contract (slices 0 and 1).** `kode-gopher exec <file.go>` normalizes a snippet or a full `package main` program, builds and runs it in an agent-sandbox pod, and returns a discriminated structured result. Verified on kind and on GKE Autopilot with gVisor.
 
+### Security
+
+- **Sandboxes no longer see the namespace's Services in their environment.** The sandbox template sets `enableServiceLinks: false`, so snippets no longer get `KODE_GOPHER_SERVICE_HOST`, `SANDBOX_ROUTER_SVC_SERVICE_HOST` and the like. Those addresses were already blocked by network policy. The kubelet still sets `KUBERNETES_SERVICE_HOST`.
+
 ### Fixed
 
 - **Large results no longer vanish.** A snippet's result over 16 KiB was cut by the same truncation as stdout, failed to parse, and was silently dropped, so `execute_go_code` reported `exit_code: 0` with no `result`. Results now come back whole up to 256 KiB. A larger result, or a `result.json` that isn't valid JSON, comes back as a warning that says why, and the call is flagged as an error.
