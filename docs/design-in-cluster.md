@@ -336,7 +336,7 @@ Checked on `kg-sandbox` on 2026-10-01:
 Real Google sign-in, checked on `kg-sandbox` on 2026-10-02, with `--auth=oauth`, vault custody (`kg-spike-google`) and `--oauth-allow-domains`:
 - **Setup.** The Google OAuth client lists `<issuer>/callback` as a redirect URI. The auth provider lists kode-gopher's KSA principal in its workload IDs and grants it `roles/agentidentity.user`. Groups Reader isn't needed with a domain allow-list.
 - **Claude Code** (`claude mcp add --transport http --callback-port <port> kode-gopher <issuer>/mcp`, then `/mcp`) went through the whole flow:
-  - it registered itself by DCR;
+  - it identified itself with a Client ID Metadata Document (`client_id=https://claude.ai/oauth/claude-code-client-metadata`), so kode-gopher fetched claude.ai's metadata document (CIMD), with no DCR;
   - kode-gopher's consent page, Google sign-in, the vault's own consent, `/consent/continue`, then the code exchange.
 
   Claude Code ran on a Cloud Workstation, so its `localhost` callback was reached by rewriting the final redirect's host to the workstation's port proxy.
@@ -344,6 +344,17 @@ Real Google sign-in, checked on `kg-sandbox` on 2026-10-02, with `--auth=oauth`,
   - `gcp_auth_status` reported `mode=oauth, credential_type=authorized_user` and the signed-in user's email.
   - An `execute_go_code` snippet the model wrote listed the project's GKE clusters as that user (built in 1.3 s, no tidy).
 - `scripts/smoketest-http.sh --client-credentials` passed against the same deployment.
+
+More checks on the same day, after redeploying release v0.1.1 (pinned by digest):
+- **Token refresh.** Claude Code made a call after 3 hours idle without signing in again: the refresh grant got a fresh Google token from the vault.
+- **Allow-list refusal.** `garisingh@google.com`, an account in another Workspace domain, got past Google's sign-in (the Internal client admitted it) and was refused at kode-gopher's callback: `access_denied: garisingh@google.com isn't allowed to use this server`. No code was issued and the vault was never asked.
+- **Signing in again.** A second sign-in as the same user skipped the vault's consent, because the grant was already stored. One earlier attempt ended on kode-gopher's "Sign-in expired" page: each `/authorize` sets a new browser cookie, so a sign-in link opened twice can only finish in its newest tab.
+- **No credentials left in the sandbox.** During a client-credentials run, the sandbox's environment, every process's environ and cmdline, and 5,354 files held no copy of the run's token, no other access token, and no refresh token. After the run, the emulator's port refused connections.
+- **Emulator coverage.** Storage, BigQuery, Compute (REST), GKE and Secret Manager (gRPC) all got a token from the emulator; the identity has no roles, so each got a permission-denied from the API, proving the credentials path. `instance/zone`, `instance/id` and identity tokens aren't served; `?scopes=` is accepted and ignored.
+- **Graceful restart.** A rollout released an open session's claim at once (no wait for the lease). The old session ID got 404 from the new pod, and a new session worked on another sandbox. `smoketest-http.sh --client-credentials` passed on v0.1.1.
+- **Found and fixed or filed:** results over 16 KiB vanished (#26); sandboxes saw the namespace's Service links (#29); stdio and `exec` claims have no lease, so a killed local process leaks its sandbox (#34).
+
+Still to run: a second user, MCP Inspector, and a hard pod kill (#35). The group allow list needs a design change first (#36).
 
 ### Step 5 as built
 
@@ -417,10 +428,10 @@ Each step ships separately. Step 2 alone is a usable internal deployment.
 
 ## To validate before or while building
 
-- **Client interop.** Test the sign-in against Claude Code, Claude Desktop, MCP Inspector and a go-sdk client. Clients differ in which registration method they try first and in how they send `resource`.
+- **Client interop.** Test the sign-in against Claude Code, Claude Desktop, MCP Inspector and a go-sdk client. Clients differ in which registration method they try first and in how they send `resource`. Claude Code: passed 2026-10-02, by CIMD, sending `resource`. The go-sdk client is covered in tests (`TestE2EClientCredentials` and the OAuth e2e tests). MCP Inspector and Claude Desktop: #35.
 - **CIMD fetch safety.** Fetching client-supplied URLs from the kode-gopher pod needs an SSRF guard (public IPs only, no redirects to private ranges). This is on top of its egress policy.
 - **Scope policy.** Whether an org policy restricts `cloud-platform` on Internal OAuth clients. Confirmed for `gke.ninja`: the client had to be marked Trusted in the Admin console.
-- **Group check permissions.** That the Groups Reader admin role on the kode-gopher service account is enough for `checkTransitiveMembership`. Also whether it covers groups with external members.
+- **Group check permissions.** That the Groups Reader admin role on the kode-gopher service account is enough for `checkTransitiveMembership`. Also whether it covers groups with external members. Blocked: kode-gopher calls as a Workload Identity principal, which has no email to assign an admin role to. See #36 for the options.
 - **Health checks.** GKE Gateway health-check source ranges for the kode-gopher ingress policy.
 - **Library coverage.** Metadata emulator coverage for the client libraries in `curated.Packages`. Some ask for `?scopes=`, some for `/identity` tokens; we'll decide what to support.
 - **Streaming progress.** `docs/plan.md > Slice 5 > Streaming` stays out of scope here. Streamable HTTP makes it possible later.
