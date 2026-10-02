@@ -4,9 +4,13 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-02
+
+Precompiled clients for troubleshooting, and local sandboxes that no longer outlive a killed process. Documentation: https://gke-demos.github.io/kode-gopher/.
+
 ### Added
 
-- **Cloud Logging, Monitoring and Trace clients are precompiled** in the sandbox image (`cloud.google.com/go/logging/logadmin`, `monitoring/apiv3/v2`, `trace/apiv1`), so troubleshooting snippets build in seconds without `go mod tidy`. `lookup_package_docs` serves their docs. ([#27](https://github.com/gke-demos/kode-gopher/issues/27))
+- **Cloud Logging, Monitoring and Trace clients are precompiled** in the sandbox image (`cloud.google.com/go/logging/logadmin`, `monitoring/apiv3/v2`, `trace/apiv1`), so troubleshooting snippets build in seconds without `go mod tidy`. `lookup_package_docs` now serves docs for any package in a precompiled module, including the `*pb` request types (`monitoringpb`, `tracepb`) that their calls need, and the model is told those packages are compiled too. ([#27](https://github.com/gke-demos/kode-gopher/issues/27))
 
 ### Fixed
 
