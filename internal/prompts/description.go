@@ -22,7 +22,7 @@ const ExecuteGoCodeDescription = `Build and run Go code in a sandboxed Kubernete
   k8s.io/client-go/dynamic
   k8s.io/client-go/tools/watch
 
-The snippet's go.mod is inherited from the prewarm lockfile so builds cache-hit at steady state (~5 s). Anything not covered above is resolved on demand via go mod tidy (slower; may re-tidy shared transitives and cache-miss).
+The snippet's go.mod is inherited from the prewarm lockfile so builds cache-hit at steady state (~5 s). Other packages in the same modules (the *pb request types, cloud.google.com/go/logging, iterator) are compiled too; a package from any other module is resolved on demand via go mod tidy (slower; may re-tidy shared transitives and cache-miss).
 
 Two input modes. Provide EXACTLY ONE:
 

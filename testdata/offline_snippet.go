@@ -21,9 +21,10 @@ limitations under the License.
 // prewarmed cache (no go mod tidy) and that the wrapper returns a
 // structured result. The Logging, Monitoring and Trace clients are
 // referenced too, so a curated package missing from the image's
-// lockfile shows up as tidied: true. It also reports whether any credentials reached the
-// sandbox, which they mustn't when kode-gopher has none, and whether
-// Kubernetes service links did (the template turns them off).
+// lockfile shows up as tidied: true. It also reports whether any
+// credentials reached the sandbox, which they mustn't when kode-gopher
+// has none, and whether Kubernetes service links did (the template
+// turns them off).
 package kode_gopher_snippet
 
 import (

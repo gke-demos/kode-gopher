@@ -28,8 +28,9 @@ limitations under the License.
 // This file is the single source of truth:
 //   - internal/prewarm/main.go must blank-import exactly the entries
 //     below; TestPrewarmMatches enforces it.
-//   - Later slices: internal/prompts/system.md is generated from this
-//     list, and lookup_package_docs uses it as an allow-list.
+//   - internal/prompts (the system prompt and execute_go_code's
+//     description) and the docs site's packages page are generated
+//     from it, and lookup_package_docs allows its packages' modules.
 package curated
 
 //go:generate go run ../prompts/gen
