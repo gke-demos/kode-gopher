@@ -56,7 +56,7 @@ type ExecuteGoCodeOutput struct {
 	DurationMS int64    `json:"duration_ms" jsonschema:"Build plus run time in the sandbox, in milliseconds."`
 	BuildMS    int64    `json:"build_ms" jsonschema:"Build time alone, in milliseconds."`
 	Tidied     bool     `json:"tidied" jsonschema:"True when the build ran go mod tidy because the code imports a package outside the prewarmed lockfile (slower)."`
-	Warnings   []string `json:"warnings,omitempty" jsonschema:"Notes about how the code was built, e.g. imports that moved to another module."`
+	Warnings   []string `json:"warnings,omitempty" jsonschema:"Notes for the caller: how the code was built (e.g. imports that moved to another module), and why a result was dropped (too large, or not valid JSON)."`
 	Stdout     string   `json:"stdout,omitempty" jsonschema:"Standard output of the phase that ran last."`
 	Stderr     string   `json:"stderr,omitempty" jsonschema:"Standard error of the phase that ran last."`
 	Result     *Result  `json:"result,omitempty" jsonschema:"The structured result: always set for a snippet that ran; for a full program only if it wrote /app/.kode-gopher/result.json."`

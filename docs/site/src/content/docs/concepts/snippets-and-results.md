@@ -90,6 +90,8 @@ The `result.kind` is one of:
 | `panic` | `run` panicked | `message`, `stack` |
 | `marshal_error` | the value couldn't be encoded as JSON (a channel or a func, for example) | `message`, `type` |
 
-The MCP response is flagged as an error (`isError`) when the build failed, the program exited non-zero, or the result kind isn't `ok`. The model can tell what to fix from `phase` and `kind`: compile errors mean changing the code, and `error` results usually mean a permission or API problem.
+A result can be up to 256 KiB of JSON. A larger one is dropped, and so is a `result.json` that isn't valid JSON. In both cases `warnings` says why, so return less data: filter, summarize, or page through it in the program. stdout and stderr are different: each is cut to its first and last 8 KiB, so the model sees the start and the end of long output.
+
+The MCP response is flagged as an error (`isError`) when the build failed, the program exited non-zero, the result kind isn't `ok`, or the result was dropped. The model can tell what to fix from `phase` and `kind`: compile errors mean changing the code, and `error` results usually mean a permission or API problem.
 
 The full schema is on the [MCP tools](/reference/tools/) page.

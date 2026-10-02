@@ -63,7 +63,7 @@ The host forwards ambient Google Cloud credentials (gcloud Application Default C
 | `stderr` | string | Standard error of the phase that ran last. |
 | `stdout` | string | Standard output of the phase that ran last. |
 | `tidied` (required) | boolean | True when the build ran go mod tidy because the code imports a package outside the prewarmed lockfile (slower). |
-| `warnings` | array of string | Notes about how the code was built, e.g. imports that moved to another module. |
+| `warnings` | array of string | Notes for the caller: how the code was built (e.g. imports that moved to another module), and why a result was dropped (too large, or not valid JSON). |
 
 ## `gcp_auth_status`
 
