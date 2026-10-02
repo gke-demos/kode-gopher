@@ -67,6 +67,13 @@ func (p *dynamicPatcher) patchLifecycle(ctx context.Context, shutdownTime time.T
 	return err
 }
 
+// clearLifecycle removes the claim's expiry, so it lives until deleted.
+func (p *dynamicPatcher) clearLifecycle(ctx context.Context) error {
+	_, err := p.client.Resource(claimGVR).Namespace(p.namespace).
+		Patch(ctx, p.name, types.MergePatchType, []byte(`{"spec":{"lifecycle":null}}`), metav1.PatchOptions{})
+	return err
+}
+
 // leasePatch is the merge patch that (re)sets the claim's expiry. On
 // expiry the controller deletes the claim, and with it the sandbox.
 func leasePatch(shutdownTime time.Time) ([]byte, error) {

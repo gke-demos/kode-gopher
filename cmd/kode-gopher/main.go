@@ -113,10 +113,9 @@ func runExec(args []string) int {
 	}
 	path := fs.Arg(0)
 
-	// A kept sandbox must outlive this process, so it gets no lease: a
-	// lease would delete it within one period of the Disconnect.
-	if *keep {
-		*lease = 0
+	if err := claimLease(fs, lease, *keep, "--keep"); err != nil {
+		log.Printf("exec: %v", err)
+		return 2
 	}
 	exitCode, err := run(path, *namespace, *kubeCtx, *openTO, *execTO, *claim, *keep, *lease, splitCSV(*extraImports), *inCluster, credCfg)
 	if err != nil {
@@ -278,6 +277,36 @@ func localADCPath() string {
 		return ""
 	}
 	return filepath.Join(h, ".config", "gcloud", "application_default_credentials.json")
+}
+
+// minClaimLease keeps renewals (every third of the lease) well clear of
+// the controller and of the renewal's own timeout.
+const minClaimLease = 30 * time.Second
+
+// claimLease validates --claim-lease, and turns it off when the sandbox
+// must outlive the process (--keep, --persistent): a lease would delete
+// it within one period of the Disconnect.
+func claimLease(fs *flag.FlagSet, lease *time.Duration, keep bool, keepFlag string) error {
+	if *lease < 0 || (*lease > 0 && *lease < minClaimLease) {
+		return fmt.Errorf("--claim-lease must be 0 (never expire) or at least %s, got %s", minClaimLease, *lease)
+	}
+	if keep {
+		if *lease > 0 && flagSet(fs, "claim-lease") {
+			log.Printf("%s keeps the sandbox after exit, so --claim-lease=%s is ignored", keepFlag, *lease)
+		}
+		*lease = 0
+	}
+	return nil
+}
+
+func flagSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }
 
 func fileKeys(m map[string][]byte) []string {

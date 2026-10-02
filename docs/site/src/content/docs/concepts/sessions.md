@@ -18,9 +18,11 @@ sidebar:
 
 One `kode-gopher serve` process is one MCP session. The sandbox is released when the client disconnects. If the process is killed instead (a crashed client, a closed laptop), its claim's lease runs out and the sandbox goes away within `--claim-lease` (10 minutes). `kode-gopher exec` works the same way.
 
+The lease is renewed only while the process runs. A laptop asleep for longer than the lease loses its sandbox too, and the next call starts in a new one, without the old `/app` and caches. The expiry is computed from the local clock, so a clock running far behind the cluster's shortens it.
+
 Two flags change this for development:
-- `--claim` reattaches to an existing claim;
-- `--persistent` leaves the sandbox running on exit, so it can be reattached later. A persistent sandbox has no lease, so it stays until you delete its claim (`exec --keep` is the same).
+- `--claim` reattaches to an existing claim. Without `--persistent`, the reattached claim takes the lease and is deleted on exit, like a new one. If that sandbox dies mid-session, kode-gopher tries the claim again, then carries on in a new sandbox.
+- `--persistent` leaves the sandbox running on exit, so it can be reattached later. A persistent sandbox has no lease: kode-gopher clears any expiry the claim had, so it stays until you delete it. `exec --keep` is the same.
 
 ## Shared server (HTTP)
 

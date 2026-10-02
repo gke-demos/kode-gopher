@@ -128,8 +128,9 @@ func runOffline(ctx context.Context, session *sdk.ClientSession, namespace strin
 // checkClaimLeases: while the session holds a sandbox, every claim in
 // the namespace carries a lease (spec.lifecycle.shutdownTime), over
 // stdio as well as HTTP, so a server killed without a clean shutdown
-// can't leak its sandbox. The kind e2e's namespace holds only this
-// session's claims.
+// can't leak its sandbox, and the expiry is in the near future (set,
+// and renewed, from now). Needs a namespace holding only this session's
+// claims, as the kind e2e's does.
 func checkClaimLeases(ctx context.Context, namespace string) {
 	fmt.Println("\n========== claim leases ==========")
 	// #nosec G204 -- the operator's own namespace flag.
@@ -146,6 +147,14 @@ func checkClaimLeases(ctx context.Context, namespace string) {
 		name, expiry, _ := strings.Cut(l, "=")
 		if expiry == "" {
 			fatalf("[leases] claim %s has no spec.lifecycle.shutdownTime: a killed server would leak it", name)
+		}
+		at, err := time.Parse(time.RFC3339, expiry)
+		if err != nil {
+			fatalf("[leases] claim %s: shutdownTime %q: %v", name, expiry, err)
+		}
+		// The default lease is 10 min; allow for clock skew with kind.
+		if left := time.Until(at); left <= 0 || left > 15*time.Minute {
+			fatalf("[leases] claim %s expires %s (in %s): want within the next lease", name, expiry, left.Round(time.Second))
 		}
 		fmt.Printf("  %s expires %s unless renewed\n", name, expiry)
 	}

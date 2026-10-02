@@ -71,16 +71,20 @@ func runServe(args []string) int {
 	switch *transport {
 	case "stdio":
 		*maxPerUser = 0
-		// A persistent sandbox must outlive this process for --claim to
-		// reattach, so it gets no lease: a lease would delete it within
-		// one period of the Disconnect. Otherwise a stdio server killed
-		// without a clean shutdown would leak its sandbox forever.
-		if *persistent {
-			*lease = 0
+		// Without a lease, a stdio server killed without a clean
+		// shutdown would leak its sandbox forever. A persistent one
+		// must outlive the process for --claim, so it gets none.
+		if err := claimLease(fs, lease, *persistent, "--persistent"); err != nil {
+			log.Printf("mcp serve: %v", err)
+			return 2
 		}
 	case "http":
 		if *claim != "" || *persistent {
 			log.Printf("mcp serve: --claim and --persistent are stdio-only")
+			return 2
+		}
+		if err := claimLease(fs, lease, false, ""); err != nil {
+			log.Printf("mcp serve: %v", err)
 			return 2
 		}
 		if err := httpAuth(ctx, &httpOpts, *authMode, *tokenFile, *authUser, *inCluster, oauthCfg); err != nil {
