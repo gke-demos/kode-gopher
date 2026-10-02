@@ -71,6 +71,7 @@ func runOffline(ctx context.Context, session *sdk.ClientSession) {
 		Go     string `json:"go"`
 		Bucket string `json:"bucket"`
 		ADC    bool   `json:"adc_in_environment"`
+		Links  bool   `json:"service_links"`
 	}
 	if err := json.Unmarshal(out.Result.Value, &val); err != nil {
 		fatalf("[offline] decode result.value: %v", err)
@@ -80,6 +81,9 @@ func runOffline(ctx context.Context, session *sdk.ClientSession) {
 	}
 	if val.ADC {
 		fatal("[offline] GOOGLE_APPLICATION_CREDENTIALS is set in the sandbox, but kode-gopher has no credentials")
+	}
+	if val.Links {
+		fatal("[offline] SANDBOX_ROUTER_SVC_SERVICE_HOST is set in the sandbox; the template should have enableServiceLinks: false")
 	}
 	fmt.Printf("  result.kind=ok go=%s bucket=%s\n", val.Go, val.Bucket)
 
