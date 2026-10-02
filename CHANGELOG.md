@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+
+- **A killed local kode-gopher no longer leaks its sandbox.** Sandbox claims from `serve` over stdio and from `exec` now carry the same renewed lease as the HTTP server's (`--claim-lease`, 10 minutes by default). A process that dies without a clean shutdown loses its sandbox within one lease, instead of holding it forever. `serve --persistent` and `exec --keep` stay lease-free, so their sandboxes outlive the process. Local users need permission to patch SandboxClaims. ([#34](https://github.com/gke-demos/kode-gopher/issues/34))
+
 ## [0.1.1] - 2026-10-02
 
 The first published release of kode-gopher: an MCP server (and CLI) that runs Go an AI agent writes against the real Google Cloud SDKs in a sandboxed Kubernetes pod, locally over stdio or as a shared server in GKE with Google sign-in. Pre-alpha. It's 0.1.0, whose release failed before publishing, plus the signing fix below; the full feature list is in [the 0.1.0 notes](https://github.com/gke-demos/kode-gopher/blob/main/CHANGELOG.md#010---2026-10-02). Documentation: https://gke-demos.github.io/kode-gopher/.

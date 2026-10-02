@@ -105,7 +105,7 @@ func main() {
 		}
 	}
 	if *offline {
-		runOffline(ctx, session)
+		runOffline(ctx, session, *namespace)
 		return
 	}
 

@@ -16,11 +16,11 @@ sidebar:
 
 ## Local (stdio)
 
-One `kode-gopher serve` process is one MCP session. The sandbox is released when the client disconnects.
+One `kode-gopher serve` process is one MCP session. The sandbox is released when the client disconnects. If the process is killed instead (a crashed client, a closed laptop), its claim's lease runs out and the sandbox goes away within `--claim-lease` (10 minutes). `kode-gopher exec` works the same way.
 
 Two flags change this for development:
 - `--claim` reattaches to an existing claim;
-- `--persistent` leaves the sandbox running on exit, so it can be reattached later.
+- `--persistent` leaves the sandbox running on exit, so it can be reattached later. A persistent sandbox has no lease, so it stays until you delete its claim (`exec --keep` is the same).
 
 ## Shared server (HTTP)
 
@@ -30,6 +30,6 @@ Each `Mcp-Session-Id` is a session with its own sandbox.
 |---|---|---|
 | `--session-timeout` | 15 min | Sessions idle this long end, and their sandboxes are released. |
 | `--max-sandboxes-per-user` | 2 | Open sandboxes allowed per user. A tool call that would open another one fails with "too many open sandboxes for this user" until one of the user's sessions ends. |
-| `--claim-lease` | 10 min | Each claim carries a lease that kode-gopher renews while the session lives. If the server crashes, its claims expire and the sandboxes go away. |
+| `--claim-lease` | 10 min | Each claim carries a lease that kode-gopher renews while the session lives. If the server crashes, its claims expire and the sandboxes go away. Local sessions have the same lease. |
 
 A client can end its session explicitly with HTTP `DELETE`, which releases the sandbox at once. kode-gopher runs as a single replica, and sessions live in its memory, so a restart ends open sessions. Clients start new ones.

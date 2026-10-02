@@ -96,6 +96,7 @@ func runExec(args []string) int {
 	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (bounded upstream by PerAttemptTimeout, default 3min)")
 	claim := fs.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one")
 	keep := fs.Bool("keep", false, "leave the sandbox alive on exit (Disconnect) instead of deleting it (Close)")
+	lease := fs.Duration("claim-lease", 10*time.Minute, "the sandbox claim expires this long after the last renewal, so a killed exec doesn't leave its sandbox behind; 0 = never (--keep turns it off)")
 	extraImports := fs.String("extra-imports", "", "comma-separated import paths to add as blank imports (forces go mod tidy to resolve them)")
 	inCluster := fs.Bool("in-cluster", false, "dial sandboxes by their in-cluster Service instead of port-forwarding (kode-gopher running in the cluster)")
 	credCfg := addCredFlags(fs)
@@ -112,7 +113,12 @@ func runExec(args []string) int {
 	}
 	path := fs.Arg(0)
 
-	exitCode, err := run(path, *namespace, *kubeCtx, *openTO, *execTO, *claim, *keep, splitCSV(*extraImports), *inCluster, credCfg)
+	// A kept sandbox must outlive this process, so it gets no lease: a
+	// lease would delete it within one period of the Disconnect.
+	if *keep {
+		*lease = 0
+	}
+	exitCode, err := run(path, *namespace, *kubeCtx, *openTO, *execTO, *claim, *keep, *lease, splitCSV(*extraImports), *inCluster, credCfg)
 	if err != nil {
 		log.Printf("%v", err)
 		return 1
@@ -136,7 +142,7 @@ func splitCSV(s string) []string {
 	return out
 }
 
-func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Duration, claim string, keep bool, extraImports []string, inCluster bool, credCfg *credFlags) (int, error) {
+func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Duration, claim string, keep bool, lease time.Duration, extraImports []string, inCluster bool, credCfg *credFlags) (int, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", path, err)
@@ -195,6 +201,7 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 		KubeContext: kubeContext,
 		ClaimName:   claim,
 		InCluster:   inCluster,
+		Lease:       lease,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("open sandbox: %w", err)

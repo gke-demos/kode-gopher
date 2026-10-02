@@ -49,7 +49,7 @@ func runServe(args []string) int {
 	authUser := fs.String("auth-user", "operator", "http, static auth: the user the static token authenticates as")
 	oauthCfg := addOAuthFlags(fs)
 	sessionTO := fs.Duration("session-timeout", 15*time.Minute, "http: end MCP sessions idle this long, closing their sandboxes")
-	lease := fs.Duration("claim-lease", 10*time.Minute, "http: sandbox claims expire this long after the last renewal, so a crashed server's sandboxes go away")
+	lease := fs.Duration("claim-lease", 10*time.Minute, "sandbox claims expire this long after the last renewal, so a crashed or killed server's sandboxes go away; 0 = never (--persistent turns it off)")
 	maxPerUser := fs.Int("max-sandboxes-per-user", 2, "http: open sandboxes (MCP sessions with a sandbox) allowed per user; 0 = no cap")
 	credCfg := addCredFlags(fs)
 	fs.Usage = func() {
@@ -70,7 +70,14 @@ func runServe(args []string) int {
 	httpOpts := mcp.HTTPOptions{Addr: *addr, SessionTimeout: *sessionTO}
 	switch *transport {
 	case "stdio":
-		*lease, *maxPerUser = 0, 0
+		*maxPerUser = 0
+		// A persistent sandbox must outlive this process for --claim to
+		// reattach, so it gets no lease: a lease would delete it within
+		// one period of the Disconnect. Otherwise a stdio server killed
+		// without a clean shutdown would leak its sandbox forever.
+		if *persistent {
+			*lease = 0
+		}
 	case "http":
 		if *claim != "" || *persistent {
 			log.Printf("mcp serve: --claim and --persistent are stdio-only")
