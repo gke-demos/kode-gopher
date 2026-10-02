@@ -50,16 +50,16 @@ type ExecuteGoCodeArgs struct {
 // consume MCP structured content get this typed; clients that only
 // read text get the human-readable rendering in CallToolResult.Content.
 type ExecuteGoCodeOutput struct {
-	Phase      string   `json:"phase"` // "build" or "run"
-	Mode       string   `json:"mode"`  // "verbatim" or "wrapped"
-	ExitCode   int      `json:"exit_code"`
-	DurationMS int64    `json:"duration_ms"`
-	BuildMS    int64    `json:"build_ms"`
-	Tidied     bool     `json:"tidied"` // the build ran go mod tidy (an import outside the prewarmed lockfile)
-	Warnings   []string `json:"warnings,omitempty"`
-	Stdout     string   `json:"stdout,omitempty"`
-	Stderr     string   `json:"stderr,omitempty"`
-	Result     *Result  `json:"result,omitempty"` // {kind: ok|error|panic|marshal_error, value?, message?, stack?, type?}
+	Phase      string   `json:"phase" jsonschema:"Where execution stopped: 'build' (compile failed; stderr has the compiler errors, so fix the code) or 'run' (it compiled and ran)."`
+	Mode       string   `json:"mode" jsonschema:"'wrapped' (a snippet with func run, wrapped by kode-gopher) or 'verbatim' (a full package main, run as is)."`
+	ExitCode   int      `json:"exit_code" jsonschema:"Exit code of the phase that ran last: the compiler's for phase=build, the program's for phase=run."`
+	DurationMS int64    `json:"duration_ms" jsonschema:"Build plus run time in the sandbox, in milliseconds."`
+	BuildMS    int64    `json:"build_ms" jsonschema:"Build time alone, in milliseconds."`
+	Tidied     bool     `json:"tidied" jsonschema:"True when the build ran go mod tidy because the code imports a package outside the prewarmed lockfile (slower)."`
+	Warnings   []string `json:"warnings,omitempty" jsonschema:"Notes about how the code was built, e.g. imports that moved to another module."`
+	Stdout     string   `json:"stdout,omitempty" jsonschema:"Standard output of the phase that ran last."`
+	Stderr     string   `json:"stderr,omitempty" jsonschema:"Standard error of the phase that ran last."`
+	Result     *Result  `json:"result,omitempty" jsonschema:"The structured result: always set for a snippet that ran; for a full program only if it wrote /app/.kode-gopher/result.json."`
 }
 
 // Result is the wire-form discriminated payload sent on
@@ -68,11 +68,11 @@ type ExecuteGoCodeOutput struct {
 // describe it as an array of bytes — the actual value can be any
 // JSON-shaped thing the user returned from run().
 type Result struct {
-	Kind    string `json:"kind"`
-	Value   any    `json:"value,omitempty"`
-	Message string `json:"message,omitempty"`
-	Stack   string `json:"stack,omitempty"`
-	Type    string `json:"type,omitempty"`
+	Kind    string `json:"kind" jsonschema:"'ok' (run returned a value), 'error' (run returned an error), 'panic' (run panicked), or 'marshal_error' (the returned value couldn't be encoded as JSON)."`
+	Value   any    `json:"value,omitempty" jsonschema:"For kind=ok: the value run returned, as JSON."`
+	Message string `json:"message,omitempty" jsonschema:"For kind=error, panic or marshal_error: the error or panic message."`
+	Stack   string `json:"stack,omitempty" jsonschema:"For kind=panic: the goroutine stack."`
+	Type    string `json:"type,omitempty" jsonschema:"For kind=marshal_error: the Go type of the value that failed to encode."`
 }
 
 // toWireResult converts the executor's raw-bytes-preserving Result to

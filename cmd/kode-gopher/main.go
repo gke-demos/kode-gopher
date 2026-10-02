@@ -85,7 +85,7 @@ func main() {
 }
 
 func printRootUsage() {
-	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n  serve           start the MCP server on stdio\n  auth <verb>     inspect ambient credentials (verb: status)\n  version         print the build version\n")
+	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n  serve           start the MCP server (stdio, or streamable HTTP)\n  auth <verb>     inspect ambient credentials (verb: status)\n  version         print the build version\n")
 }
 
 func runExec(args []string) int {

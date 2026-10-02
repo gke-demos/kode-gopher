@@ -38,9 +38,9 @@ type LookupPackageDocsArgs struct {
 // LookupPackageDocsOutput carries the raw godoc text — the LLM parses
 // what it needs from there rather than us pre-structuring it.
 type LookupPackageDocsOutput struct {
-	Package string `json:"package"`
-	Symbol  string `json:"symbol,omitempty"`
-	Docs    string `json:"docs"`
+	Package string `json:"package" jsonschema:"The package looked up."`
+	Symbol  string `json:"symbol,omitempty" jsonschema:"The symbol looked up, if any."`
+	Docs    string `json:"docs" jsonschema:"The output of go doc."`
 }
 
 // symbolPattern enforces the "valid Go identifier optionally dotted"

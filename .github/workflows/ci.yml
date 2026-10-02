@@ -77,6 +77,8 @@ jobs:
         run: dev/ci/presubmits/go-toolchain.sh --running
       - name: Release notes extract from CHANGELOG.md
         run: dev/ci/presubmits/release-notes.sh
+      - name: Docs lint
+        run: dev/ci/presubmits/docs-lint.sh
       # No cache: @latest should pick up new govulncheck releases.
       - name: govulncheck
         run: dev/ci/presubmits/vuln.sh

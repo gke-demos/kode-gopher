@@ -32,6 +32,7 @@ What the presubmits check:
 | `internal/prompts/` regenerated (`make prompts`) | `prompts.sh` |
 | GKE overlay pins the current sandbox image (`make sandbox-pin`) | `sandbox-pin.sh` |
 | `dev/release/notes.sh` extracts release notes from `CHANGELOG.md` | `release-notes.sh` |
+| README and docs site carry no drift-prone counts or version pins (`dev/tools/docs-lint`) | `docs-lint.sh` |
 | no agent attribution | `agent-attribution.sh` |
 | govulncheck | `vuln.sh` |
 
@@ -40,6 +41,25 @@ PRs that touch Go code, the sandbox image, `manifests/base` or `testdata/` also 
 ```bash
 dev/ci/e2e/kind.sh   # KEEP=1 keeps the cluster, BUILD=1 builds the sandbox image
 ```
+
+### Docs site
+
+The user documentation is an Astro Starlight site in [`docs/site`](./docs/site), published to https://gke-demos.github.io/kode-gopher/ from `main` by [`.github/workflows/docs.yml`](./.github/workflows/docs.yml). It follows the go-steer sites (core-agent, k8s-lookout). Preview it locally with Node 22:
+
+```bash
+cd docs/site && npm ci && npm run dev    # http://localhost:4321/kode-gopher/
+npm run build && python3 ../../scripts/verify-internal-links.py
+```
+
+Write content links root-relative (`[Deploy](/deploy/)`): the base path is added at build time. A user-visible change updates the matching page in the same PR.
+
+Three reference pages are generated, each with a DO-NOT-EDIT header. A test fails CI when one drifts:
+
+| Page | Source | Regenerate |
+|---|---|---|
+| `reference/tools.md` | the MCP server's tool descriptions and schemas | `go test ./internal/mcp -run TestToolReference -update` |
+| `reference/cli.md` | the binary's `-h` output | `go test ./cmd/kode-gopher -run TestCLIReference -update` |
+| `reference/packages.md` | `internal/curated` | `make prompts` |
 
 The lint config includes a complexity ratchet (funlen, gocognit) pinned to today's worst function. Lower it when you split that function; never raise it.
 
