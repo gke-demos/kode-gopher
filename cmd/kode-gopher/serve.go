@@ -68,32 +68,15 @@ func runServe(args []string) int {
 	defer stop()
 
 	httpOpts := mcp.HTTPOptions{Addr: *addr, SessionTimeout: *sessionTO}
-	switch *transport {
-	case "stdio":
-		*maxPerUser = 0
-		// Without a lease, a stdio server killed without a clean
-		// shutdown would leak its sandbox forever. A persistent one
-		// must outlive the process for --claim, so it gets none.
-		if err := claimLease(fs, lease, *persistent, "--persistent"); err != nil {
-			log.Printf("mcp serve: %v", err)
-			return 2
-		}
-	case "http":
-		if *claim != "" || *persistent {
-			log.Printf("mcp serve: --claim and --persistent are stdio-only")
-			return 2
-		}
-		if err := claimLease(fs, lease, false, ""); err != nil {
-			log.Printf("mcp serve: %v", err)
-			return 2
-		}
+	if err := transportFlags(fs, *transport, *claim != "", *persistent, lease, maxPerUser); err != nil {
+		log.Printf("mcp serve: %v", err)
+		return 2
+	}
+	if *transport == "http" {
 		if err := httpAuth(ctx, &httpOpts, *authMode, *tokenFile, *authUser, *inCluster, oauthCfg); err != nil {
 			log.Printf("mcp serve: %v", err)
 			return 2
 		}
-	default:
-		log.Printf("mcp serve: --transport must be stdio or http, got %q", *transport)
-		return 2
 	}
 
 	credSrc, err := credCfg.source(ctx, *inCluster)
@@ -126,6 +109,26 @@ func runServe(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// transportFlags checks the flags that depend on --transport and
+// settles the claim lease and per-user cap for it.
+func transportFlags(fs *flag.FlagSet, transport string, claim, persistent bool, lease *time.Duration, maxPerUser *int) error {
+	switch transport {
+	case "stdio":
+		*maxPerUser = 0
+		// Without a lease, a stdio server killed without a clean
+		// shutdown would leak its sandbox forever. A persistent one
+		// must outlive the process for --claim, so it gets none.
+		return claimLease(fs, lease, persistent, "--persistent")
+	case "http":
+		if claim || persistent {
+			return fmt.Errorf("--claim and --persistent are stdio-only")
+		}
+		return claimLease(fs, lease, false, "")
+	default:
+		return fmt.Errorf("--transport must be stdio or http, got %q", transport)
+	}
 }
 
 // httpAuth fills in how HTTP requests are authenticated. Under OAuth
