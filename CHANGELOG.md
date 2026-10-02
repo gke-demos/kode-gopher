@@ -26,5 +26,6 @@ Everything built so far, before the first tagged release. Slice details are in [
 
 ### Fixed
 
+- **The model is no longer told credentials arrive as a forwarded ADC file.** The `execute_go_code` description and the system prompt now say that the Google Cloud libraries find credentials on their own, and that the identity depends on the deployment. In-cluster deployments mount no credentials file. ([#28](https://github.com/gke-demos/kode-gopher/issues/28))
 - **Large results no longer vanish.** A snippet's result over 16 KiB was cut by the same truncation as stdout, failed to parse, and was silently dropped, so `execute_go_code` reported `exit_code: 0` with no `result`. Results now come back whole up to 256 KiB. A larger result, or a `result.json` that isn't valid JSON, comes back as a warning that says why, and the call is flagged as an error.
 - With `--auth=static`, a 401 from `/mcp` now carries `WWW-Authenticate: Bearer`, as RFC 6750 requires.

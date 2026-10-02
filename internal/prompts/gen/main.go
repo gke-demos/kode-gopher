@@ -141,13 +141,13 @@ Use ` + "`lookup_package_docs`" + ` to check a function signature or method set 
 
 ## Credentials
 
-Google Cloud calls authenticate via forwarded Application Default Credentials — the sandbox's identity is whoever ran ` + "`gcloud auth application-default login`" + ` on the host. Call ` + "`gcp_auth_status`" + ` to confirm the identity + project before consequential API calls.
+Google Cloud calls authenticate with Application Default Credentials, which the client libraries find on their own: ` + "`storage.NewClient(ctx)`" + ` and the like need no credential options. Who that is depends on how kode-gopher runs: the developer running it locally, the user signed in to a shared server, the server's own Workload Identity, or a service account. Call ` + "`gcp_auth_status`" + ` to confirm the identity and project before consequential API calls.
 
-Environment: ` + "`$GOOGLE_CLOUD_PROJECT`" + ` is forwarded into the run phase. ADC lands at ` + "`/app/.kode-gopher/creds/adc.json`" + ` and ` + "`$GOOGLE_APPLICATION_CREDENTIALS`" + ` points at it.
+Environment: ` + "`$GOOGLE_CLOUD_PROJECT`" + ` may be set; prefer it to hard-coding a project ID, and if it's empty, use the ` + "`project_id`" + ` that ` + "`gcp_auth_status`" + ` reports. Clients that need a project (such as ` + "`bigquery.NewClient`" + `) take it as an argument. Don't look for a credentials file or a token in the environment: there may be none. When kode-gopher runs in the cluster, a metadata server inside the sandbox hands the libraries a short-lived token for each run.
 
 ## Kubernetes API access
 
-The sandbox has no Kubernetes service-account token, so ` + "`rest.InClusterConfig()`" + ` fails, and the cluster's internal addresses (API server, cluster Services) are blocked. Reach every GKE cluster, including the one the sandbox runs in, through Google's API with the forwarded credentials: use ` + "`container/apiv1`" + ` ` + "`ListClusters`" + `/` + "`GetCluster`" + ` to find the cluster, prefer ` + "`c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint`" + ` over ` + "`c.Endpoint`" + ` (the DNS endpoint routes through Google's control plane, works for private-endpoint clusters, uses system-trust TLS), and wrap an ` + "`oauth2.Transport`" + ` sourced from ` + "`google.DefaultTokenSource`" + ` as ` + "`rest.Config.WrapTransport`" + `. What the snippet may do in the cluster is whatever Kubernetes RBAC grants the credentials' Google identity.
+The sandbox has no Kubernetes service-account token, so ` + "`rest.InClusterConfig()`" + ` fails, and the cluster's internal addresses (API server, cluster Services) are blocked. Reach every GKE cluster, including the one the sandbox runs in, through Google's API with the snippet's Google credentials: use ` + "`container/apiv1`" + ` ` + "`ListClusters`" + `/` + "`GetCluster`" + ` to find the cluster, prefer ` + "`c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint`" + ` over ` + "`c.Endpoint`" + ` (the DNS endpoint routes through Google's control plane, works for private-endpoint clusters, uses system-trust TLS), and wrap an ` + "`oauth2.Transport`" + ` sourced from ` + "`google.DefaultTokenSource`" + ` as ` + "`rest.Config.WrapTransport`" + `. What the snippet may do in the cluster is whatever Kubernetes RBAC grants the credentials' Google identity.
 
 ## Failure surfaces
 
@@ -195,5 +195,5 @@ Two input modes. Provide EXACTLY ONE:
 
 2) MULTI-FILE via 'files': map of path -> source. Root files (no '/' in key) share the entry-point package; subdirectory files are separate helper packages. The synthesized module name is 'kode_gopher_user' — a helper at 'helper/util.go' is imported as 'kode_gopher_user/helper'. If you include a 'go.mod' file the executor uses YOUR version pins instead of the prewarm lockfile; you take on any resulting recompile cost.
 
-The host forwards ambient Google Cloud credentials (gcloud Application Default Credentials, plus GOOGLE_CLOUD_PROJECT if set) into the sandbox, so cloud.google.com/go/* calls work without additional setup. ADC lands at /app/.kode-gopher/creds/adc.json and GOOGLE_APPLICATION_CREDENTIALS is set for the run phase.` + "`" + `
+Google Cloud calls authenticate automatically with Application Default Credentials, so cloud.google.com/go/* clients need no credential options. The identity depends on the deployment (the local developer, the signed-in user, the server's Workload Identity, or a service account); call gcp_auth_status to see it and its project. GOOGLE_CLOUD_PROJECT may be set; if it's empty, use gcp_auth_status's project_id.` + "`" + `
 `
