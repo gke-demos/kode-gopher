@@ -17,9 +17,11 @@ limitations under the License.
 // offline_snippet.go is the snippet `mcp-smoketest --offline` runs (CI's
 // kind e2e, which has no Google credentials). It builds a storage client
 // without authentication and makes no calls, so it needs no network: it
-// proves a curated Google Cloud package compiles from the sandbox's
+// proves curated Google Cloud packages compile from the sandbox's
 // prewarmed cache (no go mod tidy) and that the wrapper returns a
-// structured result. It also reports whether any credentials reached the
+// structured result. The Logging, Monitoring and Trace clients are
+// referenced too, so a curated package missing from the image's
+// lockfile shows up as tidied: true. It also reports whether any credentials reached the
 // sandbox, which they mustn't when kode-gopher has none, and whether
 // Kubernetes service links did (the template turns them off).
 package kode_gopher_snippet
@@ -29,8 +31,17 @@ import (
 	"os"
 	"runtime"
 
+	"cloud.google.com/go/logging/logadmin"
+	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	"cloud.google.com/go/storage"
+	trace "cloud.google.com/go/trace/apiv1"
 	"google.golang.org/api/option"
+)
+
+var (
+	_ *logadmin.Client
+	_ *monitoring.MetricClient
+	_ *trace.Client
 )
 
 func run(ctx context.Context) (any, error) {

@@ -26,9 +26,8 @@ limitations under the License.
 // per-call response-header cap. See docs/decisions.md.
 //
 // This file is the single source of truth:
-//   - internal/prewarm/main.go must blank-import every entry below
-//     (keep manually in sync; v1 is small enough that go-generate
-//     scaffolding isn't worth it yet).
+//   - internal/prewarm/main.go must blank-import exactly the entries
+//     below; TestPrewarmMatches enforces it.
 //   - Later slices: internal/prompts/system.md is generated from this
 //     list, and lookup_package_docs uses it as an allow-list.
 package curated
@@ -49,6 +48,9 @@ var Packages = []string{
 	"cloud.google.com/go/container/apiv1",
 	"cloud.google.com/go/bigquery",
 	"cloud.google.com/go/secretmanager/apiv1",
+	"cloud.google.com/go/logging/logadmin",
+	"cloud.google.com/go/monitoring/apiv3/v2",
+	"cloud.google.com/go/trace/apiv1",
 	"google.golang.org/api/option",
 	"k8s.io/apimachinery/pkg/apis/meta/v1",
 	"k8s.io/client-go/kubernetes",

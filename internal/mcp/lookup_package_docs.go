@@ -121,20 +121,12 @@ func isCurated(pkg string) bool {
 	return false
 }
 
-const lookupPackageDocsDescription = `Return godoc-style documentation for a curated Go package (optionally scoped to a specific symbol). Runs 'go doc <package> [symbol]' inside the sandbox against the prewarmed module cache — no build, no network, subsecond. Use when writing execute_go_code snippets and you need to check a function signature, method set, or constant name that isn't in your prior knowledge.
+// lookupPackageDocsDescription lists curated.Packages itself, so the
+// tool never advertises a different set than isCurated allows.
+var lookupPackageDocsDescription = `Return godoc-style documentation for a curated Go package (optionally scoped to a specific symbol). Runs 'go doc <package> [symbol]' inside the sandbox against the prewarmed module cache — no build, no network, subsecond. Use when writing execute_go_code snippets and you need to check a function signature, method set, or constant name that isn't in your prior knowledge.
 
 Curated set (only these packages are supported):
 
-  cloud.google.com/go/storage
-  cloud.google.com/go/bigquery
-  cloud.google.com/go/compute/apiv1
-  cloud.google.com/go/container/apiv1
-  cloud.google.com/go/secretmanager/apiv1
-  google.golang.org/api/option
-  k8s.io/client-go/kubernetes
-  k8s.io/client-go/tools/clientcmd
-  k8s.io/client-go/dynamic
-  k8s.io/client-go/tools/watch
-  k8s.io/apimachinery/pkg/apis/meta/v1
+  ` + strings.Join(curated.Packages, "\n  ") + `
 
 The 'symbol' argument, when provided, narrows the output to that name (e.g. 'Client', 'Client.Bucket', 'NewClient'). Must be a plain Go identifier — no shell metacharacters.`

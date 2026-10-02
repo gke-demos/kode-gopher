@@ -14,6 +14,9 @@ The sandbox image ships with these packages, and everything they depend on, alre
 | `cloud.google.com/go/container/apiv1` |
 | `cloud.google.com/go/bigquery` |
 | `cloud.google.com/go/secretmanager/apiv1` |
+| `cloud.google.com/go/logging/logadmin` |
+| `cloud.google.com/go/monitoring/apiv3/v2` |
+| `cloud.google.com/go/trace/apiv1` |
 | `google.golang.org/api/option` |
 | `k8s.io/apimachinery/pkg/apis/meta/v1` |
 | `k8s.io/client-go/kubernetes` |

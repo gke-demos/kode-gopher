@@ -19,6 +19,9 @@ Build and run Go code in a sandboxed Kubernetes pod (gVisor-isolated on GKE, run
   cloud.google.com/go/container/apiv1
   cloud.google.com/go/bigquery
   cloud.google.com/go/secretmanager/apiv1
+  cloud.google.com/go/logging/logadmin
+  cloud.google.com/go/monitoring/apiv3/v2
+  cloud.google.com/go/trace/apiv1
   google.golang.org/api/option
   k8s.io/apimachinery/pkg/apis/meta/v1
   k8s.io/client-go/kubernetes
@@ -96,16 +99,19 @@ Return godoc-style documentation for a curated Go package (optionally scoped to 
 Curated set (only these packages are supported):
 
   cloud.google.com/go/storage
-  cloud.google.com/go/bigquery
   cloud.google.com/go/compute/apiv1
   cloud.google.com/go/container/apiv1
+  cloud.google.com/go/bigquery
   cloud.google.com/go/secretmanager/apiv1
+  cloud.google.com/go/logging/logadmin
+  cloud.google.com/go/monitoring/apiv3/v2
+  cloud.google.com/go/trace/apiv1
   google.golang.org/api/option
+  k8s.io/apimachinery/pkg/apis/meta/v1
   k8s.io/client-go/kubernetes
   k8s.io/client-go/tools/clientcmd
   k8s.io/client-go/dynamic
   k8s.io/client-go/tools/watch
-  k8s.io/apimachinery/pkg/apis/meta/v1
 
 The 'symbol' argument, when provided, narrows the output to that name (e.g. 'Client', 'Client.Bucket', 'NewClient'). Must be a plain Go identifier — no shell metacharacters.
 ```
