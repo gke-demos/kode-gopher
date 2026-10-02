@@ -104,6 +104,8 @@ func runOffline(ctx context.Context, session *sdk.ClientSession) {
 	}
 	fmt.Println("  result.kind=panic, with message and stack")
 
+	checkLargeResults(ctx, session)
+
 	fmt.Println("\n========== gcp_auth_status ==========")
 	auth := callAuthStatus(ctx, session)
 	if auth.Mode != "none" {
@@ -115,6 +117,36 @@ func runOffline(ctx context.Context, session *sdk.ClientSession) {
 	checkPackageDocs(ctx, session)
 
 	fmt.Println("\n✅ MCP smoketest (offline) complete")
+}
+
+// checkLargeResults: a result well past stdout's 16 KiB truncation
+// comes back whole, and one past the result size limit comes back as
+// a warning and an error, not as a silently missing result.
+func checkLargeResults(ctx context.Context, session *sdk.ClientSession) {
+	snippet := func(n int) string {
+		return fmt.Sprintf("package snippet\n\nimport (\n\t\"context\"\n\t\"strings\"\n)\n\nfunc run(ctx context.Context) (any, error) {\n\treturn strings.Repeat(\"x\", %d), nil\n}\n", n)
+	}
+
+	fmt.Println("\n========== 40 KiB result ==========")
+	out, err := callExecuteGoCodeSource(ctx, session, snippet(40<<10))
+	if err != nil {
+		fatalf("[large-result] call: %v", err)
+	}
+	var s string
+	if out.Result == nil || out.Result.Kind != "ok" || json.Unmarshal(out.Result.Value, &s) != nil || len(s) != 40<<10 {
+		fatalf("[large-result] want result.kind=ok with a 40960-byte string; got result=%v warnings=%q", out.Result != nil, out.Warnings)
+	}
+	fmt.Println("  result.kind=ok, all 40960 bytes")
+
+	fmt.Println("\n========== 300 KiB result (over the limit) ==========")
+	out, err = callExecuteGoCodeSource(ctx, session, snippet(300<<10))
+	if err != nil {
+		fatalf("[too-large-result] call: %v", err)
+	}
+	if out.Result != nil || !strings.Contains(strings.Join(out.Warnings, " "), "over the 256 KiB limit") {
+		fatalf("[too-large-result] want no result and a size warning; got result=%v warnings=%q", out.Result != nil, out.Warnings)
+	}
+	fmt.Printf("  no result, warning: %s\n", out.Warnings[len(out.Warnings)-1])
 }
 
 // connectHTTP starts `kode-gopher serve --transport=http` on a free

@@ -56,3 +56,45 @@ func TestMovedWarning(t *testing.T) {
 		}
 	}
 }
+
+func TestParseResult(t *testing.T) {
+	// 40 KiB of value: over the old 16 KiB truncation that made large
+	// results vanish, under maxResultBytes.
+	big := `{"kind":"ok","value":"` + strings.Repeat("x", 40<<10) + `"}`
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantKind string
+		wantErr  string
+	}{
+		{"empty", "", "", ""},
+		{"whitespace", " \n", "", ""},
+		{"ok", `{"kind":"ok","value":[1,2]}`, "ok", ""},
+		{"panic", `{"kind":"panic","message":"boom","stack":"..."}`, "panic", ""},
+		{"large but allowed", big, "ok", ""},
+		{"too large", `{"kind":"ok","value":"` + strings.Repeat("x", maxResultBytes) + `"}`, "", "over the 256 KiB limit"},
+		{"truncated JSON", big[:len(big)/2], "", "isn't valid JSON"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, msg := parseResult(tc.body)
+			if tc.wantErr != "" {
+				if r != nil || !strings.Contains(msg, tc.wantErr) {
+					t.Fatalf("got result %v, message %q; want nil and %q", r, msg, tc.wantErr)
+				}
+				return
+			}
+			if msg != "" {
+				t.Fatalf("unexpected message %q", msg)
+			}
+			if tc.wantKind == "" {
+				if r != nil {
+					t.Fatalf("got %+v, want no result", r)
+				}
+				return
+			}
+			if r == nil || r.Kind != tc.wantKind {
+				t.Fatalf("got %+v, want kind %q", r, tc.wantKind)
+			}
+		})
+	}
+}

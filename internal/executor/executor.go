@@ -65,7 +65,10 @@ type Outcome struct {
 	Stdout   string
 	Stderr   string
 	Duration time.Duration // sum of all phases that ran
-	Result   *Result       // nil if result.json was absent or unparseable
+	Result   *Result       // nil if result.json was absent or unusable (see ResultError)
+	// ResultError says why a result.json that exists couldn't be used:
+	// too large, or not JSON. It's also among Warnings.
+	ResultError string
 	// Tidied reports whether the build had to run `go mod tidy`: the
 	// snippet imported a package the lockfile didn't cover.
 	Tidied bool
@@ -103,6 +106,11 @@ const (
 	binName    = "run"
 	binPath    = binDir + "/" + binName
 	resultPath = ".kode-gopher/result.json"
+
+	// maxResultBytes caps the structured result. Past this it would
+	// swamp the model's context anyway; the program should return
+	// less.
+	maxResultBytes = 256 << 10
 
 	// baseGoModPath / baseGoSumPath are where sandbox/Dockerfile
 	// preserves the prewarm module's tidied lockfile. The executor
@@ -225,21 +233,21 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 	}
 
 	// Phase 3: fetch the structured result, if any. Cheap: cat one
-	// small file. We discard fetch errors from the protocol — the
-	// caller can tell "no result.json" from "non-nil Result" by the
-	// Outcome.Result pointer.
+	// file, untruncated (Raw), since it's parsed rather than read.
 	fetch, fetchErr := sess.Execute(ctx, sandbox.Request{
 		Command: "cat " + resultPath + " 2>/dev/null || true",
 		Timeout: 30 * time.Second,
+		Raw:     true,
 	})
 	var result *Result
-	if fetchErr == nil {
-		if body := strings.TrimSpace(fetch.Stdout); body != "" {
-			var parsed Result
-			if jErr := json.Unmarshal([]byte(body), &parsed); jErr == nil {
-				result = &parsed
-			}
-		}
+	var resultErr string
+	if fetchErr != nil {
+		resultErr = fmt.Sprintf("couldn't fetch the result: %v", fetchErr)
+	} else {
+		result, resultErr = parseResult(fetch.Stdout)
+	}
+	if resultErr != "" {
+		warnings = append(warnings, resultErr)
 	}
 
 	return &Outcome{
@@ -252,8 +260,28 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 		Tidied:   tidied,
 		Warnings: warnings,
 
+		ResultError:   resultErr,
 		BuildDuration: build.Duration,
 	}, nil
+}
+
+// parseResult decodes result.json's contents. An empty file means no
+// result (a full program that didn't write one). Otherwise a result
+// that can't be used comes back as a reason, never silently dropped.
+func parseResult(body string) (*Result, string) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil, ""
+	}
+	if len(body) > maxResultBytes {
+		return nil, fmt.Sprintf("the result is %d KiB, over the %d KiB limit, so it was dropped: return less data (filter, summarize or page through it in the program)",
+			len(body)>>10, maxResultBytes>>10)
+	}
+	var r Result
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		return nil, fmt.Sprintf("%s isn't valid JSON (%v); a full program must write {\"kind\": \"ok\", \"value\": ...}", resultPath, err)
+	}
+	return &r, ""
 }
 
 // parseBuildStdout strips buildCmd's marker lines from the build
