@@ -30,6 +30,8 @@ usage: kode-gopher exec [flags] <file.go>
 
   -claim string
     	reattach to an existing sandbox claim instead of creating a new one
+  -claim-lease duration
+    	the sandbox claim expires this long after the last renewal, so a killed exec doesn't leave its sandbox behind; 0 = never (--keep turns it off) (default 10m0s)
   -context string
     	kubeconfig context for the sandbox cluster (empty = the ambient current context)
   -credentials string
@@ -70,7 +72,7 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
   -claim string
     	reattach to an existing sandbox claim instead of creating a new one on first tool call
   -claim-lease duration
-    	http: sandbox claims expire this long after the last renewal, so a crashed server's sandboxes go away (default 10m0s)
+    	sandbox claims expire this long after the last renewal, so a crashed or killed server's sandboxes go away; 0 = never (--persistent turns it off) (default 10m0s)
   -context string
     	kubeconfig context for the sandbox cluster (empty = the ambient current context)
   -credentials string

@@ -14,7 +14,7 @@ To run kode-gopher as a shared server for a team instead, see [Deploy for a team
 
 - **Go** 1.26 or later, to install the CLI. Go downloads the exact toolchain version it needs.
 - **A Kubernetes cluster with [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox):** a local kind cluster (Docker required), or GKE Autopilot with the agent-sandbox addon. [Set up a sandbox cluster](/getting-started/sandbox-cluster/) covers both.
-- **`kubectl`**, with a context for that cluster and permission to create SandboxClaims and port-forward in its namespace.
+- **`kubectl`**, with a context for that cluster and permission to create, patch and delete SandboxClaims (the patch renews each claim's lease) and to port-forward in its namespace.
 - **`gcloud`**, signed in to Application Default Credentials (ADC):
   ```bash
   gcloud auth application-default login

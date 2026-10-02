@@ -112,10 +112,13 @@ type slot struct {
 	id   string
 	user string // TokenInfo.UserID; "" over stdio
 
-	// mu guards session (and only session). Held briefly during
-	// lazy-open and shutdown.
+	// mu guards session and reopened. Held briefly during lazy-open
+	// and shutdown.
 	mu      sync.Mutex
 	session *sandbox.Session
+	// reopened: a session was dropped (its sandbox died), so a failed
+	// --claim reattach falls back to a new sandbox.
+	reopened bool
 
 	// execMu serializes Execute calls so concurrent tool invocations
 	// can't race on /app or clobber each other's build artifacts. The
@@ -225,14 +228,23 @@ func (s *Server) ensureSession(ctx context.Context, sl *slot) (*sandbox.Session,
 	openCtx, cancel := context.WithTimeout(ctx, s.cfg.OpenTimeout)
 	defer cancel()
 	log.Printf("opening sandbox (namespace=%s pool=%s claim=%q context=%q mcp-session=%q)", s.cfg.Namespace, s.cfg.WarmPool, s.cfg.Claim, s.cfg.KubeContext, sl.id)
-	sess, err := sandbox.Open(openCtx, sandbox.Options{
+	opts := sandbox.Options{
 		Namespace:   s.cfg.Namespace,
 		WarmPool:    s.cfg.WarmPool,
 		ClaimName:   s.cfg.Claim,
 		KubeContext: s.cfg.KubeContext,
 		InCluster:   s.cfg.InCluster,
 		Lease:       s.cfg.Lease,
-	})
+	}
+	sess, err := sandbox.Open(openCtx, opts)
+	if err != nil && opts.ClaimName != "" && sl.reopened {
+		// The --claim sandbox died (an expired lease, an eviction) and
+		// reattaching failed: carry on in a new one rather than failing
+		// every call until the server restarts.
+		log.Printf("reattach %s failed (%v); opening a new sandbox", opts.ClaimName, err)
+		opts.ClaimName = ""
+		sess, err = sandbox.Open(openCtx, opts)
+	}
 	if err != nil {
 		s.unreserve(sl.user)
 		return nil, fmt.Errorf("open sandbox: %w", err)
@@ -249,6 +261,7 @@ func (s *Server) dropSession(ctx context.Context, sl *slot, sess *sandbox.Sessio
 	current := sl.session == sess
 	if current {
 		sl.session = nil
+		sl.reopened = true
 	}
 	sl.mu.Unlock()
 	_ = sess.Close(ctx)

@@ -35,11 +35,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	sb "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
@@ -57,7 +60,10 @@ type Options struct {
 
 	// ClaimName, if non-empty, reattaches to that existing sandbox
 	// rather than creating a new one. Useful for development across
-	// server restarts (pair with Session.Disconnect on shutdown).
+	// server restarts (pair with Session.Disconnect on shutdown). With
+	// a Lease the claim takes it; without one, any expiry an earlier
+	// leased session left on it is cleared, so a sandbox kept for
+	// reattach isn't deleted out from under it.
 	ClaimName string
 
 	// SandboxReadyTimeout bounds how long we wait for the controller
@@ -204,17 +210,14 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 	if opts.SandboxReadyTimeout > 0 {
 		clientOpts.SandboxReadyTimeout = opts.SandboxReadyTimeout
 	}
-	if opts.KubeContext != "" || opts.Lease > 0 {
-		// Upstream's default kubeconfig loader uses empty ConfigOverrides
-		// and ignores context selection. To honor --context we build a
-		// *rest.Config here with an explicit CurrentContext override.
-		// The lease needs one too, for its own claim patches. With no
-		// kubeconfig, the loader falls back to the in-cluster config.
-		rules := clientcmd.NewDefaultClientConfigLoadingRules()
-		overrides := &clientcmd.ConfigOverrides{CurrentContext: opts.KubeContext}
-		rc, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+	if opts.KubeContext != "" || opts.Lease > 0 || opts.ClaimName != "" {
+		// Upstream's default kubeconfig loader ignores context
+		// selection, so --context needs our own *rest.Config. The lease
+		// and the reattach lifecycle patch need one for their claim
+		// patches too.
+		rc, err := restConfig(opts.KubeContext)
 		if err != nil {
-			return nil, fmt.Errorf("sandbox: build rest.Config for context %q: %w", opts.KubeContext, err)
+			return nil, err
 		}
 		clientOpts.RestConfig = rc
 	}
@@ -251,17 +254,61 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		inCluster: opts.InCluster,
 		direct:    &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: perAttempt}},
 	}
-	if opts.Lease > 0 {
+	switch {
+	case opts.Lease > 0:
 		p, err := newDynamicPatcher(clientOpts.RestConfig, opts.Namespace, box.ClaimName())
 		if err == nil {
 			sess.lease, err = startLease(ctx, p, opts.Lease)
 		}
 		if err != nil {
-			_ = sess.Close(context.WithoutCancel(ctx))
+			if apierrors.IsForbidden(err) {
+				err = fmt.Errorf("%w (renewing the claim's lease needs patch on sandboxclaims; or pass --claim-lease=0)", err)
+			}
+			// Roll back without deleting a claim we only reattached to:
+			// it may be a sandbox the user kept on purpose.
+			if opts.ClaimName != "" {
+				_ = sess.Disconnect(context.WithoutCancel(ctx))
+			} else {
+				_ = sess.Close(context.WithoutCancel(ctx))
+			}
 			return nil, err
+		}
+	case opts.ClaimName != "":
+		// No lease wanted (a persistent reattach): clear any expiry an
+		// earlier leased session left, or the controller would delete
+		// the sandbox at that time. Best effort: without patch rights
+		// the claim keeps its expiry, which the log says.
+		p, err := newDynamicPatcher(clientOpts.RestConfig, opts.Namespace, box.ClaimName())
+		if err == nil {
+			err = p.clearLifecycle(ctx)
+		}
+		if err != nil {
+			log.Printf("sandbox: claim %s keeps any expiry it had: clear lifecycle: %v", box.ClaimName(), err)
 		}
 	}
 	return sess, nil
+}
+
+// restConfig is the client config for the sandbox cluster. With a
+// context, that context from the kubeconfig. Without one, the
+// in-cluster config when running in a pod, as upstream's own loader
+// does, else the kubeconfig's current context.
+func restConfig(kubeContext string) (*rest.Config, error) {
+	if kubeContext == "" {
+		if rc, err := rest.InClusterConfig(); err == nil {
+			return rc, nil
+		}
+	}
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	overrides := &clientcmd.ConfigOverrides{CurrentContext: kubeContext}
+	rc, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+	if err != nil {
+		if kubeContext == "" {
+			return nil, fmt.Errorf("sandbox: load kubeconfig: %w", err)
+		}
+		return nil, fmt.Errorf("sandbox: build rest.Config for context %q: %w", kubeContext, err)
+	}
+	return rc, nil
 }
 
 // ClaimName returns the underlying sandbox claim name. Persist this
