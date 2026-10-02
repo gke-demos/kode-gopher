@@ -4,10 +4,14 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
-Everything built so far, before the first tagged release. Slice details are in [`docs/plan.md`](./docs/plan.md), and the evidence behind them in [`docs/decisions.md`](./docs/decisions.md).
+## [0.1.0] - 2026-10-02
+
+The first release. kode-gopher runs Go that an AI agent writes against the real Google Cloud SDKs, in a sandboxed Kubernetes pod, and returns a structured result. It runs locally over stdio, or as a shared server in GKE with Google sign-in. Pre-alpha: flags, the MCP tool contract and the manifests may change in 0.x releases. Documentation: https://gke-demos.github.io/kode-gopher/. Slice details are in [`docs/plan.md`](./docs/plan.md), and the evidence behind them in [`docs/decisions.md`](./docs/decisions.md).
 
 ### Added
 
+- **Documentation site.** https://gke-demos.github.io/kode-gopher/ covers getting started, deploying for a team, concepts and reference. The MCP tools, CLI and precompiled packages reference pages are generated from the code, with drift tests.
+- **Output field descriptions.** `execute_go_code`'s output schema now describes every field, including `phase`, `tidied` and the result kinds, so clients and models know what they mean.
 - **Service identity and client credentials (slice 9 step 5).** `serve --credentials=service --service-account=<gsa>` runs every snippet as a Google service account, impersonated through the IAM Credentials API. Under `--auth=oauth`, a pre-registered client with a `service_account` gets tokens through the OAuth `client_credentials` grant, for CI and automation, and its snippets run as that account. `gcp_auth_status` reports `mode=service`. The unused `creds.Workload` stub is gone.
 - **In-cluster deployment (slice 9 step 4).** `manifests/overlays/gke-server` runs `kode-gopher serve --transport=http` in the cluster behind a GKE Gateway (global external Application LB with a Google-managed certificate), with its own Role and network policy; `gke-server-oauth` switches it to Google sign-in. `scripts/deploy-gke-server.sh` deploys either and `scripts/smoketest-http.sh` tests it. The server image (`server/Dockerfile`) is published to `ghcr.io/gke-demos/kode-gopher/server` for amd64 and arm64, signed with cosign. The GKE overlay now denies all in-cluster ingress to the sandbox-router.
 - **Release process.** `kode-gopher version` and the MCP server's `Implementation.Version` report the build version, which GoReleaser stamps on tagged releases (linux and darwin, amd64 and arm64, with a cosign-signed `checksums.txt`). Release notes come from this file. ([#12](https://github.com/gke-demos/kode-gopher/issues/12))
