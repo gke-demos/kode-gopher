@@ -34,7 +34,7 @@ Two input modes. Provide EXACTLY ONE:
 
 2) MULTI-FILE via 'files': map of path -> source. Root files (no '/' in key) share the entry-point package; subdirectory files are separate helper packages. The synthesized module name is 'kode_gopher_user' — a helper at 'helper/util.go' is imported as 'kode_gopher_user/helper'. If you include a 'go.mod' file the executor uses YOUR version pins instead of the prewarm lockfile; you take on any resulting recompile cost.
 
-The host forwards ambient Google Cloud credentials (gcloud Application Default Credentials, plus GOOGLE_CLOUD_PROJECT if set) into the sandbox, so cloud.google.com/go/* calls work without additional setup. ADC lands at /app/.kode-gopher/creds/adc.json and GOOGLE_APPLICATION_CREDENTIALS is set for the run phase.
+Google Cloud calls authenticate automatically with Application Default Credentials, so cloud.google.com/go/* clients need no credential options. The identity depends on the deployment (the local developer, the signed-in user, the server's Workload Identity, or a service account); call gcp_auth_status to see it and its project. GOOGLE_CLOUD_PROJECT may be set; if it's empty, use gcp_auth_status's project_id.
 ```
 
 **Input**
@@ -84,7 +84,7 @@ None.
 | `credential_type` | string | For forwarded and access-token modes: 'authorized_user' or 'service_account' (access-token also 'metadata', when kode-gopher's own identity is Workload Identity). oauth: 'authorized_user'. service: 'service_account'. |
 | `email` | string | Best-effort identity email. Empty means lookup failed or wasn't possible. |
 | `mode` (required) | string | 'forwarded' (host ADC copied into sandbox), 'access-token' (a short-lived token minted by kode-gopher, served to each run by a metadata emulator in the sandbox), 'oauth' (the signed-in user's own short-lived Google token, served the same way), 'service' (a short-lived token for the service account this deployment or OAuth client runs snippets as, served the same way), or 'none' (no credentials configured). |
-| `project_id` | string | GCP project associated with these credentials (ADC quota_project_id, or $GOOGLE_CLOUD_PROJECT). |
+| `project_id` | string | Google Cloud project for these credentials: the deployment's configured project, the ADC file's quota project, or the service account's own project. Snippets also see it as $GOOGLE_CLOUD_PROJECT when kode-gopher passes it on. |
 
 ## `lookup_package_docs`
 

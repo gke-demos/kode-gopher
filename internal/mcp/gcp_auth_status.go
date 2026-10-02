@@ -33,7 +33,7 @@ type GCPAuthStatusOutput struct {
 	Mode      string `json:"mode"                       jsonschema:"'forwarded' (host ADC copied into sandbox), 'access-token' (a short-lived token minted by kode-gopher, served to each run by a metadata emulator in the sandbox), 'oauth' (the signed-in user's own short-lived Google token, served the same way), 'service' (a short-lived token for the service account this deployment or OAuth client runs snippets as, served the same way), or 'none' (no credentials configured)."`
 	CredType  string `json:"credential_type,omitempty"  jsonschema:"For forwarded and access-token modes: 'authorized_user' or 'service_account' (access-token also 'metadata', when kode-gopher's own identity is Workload Identity). oauth: 'authorized_user'. service: 'service_account'."`
 	Email     string `json:"email,omitempty"            jsonschema:"Best-effort identity email. Empty means lookup failed or wasn't possible."`
-	ProjectID string `json:"project_id,omitempty"       jsonschema:"GCP project associated with these credentials (ADC quota_project_id, or $GOOGLE_CLOUD_PROJECT)."`
+	ProjectID string `json:"project_id,omitempty"       jsonschema:"Google Cloud project for these credentials: the deployment's configured project, the ADC file's quota project, or the service account's own project. Snippets also see it as $GOOGLE_CLOUD_PROJECT when kode-gopher passes it on."`
 }
 
 func (s *Server) handleGCPAuthStatus(ctx context.Context, req *sdk.CallToolRequest, _ GCPAuthStatusArgs) (*sdk.CallToolResult, *GCPAuthStatusOutput, error) {
