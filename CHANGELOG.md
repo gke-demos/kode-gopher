@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release signing works with cosign 3.** The `checksums.txt` signature is now a Sigstore bundle, `checksums.txt.sigstore.json`, replacing `checksums.txt.sig` and `checksums.txt.pem`. Verify it with `cosign verify-blob --bundle`; see [docs/release-process.md](./docs/release-process.md). The v0.1.0 release failed at this step before anything was published. The release workflow's dry run now signs and verifies too.
+
 ## [0.1.0] - 2026-10-02
 
 The first release. kode-gopher runs Go that an AI agent writes against the real Google Cloud SDKs, in a sandboxed Kubernetes pod, and returns a structured result. It runs locally over stdio, or as a shared server in GKE with Google sign-in. Pre-alpha: flags, the MCP tool contract and the manifests may change in 0.x releases. Documentation: https://gke-demos.github.io/kode-gopher/. Slice details are in [`docs/plan.md`](./docs/plan.md), and the evidence behind them in [`docs/decisions.md`](./docs/decisions.md).
