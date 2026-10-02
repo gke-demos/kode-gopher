@@ -25,6 +25,8 @@ Use `--port-forward` before the certificate is ACTIVE.
 
 Rerun the deploy script, with a new `IMAGE` if you pin one. It keeps the Secrets, the IP and the certificate. The sandbox image is pinned in `manifests/overlays/gke`, so pulling a newer checkout updates it too.
 
+The warm pool doesn't pick up a new sandbox image on its own: agent-sandbox keeps the existing unclaimed sandboxes. So when they run an older image than the template, the deploy script replaces them (`scripts/refresh-warm-pool.sh`) and waits for one on the new image. Sessions already holding a sandbox keep theirs until they end. To refresh by hand, run `scripts/refresh-warm-pool.sh`.
+
 ## Limits and behavior
 
 - **Sessions:** one MCP session holds one sandbox. Idle sessions end after 15 minutes, and each user may hold 2 sandboxes at once.

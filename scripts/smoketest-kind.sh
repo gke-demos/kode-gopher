@@ -130,21 +130,9 @@ kubectl -n "$NS" get sandboxtemplate go-runtime-template >/dev/null \
   || die "SandboxTemplate 'go-runtime-template' did not appear within 30s"
 
 # Replace the pool's unclaimed sandboxes so claims get pods from the
-# image just loaded. Delete Sandboxes, not their pods: a Sandbox whose
-# pod was deleted stays Ready with the dead pod's IP for a moment, a
-# claim can adopt it then, and every request 502s. Foreground cascade
-# returns only once the pods are gone.
+# image just loaded. The tag is always :latest, so --always.
 step "refresh warm pool 'go-runtime-pool' (up to 3 min)"
-kubectl -n "$NS" delete sandbox -l agents.x-k8s.io/warm-pool-sandbox \
-  --cascade=foreground --ignore-not-found --wait=true
-ready=0
-for _ in {1..90}; do
-  ready=$(kubectl -n "$NS" get pods -l sandbox=kode-gopher-sandbox,agents.x-k8s.io/warm-pool-sandbox \
-    -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' | grep -c true || true)
-  [[ "$ready" -ge 1 ]] && break
-  sleep 2
-done
-[[ "$ready" -ge 1 ]] || die "warm pool did not become ready within 3 minutes"
+NS="$NS" CONTEXT="kind-${CLUSTER}" READY_TIMEOUT=180 scripts/refresh-warm-pool.sh --always
 
 step "build kode-gopher binary -> ./bin/kode-gopher"
 mkdir -p bin

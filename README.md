@@ -106,6 +106,7 @@ Design and project records, in this repository:
 | [`scripts/smoketest-gke.sh`](./scripts/smoketest-gke.sh) | GKE Autopilot direct-CLI verification |
 | [`scripts/smoketest-mcp.sh`](./scripts/smoketest-mcp.sh) | MCP-layer verification against either substrate |
 | [`scripts/smoketest-http.sh`](./scripts/smoketest-http.sh) | in-cluster kode-gopher over streamable HTTP, including negative auth cases |
+| [`scripts/refresh-warm-pool.sh`](./scripts/refresh-warm-pool.sh) | replaces the warm pool's unclaimed sandboxes when they run an older image than the template (used by the deploy and kind scripts) |
 | [`dev/ci/e2e/kind.sh`](./dev/ci/e2e/kind.sh) | CI's kind end-to-end test, no Google credentials: throwaway cluster, agent-sandbox, sandbox image, `mcp-smoketest --offline` over stdio and HTTP |
 | [`experiments/yaegi-poc`](./experiments/yaegi-poc) | Slice 6 proof of concept (shelved) — Yaegi interpreter as an alternative runtime, plus the `kg-difftest` corpus that ruled it out |
 
