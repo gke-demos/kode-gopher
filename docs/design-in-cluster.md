@@ -333,6 +333,18 @@ Checked on `kg-sandbox` on 2026-10-01:
 - From a pod in another namespace, the router, the kode-gopher Service and a sandbox pod all timed out, while a public URL answered.
 - `kode-gopher exec` over stdio (port-forward to the locked-down router) still listed the project's buckets.
 
+Real Google sign-in, checked on `kg-sandbox` on 2026-10-02, with `--auth=oauth`, vault custody (`kg-spike-google`) and `--oauth-allow-domains`:
+- **Setup.** The Google OAuth client lists `<issuer>/callback` as a redirect URI. The auth provider lists kode-gopher's KSA principal in its workload IDs and grants it `roles/agentidentity.user`. Groups Reader isn't needed with a domain allow-list.
+- **Claude Code** (`claude mcp add --transport http --callback-port <port> kode-gopher <issuer>/mcp`, then `/mcp`) went through the whole flow:
+  - it registered itself by DCR;
+  - kode-gopher's consent page, Google sign-in, the vault's own consent, `/consent/continue`, then the code exchange.
+
+  Claude Code ran on a Cloud Workstation, so its `localhost` callback was reached by rewriting the final redirect's host to the workstation's port proxy.
+- **Results.**
+  - `gcp_auth_status` reported `mode=oauth, credential_type=authorized_user` and the signed-in user's email.
+  - An `execute_go_code` snippet the model wrote listed the project's GKE clusters as that user (built in 1.3 s, no tidy).
+- `scripts/smoketest-http.sh --client-credentials` passed against the same deployment.
+
 ### Step 5 as built
 
 Two ways to run snippets as a Google service account rather than a user. Both mint the account's token through the IAM Credentials API (`generateAccessToken`, cloud-platform scope, 1 h) as kode-gopher's own Workload Identity, and feed it to the sandbox's metadata emulator like any other run token. `creds.Impersonator` caches one token per account and mints again 5 min before expiry. The KSA needs `roles/iam.serviceAccountTokenCreator` on each account, and nothing project-wide.
