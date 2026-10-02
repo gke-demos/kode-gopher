@@ -105,17 +105,10 @@ kind load docker-image "$IMG" --name "$CLUSTER"
 step "manifests/base"
 kubectl apply -k manifests/base
 kubectl -n "$NS" rollout status deployment/sandbox-router --timeout=180s
-# A reused cluster's pool may hold sandboxes from an older image.
-kubectl -n "$NS" delete sandbox -l agents.x-k8s.io/warm-pool-sandbox \
-  --cascade=foreground --ignore-not-found --wait=true
-ready=0
-for _ in {1..90}; do
-  ready=$(kubectl -n "$NS" get pods -l sandbox=kode-gopher-sandbox,agents.x-k8s.io/warm-pool-sandbox \
-    -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' | grep -c true || true)
-  [[ "$ready" -ge 1 ]] && break
-  sleep 2
-done
-[[ "$ready" -ge 1 ]] || die "warm pool not ready after 3 minutes"
+# A reused cluster's pool may hold sandboxes from an older image. The
+# tag is always :latest, so refresh regardless of what the image is
+# called.
+NS="$NS" READY_TIMEOUT=180 scripts/refresh-warm-pool.sh --always
 
 step "build binaries"
 go build -o ./bin/kode-gopher ./cmd/kode-gopher

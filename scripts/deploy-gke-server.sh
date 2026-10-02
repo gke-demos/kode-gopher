@@ -26,7 +26,9 @@
 #     or kode-gopher-oauth (oauth: from the files below; a new keyring
 #     only if the Secret doesn't exist yet);
 # then applies the overlay with the API server's address in the
-# network policy, the image, and the per-deployment OAuth flags.
+# network policy, the image, and the per-deployment OAuth flags, and
+# replaces the warm pool's sandboxes if they run an older sandbox image
+# (scripts/refresh-warm-pool.sh).
 #
 # Never prints secrets. scripts/smoketest-http.sh reads the static
 # token from the Secret itself.
@@ -69,7 +71,7 @@ while [[ $# -gt 0 ]]; do
     --auth)    AUTH="$2"; shift 2;;
     --auth=*)  AUTH="${1#--auth=}"; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '17,60p' "$0"; exit 0;;
+    -h|--help) sed -n '17,63p' "$0"; exit 0;;
     *)         echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -223,6 +225,11 @@ fi
 step "apply"
 k apply -k "$work"
 k -n "$NS" rollout status deployment/kode-gopher --timeout=300s
+
+# A new sandbox image only reaches new sessions once the warm pool's
+# old-image sandboxes are replaced; agent-sandbox doesn't do it.
+step "warm pool"
+NS="$NS" CONTEXT="${CONTEXT:-}" "$REPO_ROOT/scripts/refresh-warm-pool.sh"
 
 step "done"
 echo "MCP endpoint: $ISSUER/mcp"

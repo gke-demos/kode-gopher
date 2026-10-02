@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deploying a new sandbox image reaches new sessions straight away.** agent-sandbox doesn't replace a warm pool's unclaimed sandboxes when the template changes, so after an upgrade new sessions kept getting old-image sandboxes. `scripts/deploy-gke-server.sh` now replaces them when their image differs from the template's, and waits for one on the new image, through the new `scripts/refresh-warm-pool.sh`. The kind scripts use it too. ([#41](https://github.com/gke-demos/kode-gopher/issues/41))
+
 ## [0.2.0] - 2026-10-02
 
 Precompiled clients for troubleshooting, and local sandboxes that no longer outlive a killed process. Documentation: https://gke-demos.github.io/kode-gopher/.
