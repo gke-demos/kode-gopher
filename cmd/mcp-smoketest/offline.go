@@ -51,7 +51,7 @@ func fatal(args ...any) { fatalf("%s", fmt.Sprint(args...)) }
 // runOffline is --offline: the checks that need no Google credentials
 // (CI's kind e2e). kode-gopher runs with no ADC, so gcp_auth_status
 // must report mode=none; snippets build and run but call no Google API.
-func runOffline(ctx context.Context, session *sdk.ClientSession) {
+func runOffline(ctx context.Context, session *sdk.ClientSession, namespace string) {
 	fmt.Println("\n========== offline snippet (testdata/offline_snippet.go) ==========")
 	out, err := callExecuteGoCode(ctx, session, "testdata/offline_snippet.go")
 	if err != nil {
@@ -87,6 +87,8 @@ func runOffline(ctx context.Context, session *sdk.ClientSession) {
 	}
 	fmt.Printf("  result.kind=ok go=%s bucket=%s\n", val.Go, val.Bucket)
 
+	checkClaimLeases(ctx, namespace)
+
 	fmt.Println("\n========== build error ==========")
 	out, err = callExecuteGoCodeSource(ctx, session, "package main\n\nfunc main() { undefinedCall() }\n")
 	if err != nil {
@@ -121,6 +123,41 @@ func runOffline(ctx context.Context, session *sdk.ClientSession) {
 	checkPackageDocs(ctx, session)
 
 	fmt.Println("\n✅ MCP smoketest (offline) complete")
+}
+
+// checkClaimLeases: while the session holds a sandbox, every claim in
+// the namespace carries a lease (spec.lifecycle.shutdownTime), over
+// stdio as well as HTTP, so a server killed without a clean shutdown
+// can't leak its sandbox, and the expiry is in the near future (set,
+// and renewed, from now). Needs a namespace holding only this session's
+// claims, as the kind e2e's does.
+func checkClaimLeases(ctx context.Context, namespace string) {
+	fmt.Println("\n========== claim leases ==========")
+	// #nosec G204 -- the operator's own namespace flag.
+	out, err := exec.CommandContext(ctx, "kubectl", "-n", namespace, "get", "sandboxclaims",
+		"-o", `jsonpath={range .items[*]}{.metadata.name}={.spec.lifecycle.shutdownTime}{"\n"}{end}`).Output()
+	if err != nil {
+		fatalf("[leases] kubectl get sandboxclaims: %v", err)
+	}
+	lines := strings.Fields(string(out))
+	if len(lines) == 0 {
+		fatal("[leases] no sandbox claims while a session holds a sandbox")
+	}
+	for _, l := range lines {
+		name, expiry, _ := strings.Cut(l, "=")
+		if expiry == "" {
+			fatalf("[leases] claim %s has no spec.lifecycle.shutdownTime: a killed server would leak it", name)
+		}
+		at, err := time.Parse(time.RFC3339, expiry)
+		if err != nil {
+			fatalf("[leases] claim %s: shutdownTime %q: %v", name, expiry, err)
+		}
+		// The default lease is 10 min; allow for clock skew with kind.
+		if left := time.Until(at); left <= 0 || left > 15*time.Minute {
+			fatalf("[leases] claim %s expires %s (in %s): want within the next lease", name, expiry, left.Round(time.Second))
+		}
+		fmt.Printf("  %s expires %s unless renewed\n", name, expiry)
+	}
 }
 
 // checkLargeResults: a result well past stdout's 16 KiB truncation

@@ -45,7 +45,7 @@ This keeps today's stdio semantics: files persist between calls, and so does the
 
 Per-request claims would add 1-2 s of claim time to every call for no isolation benefit. A session is already one user.
 
-**Leaks.** HTTP gives no reliable disconnect. The SDK's `SessionTimeout` (`--session-timeout`, default 15 min) ends a session that sees no requests, and ending a session (timeout or client `DELETE`) closes its sandbox. That covers a live server. For a crashed one, each claim gets `spec.lifecycle.shutdownTime = now + lease` (`--claim-lease`, default 10 min) and `shutdownPolicy: Delete`. While the session is open, kode-gopher renews the lease every third of its length. If kode-gopher dies, renewals stop and the controller reaps the sandbox within the lease. The v1.0.4 client doesn't expose lifecycle, so kode-gopher patches the claim right after `Open`, and fails the open if that first patch fails.
+**Leaks.** HTTP gives no reliable disconnect. The SDK's `SessionTimeout` (`--session-timeout`, default 15 min) ends a session that sees no requests, and ending a session (timeout or client `DELETE`) closes its sandbox. That covers a live server. For a crashed one, each claim gets `spec.lifecycle.shutdownTime = now + lease` (`--claim-lease`, default 10 min) and `shutdownPolicy: Delete`. While the session is open, kode-gopher renews the lease every third of its length. If kode-gopher dies, renewals stop and the controller reaps the sandbox within the lease. The v1.0.4 client doesn't expose lifecycle, so kode-gopher patches the claim right after `Open`, and fails the open if that first patch fails. Local stdio `serve` and `exec` use the same lease since #34; only `--persistent` and `exec --keep` stay lease-free.
 
 **Quota.** There's a per-user cap on open sandboxes (`--max-sandboxes-per-user`, default 2), so one user can't drain the warm pool. It counts sessions that hold a sandbox. A session only takes a slot on its first sandbox-using tool call, so a session that never runs code doesn't count.
 
@@ -352,7 +352,7 @@ More checks on the same day, after redeploying release v0.1.1 (pinned by digest)
 - **No credentials left in the sandbox.** During a client-credentials run, the sandbox's environment, every process's environ and cmdline, and 5,354 files held no copy of the run's token, no other access token, and no refresh token. After the run, the emulator's port refused connections.
 - **Emulator coverage.** Storage, BigQuery, Compute (REST), GKE and Secret Manager (gRPC) all got a token from the emulator; the identity has no roles, so each got a permission-denied from the API, proving the credentials path. `instance/zone`, `instance/id` and identity tokens aren't served; `?scopes=` is accepted and ignored.
 - **Graceful restart.** A rollout released an open session's claim at once (no wait for the lease). The old session ID got 404 from the new pod, and a new session worked on another sandbox. `smoketest-http.sh --client-credentials` passed on v0.1.1.
-- **Found and fixed or filed:** results over 16 KiB vanished (#26); sandboxes saw the namespace's Service links (#29); stdio and `exec` claims have no lease, so a killed local process leaks its sandbox (#34).
+- **Found and fixed or filed:** results over 16 KiB vanished (#26); sandboxes saw the namespace's Service links (#29); stdio and `exec` claims had no lease, so a killed local process leaked its sandbox (#34, fixed).
 
 Still to run: a second user, MCP Inspector, and a hard pod kill (#35). The group allow list needs a design change first (#36).
 
