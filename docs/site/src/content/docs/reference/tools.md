@@ -51,19 +51,19 @@ The host forwards ambient Google Cloud credentials (gcloud Application Default C
 |---|---|---|
 | `build_ms` (required) | integer | Build time alone, in milliseconds. |
 | `duration_ms` (required) | integer | Build plus run time in the sandbox, in milliseconds. |
-| `exit_code` (required) | integer | Exit code of the phase that ran last: the compiler's for phase=build, the program's for phase=run. |
+| `exit_code` (required) | integer | Exit code of the phase that ran last: the build step's for phase=build, the program's for phase=run. |
 | `mode` (required) | string | 'wrapped' (a snippet with func run, wrapped by kode-gopher) or 'verbatim' (a full package main, run as is). |
-| `phase` (required) | string | Where execution stopped: 'build' (compile failed; stderr has the compiler errors, so fix the code) or 'run' (it compiled and ran). |
-| `result` | object | The structured result: always set for a snippet that ran; for a full program only if it wrote /app/.kode-gopher/result.json. |
+| `phase` (required) | string | Where execution stopped: 'build' (the build failed: compiler errors, a go mod tidy failure such as an unknown module, or the build was killed by a timeout or out of memory; stderr says which) or 'run' (it built and ran). |
+| `result` | object | The structured result, when the program wrote one: a snippet's wrapper writes it when run returns or panics; a full program only if it wrote /app/.kode-gopher/result.json. Absent if the process exited or was killed first (os.Exit, log.Fatal, a timeout), or if the result was dropped (see warnings). |
 | `result.kind` (required) | string | 'ok' (run returned a value), 'error' (run returned an error), 'panic' (run panicked), or 'marshal_error' (the returned value couldn't be encoded as JSON). |
 | `result.message` | string | For kind=error, panic or marshal_error: the error or panic message. |
 | `result.stack` | string | For kind=panic: the goroutine stack. |
 | `result.type` | string | For kind=marshal_error: the Go type of the value that failed to encode. |
 | `result.value` | any | For kind=ok: the value run returned, as JSON. |
-| `stderr` | string | Standard error of the phase that ran last. |
-| `stdout` | string | Standard output of the phase that ran last. |
+| `stderr` | string | Standard error of the phase that ran last. Long output keeps its first and last 8 KiB, with the middle elided. |
+| `stdout` | string | Standard output of the phase that ran last. Long output keeps its first and last 8 KiB, with the middle elided. |
 | `tidied` (required) | boolean | True when the build ran go mod tidy because the code imports a package outside the prewarmed lockfile (slower). |
-| `warnings` | array of string | Notes for the caller: how the code was built (e.g. imports that moved to another module), and why a result was dropped (too large, or not valid JSON). |
+| `warnings` | array of string | Notes for the caller: go mod tidy moved modules off the prewarmed versions (slow recompiles), or why the result is missing (too large, not valid JSON, or it couldn't be fetched). |
 
 ## `gcp_auth_status`
 

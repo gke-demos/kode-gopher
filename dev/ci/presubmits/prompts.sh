@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# prompts.sh: presubmit: internal/prompts/ is regenerated from
-# internal/curated (make prompts) and committed.
+# prompts.sh: presubmit: internal/prompts/ and the docs site's packages
+# and tools pages are regenerated from internal/curated (make prompts)
+# and committed.
 #
 # These scripts are exactly what CI runs (.github/workflows/ci.yml);
 # run dev/ci/presubmits/all.sh locally before pushing.

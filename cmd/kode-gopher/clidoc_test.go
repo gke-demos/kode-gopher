@@ -40,6 +40,9 @@ func TestCLIReference(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the binary")
 	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("no go on PATH")
+	}
 	bin := filepath.Join(t.TempDir(), "kode-gopher")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)

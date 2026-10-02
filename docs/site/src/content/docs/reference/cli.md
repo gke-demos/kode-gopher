@@ -30,13 +30,13 @@ usage: kode-gopher exec [flags] <file.go>
 
   -claim string
     	reattach to an existing sandbox claim instead of creating a new one
-  -context kubectl config current-context
-    	kubeconfig context for the sandbox cluster (empty = ambient kubectl config current-context)
+  -context string
+    	kubeconfig context for the sandbox cluster (empty = the ambient current context)
   -credentials string
     	how the snippet gets Google credentials: forwarded (copy local ADC into the sandbox), access-token (mint a short-lived token from ADC and serve it to the run only), or service (the same, for --service-account, impersonated with ADC); access-token and service need --in-cluster (default "forwarded")
   -exec-timeout duration
     	per-phase sandbox /execute timeout (bounded upstream by PerAttemptTimeout, default 3min) (default 1m30s)
-  -extra-imports go mod tidy
+  -extra-imports string
     	comma-separated import paths to add as blank imports (forces go mod tidy to resolve them)
   -in-cluster
     	dial sandboxes by their in-cluster Service instead of port-forwarding (kode-gopher running in the cluster)
@@ -71,8 +71,8 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
     	reattach to an existing sandbox claim instead of creating a new one on first tool call
   -claim-lease duration
     	http: sandbox claims expire this long after the last renewal, so a crashed server's sandboxes go away (default 10m0s)
-  -context kubectl config current-context
-    	kubeconfig context for the sandbox cluster (empty = ambient kubectl config current-context)
+  -context string
+    	kubeconfig context for the sandbox cluster (empty = the ambient current context)
   -credentials string
     	how the snippet gets Google credentials: forwarded (copy local ADC into the sandbox), access-token (mint a short-lived token from ADC and serve it to the run only), or service (the same, for --service-account, impersonated with ADC); access-token and service need --in-cluster (default "forwarded")
   -exec-timeout duration

@@ -74,7 +74,7 @@ This page is generated from what the server advertises: the descriptions and sch
 			b.WriteString(tool.Title + "\n\n")
 		}
 		b.WriteString("**Description**\n\n")
-		b.WriteString("```text\n" + strings.TrimSpace(tool.Description) + "\n```\n\n")
+		b.WriteString(fenced(strings.TrimSpace(tool.Description)))
 		b.WriteString("**Input**\n\n")
 		b.WriteString(schemaTable(t, tool.InputSchema))
 		if tool.OutputSchema != nil {
@@ -95,7 +95,7 @@ This page is generated from what the server advertises: the descriptions and sch
 		t.Fatalf("%v (run: go test ./internal/mcp -run TestToolReference -update)", err)
 	}
 	if string(want) != got {
-		t.Errorf("%s is out of date with the server's tools; run: go test ./internal/mcp -run TestToolReference -update", toolDocPath)
+		t.Errorf("%s is out of date with the server's tools; run: make prompts (or go test ./internal/mcp -run TestToolReference -update)", toolDocPath)
 	}
 }
 
@@ -107,8 +107,9 @@ type jsonSchema struct {
 	Items       *jsonSchema            `json:"items"`
 }
 
-// UnmarshalJSON accepts the boolean schema `true` (any value), which
-// the SDK emits for fields typed `any`.
+// UnmarshalJSON accepts boolean schemas (`true` means any value).
+// Defensive: the SDK emits one for an `any` field without a
+// description; with one, it emits an object.
 func (s *jsonSchema) UnmarshalJSON(data []byte) error {
 	if string(data) == "true" || string(data) == "false" {
 		*s = jsonSchema{}
@@ -184,8 +185,18 @@ func typeName(s *jsonSchema) string {
 	return name
 }
 
-// cell makes a description safe for a Markdown table cell.
+// cell makes a description safe for a Markdown table cell: pipes end
+// cells, and Astro renders raw HTML in .md.
 func cell(s string) string {
-	s = strings.ReplaceAll(s, "|", `\|`)
+	s = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "|", `\|`).Replace(s)
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// fenced wraps text in a code fence longer than any backtick run in it.
+func fenced(s string) string {
+	fence := "```"
+	for strings.Contains(s, fence) {
+		fence += "`"
+	}
+	return fence + "text\n" + s + "\n" + fence + "\n\n"
 }

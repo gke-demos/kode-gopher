@@ -36,7 +36,7 @@ import (
 func runServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	namespace := fs.String("namespace", "default", "Kubernetes namespace for the sandbox claim (must already exist)")
-	kubeCtx := fs.String("context", "", "kubeconfig context for the sandbox cluster (empty = ambient `kubectl config current-context`)")
+	kubeCtx := fs.String("context", "", "kubeconfig context for the sandbox cluster (empty = the ambient current context)")
 	claim := fs.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one on first tool call")
 	persistent := fs.Bool("persistent", false, "on shutdown, Disconnect from the sandbox (preserve for reattach) instead of Close (delete it)")
 	openTO := fs.Duration("open-timeout", 5*time.Minute, "max time spent opening the sandbox on first tool call")
