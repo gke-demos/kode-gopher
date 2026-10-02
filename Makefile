@@ -8,19 +8,21 @@
 
 .PHONY: prompts prompts-check test build lint presubmit sandbox-tag sandbox-pin sandbox-pin-check
 
-# prompts regenerates internal/prompts/{system.md,description.go} from
-# internal/curated.Packages. Run after touching the curated set so the
+# prompts regenerates internal/prompts/{system.md,description.go} and the
+# docs site's reference/packages.md from internal/curated.Packages, then
+# the site's reference/tools.md, which embeds the tool description. Run after touching the curated set so the
 # LLM-facing prompt and the execute_go_code tool description stay in
 # sync with what the sandbox actually caches.
 prompts:
 	go generate ./internal/curated
+	go test ./internal/mcp -run TestToolReference -update
 
 # prompts-check fails if the committed generated files are out of sync
 # with the current curated set. Suitable for CI.
 prompts-check: prompts
-	@if ! git diff --exit-code internal/prompts/; then \
+	@if ! git diff --exit-code internal/prompts/ docs/site/src/content/docs/reference/packages.md docs/site/src/content/docs/reference/tools.md; then \
 		echo ""; \
-		echo "internal/prompts/ is out of date. Run 'make prompts' and commit the result."; \
+		echo "internal/prompts/ or the docs site's packages page is out of date. Run 'make prompts' and commit the result."; \
 		exit 1; \
 	fi
 

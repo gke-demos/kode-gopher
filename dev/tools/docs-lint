@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Docs freshness linter, mirrored from go-steer/k8s-lookout's (itself
+# from core-agent's) and adapted to this tree. It fails on a few drift
+# patterns that go stale the moment code lands. Not a spell-checker,
+# not a style checker, not a link checker (scripts/verify-internal-links.py
+# covers built-site links in the Docs workflow).
+#
+# Checks:
+#   1. Tool and package counts — "three tools", "11 packages": list them
+#      or link the generated reference page instead.
+#   2. Pinned @vX.Y.Z installs — `go install github.com/gke-demos/kode-gopher/...@v0.1.0`
+#   3. Wrong-major version pins — "as of v1.5", "Current release: v1.8.0"
+#      (this repo is pre-v1; any v1.X.Y prose claim is wrong today and
+#      rot-bait after v1)
+#
+# Scope: README.md + docs/site/src/content/**/*.{md,mdx}, minus the
+# generated reference pages (they carry DO-NOT-EDIT headers and their
+# own drift tests). Not docs/*.md: the design docs and the decision log
+# are point-in-time records.
+#
+# Usage:
+#   dev/tools/docs-lint             scan the tree, exit 1 on any finding
+#   dev/tools/docs-lint --self-test check that every rule fires on a fixture
+
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+cd "$(repo_root)"
+
+scoped_paths() {
+  find README.md docs/site/src/content -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null \
+    | while IFS= read -r f; do grep -q 'DO NOT EDIT' "$f" || echo "$f"; done | sort
+}
+
+# Check 1: counts of MCP tools or precompiled packages. Both lists
+# change with the code; a number in prose doesn't.
+check_counts() {
+  local path="$1"
+  grep -n -i -E '\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|[0-9]+)[- ](mcp )?(tools|packages)\b' "$path" 2>/dev/null | \
+    awk -F: -v p="$path" '{
+      printf "%s:%s: hard-coded tool or package count: name them, or link /reference/tools/ or /reference/packages/\n", p, $1
+    }' || true
+}
+
+# Check 2: pinned @vX.Y.Z in an install snippet for this module.
+check_pinned_installs() {
+  local path="$1"
+  grep -n -E 'go (get|install)\s+github\.com/gke-demos/kode-gopher[^ ]*@v[0-9]+\.[0-9]+\.[0-9]+' "$path" 2>/dev/null | \
+    awk -F: -v p="$path" '{
+      msg = "pinned @vX.Y.Z in install snippet: use @latest so the doc doesn'\''t rot after the next release";
+      printf "%s:%s: %s\n", p, $1, msg
+    }' || true
+}
+
+# Check 3: v1.X.Y prose version claims. Allowed: "(since v1.X.Y)",
+# "pre-v1.X", "post-v1.X" and "v1.X+". Lines naming agent-sandbox are
+# skipped: its v1.0.4 is a real dependency pin, not a claim about us.
+check_wrong_major_pins() {
+  local path="$1"
+  grep -n -E '\bv1\.[0-9]+\.[0-9]+\b' "$path" 2>/dev/null | \
+    grep -v -E 'agent-sandbox' | \
+    grep -v -E '\(since v1\.' | \
+    grep -v -E '\bpre-v1\.[0-9]' | \
+    grep -v -E '\bpost-v1\.[0-9]' | \
+    grep -v -E 'v1\.[0-9]+(\.[0-9]+)?\+' | \
+    awk -F: -v p="$path" '{
+      msg = "v1.X.Y in prose: drop the version or convert to a `(since vX.Y.Z)` historical marker";
+      printf "%s:%s: %s\n", p, $1, msg
+    }' || true
+}
+
+run_all_checks() {
+  local findings=0
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    local out
+    out=$(
+      check_counts "$path"
+      check_pinned_installs "$path"
+      check_wrong_major_pins "$path"
+    )
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+      findings=$((findings + $(printf '%s\n' "$out" | wc -l)))
+    fi
+  done < <(scoped_paths)
+
+  if (( findings > 0 )); then
+    echo ""
+    echo "docs-lint: $findings finding(s). See the hints above."
+    echo "dev/tools/docs-lint --self-test shows each rule firing."
+    return 1
+  fi
+  echo "docs-lint: OK"
+}
+
+self_test() {
+  local tmp
+  tmp=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
+
+  cat > "$tmp/fixture.md" <<'EOF'
+# Fixture
+
+The server registers three tools.
+
+```
+go install github.com/gke-demos/kode-gopher/cmd/kode-gopher@v0.1.0
+```
+
+Current release: v1.8.0.
+EOF
+
+  local out=0 n
+  n=$(check_counts "$tmp/fixture.md" | wc -l)
+  (( n >= 1 )) || { echo "self-test: check_counts fired 0 times"; out=1; }
+  n=$(check_pinned_installs "$tmp/fixture.md" | wc -l)
+  (( n >= 1 )) || { echo "self-test: check_pinned_installs fired 0 times"; out=1; }
+  n=$(check_wrong_major_pins "$tmp/fixture.md" | wc -l)
+  (( n >= 1 )) || { echo "self-test: check_wrong_major_pins fired 0 times"; out=1; }
+  if (( out == 0 )); then
+    echo "docs-lint self-test: OK (all 3 rules fired on the fixture)"
+  fi
+  return $out
+}
+
+case "${1:-}" in
+  --self-test) self_test ;;
+  "")          run_all_checks ;;
+  *)           echo "usage: $0 [--self-test]" >&2; exit 2 ;;
+esac

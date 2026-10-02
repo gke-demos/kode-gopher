@@ -54,7 +54,7 @@ Whatever `run` returns comes back to the model as JSON. Errors and panics come b
 | Transport | stdio: your MCP client starts `kode-gopher serve` | streamable HTTP at `https://<host>/mcp` |
 | Sandboxes | in a kind or GKE cluster your kubectl reaches | in the same cluster as kode-gopher |
 | Snippets run as | you (your ADC) | each signed-in Google user, a service account, or kode-gopher's own Workload Identity |
-| Guide | [docs/getting-started.md](./docs/getting-started.md) | [docs/deploy.md](./docs/deploy.md) |
+| Guide | [Getting started](https://gke-demos.github.io/kode-gopher/getting-started/) | [Deploy for a team](https://gke-demos.github.io/kode-gopher/deploy/) |
 
 ## Status
 
@@ -68,10 +68,12 @@ What's next, and the evidence behind each step, are in [docs/plan.md](./docs/pla
 
 ## Docs
 
+**[gke-demos.github.io/kode-gopher](https://gke-demos.github.io/kode-gopher/)** has the user documentation: getting started, deploying for a team, concepts, and reference pages for the MCP tools, the CLI and the precompiled packages. Its sources are in [`docs/site`](./docs/site).
+
+Design and project records, in this repository:
+
 | | |
 |---|---|
-| [docs/getting-started.md](./docs/getting-started.md) | install the CLI, set up a sandbox cluster, connect your MCP client |
-| [docs/deploy.md](./docs/deploy.md) | deploy the shared server: static token, Google sign-in, service accounts, operations |
 | [docs/design.md](./docs/design.md) | architecture, execution modes, result protocol, sandbox boundary |
 | [docs/design-in-cluster.md](./docs/design-in-cluster.md) | the in-cluster server's design: sessions, OAuth, credentials in the sandbox, network policy |
 | [docs/plan.md](./docs/plan.md) | slice-by-slice build plan and status |

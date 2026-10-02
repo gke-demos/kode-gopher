@@ -1,0 +1,96 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Builds the Astro Starlight site under docs/site, checks its internal
+# links, and deploys it to GitHub Pages from main. Mirrors
+# go-steer/core-agent and go-steer/k8s-lookout. PRs build and check but
+# don't deploy.
+#
+# Pages must be set to deploy from Actions once per repo:
+# Settings → Pages → Source → "GitHub Actions".
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/site/**'
+      - 'scripts/verify-*.py'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/site/**'
+      - 'scripts/verify-*.py'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+# Cancel superseded runs so we don't deploy a stale build over a fresh one.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  # Astro 7 requires Node >=22.12 (same pin as core-agent).
+  NODE_VERSION: '22'
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: docs/site/package-lock.json
+
+      - id: pages
+        uses: actions/configure-pages@v6
+        # Deploy path only: PRs have no Pages environment to configure.
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+      - name: Install
+        working-directory: docs/site
+        run: npm ci
+
+      - name: Build
+        working-directory: docs/site
+        run: npm run build
+
+      - name: Verify internal links
+        run: python3 scripts/verify-internal-links.py
+
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        with:
+          path: docs/site/dist
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

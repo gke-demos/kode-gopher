@@ -85,18 +85,18 @@ func main() {
 }
 
 func printRootUsage() {
-	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n  serve           start the MCP server on stdio\n  auth <verb>     inspect ambient credentials (verb: status)\n  version         print the build version\n")
+	fmt.Fprintf(os.Stderr, "usage: kode-gopher <subcommand> [flags]\n\nsubcommands:\n  exec <file.go>  ship a Go file into a sandbox and run it\n  serve           start the MCP server (stdio, or streamable HTTP)\n  auth <verb>     inspect ambient credentials (verb: status)\n  version         print the build version\n")
 }
 
 func runExec(args []string) int {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	namespace := fs.String("namespace", "default", "Kubernetes namespace for the sandbox claim (must already exist)")
-	kubeCtx := fs.String("context", "", "kubeconfig context for the sandbox cluster (empty = ambient `kubectl config current-context`)")
+	kubeCtx := fs.String("context", "", "kubeconfig context for the sandbox cluster (empty = the ambient current context)")
 	openTO := fs.Duration("open-timeout", 5*time.Minute, "max time spent opening the sandbox")
 	execTO := fs.Duration("exec-timeout", 90*time.Second, "per-phase sandbox /execute timeout (bounded upstream by PerAttemptTimeout, default 3min)")
 	claim := fs.String("claim", "", "reattach to an existing sandbox claim instead of creating a new one")
 	keep := fs.Bool("keep", false, "leave the sandbox alive on exit (Disconnect) instead of deleting it (Close)")
-	extraImports := fs.String("extra-imports", "", "comma-separated import paths to add as blank imports (forces `go mod tidy` to resolve them)")
+	extraImports := fs.String("extra-imports", "", "comma-separated import paths to add as blank imports (forces go mod tidy to resolve them)")
 	inCluster := fs.Bool("in-cluster", false, "dial sandboxes by their in-cluster Service instead of port-forwarding (kode-gopher running in the cluster)")
 	credCfg := addCredFlags(fs)
 	fs.Usage = func() {

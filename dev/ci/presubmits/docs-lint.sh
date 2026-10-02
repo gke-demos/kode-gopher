@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# prompts.sh: presubmit: internal/prompts/ and the docs site's packages
-# and tools pages are regenerated from internal/curated (make prompts)
-# and committed.
+# docs-lint.sh: presubmit: README and the docs site carry none of the
+# drift patterns dev/tools/docs-lint knows (counts that change with the
+# code, pinned install versions, v1.X.Y claims), and its rules still
+# fire on their fixture.
 #
 # These scripts are exactly what CI runs (.github/workflows/ci.yml);
 # run dev/ci/presubmits/all.sh locally before pushing.
@@ -23,4 +24,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
-make prompts-check
+dev/tools/docs-lint --self-test
+dev/tools/docs-lint

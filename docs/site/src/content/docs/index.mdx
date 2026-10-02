@@ -1,0 +1,71 @@
+---
+title: kode-gopher
+description: Code Mode for Google Cloud in Go. Your agent writes a Go program, and kode-gopher compiles it and runs it in a sandbox.
+template: splash
+hero:
+  title: kode-gopher
+  tagline: Let your AI agent write real Go against Google Cloud, and run it safely in a sandbox.
+  actions:
+    - text: Get started
+      link: /kode-gopher/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: Deploy for a team
+      link: /kode-gopher/deploy/
+      icon: right-arrow
+      variant: secondary
+    - text: GitHub
+      link: https://github.com/gke-demos/kode-gopher
+      icon: github
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## One step instead of twenty
+
+Ask an agent to "find the buckets nobody has touched in a year" and it usually makes one tool call per API request, reading every intermediate result along the way. That's slow, it costs tokens, and it only works for the actions someone wrapped as a tool.
+
+kode-gopher gives the agent a single tool that takes code. The agent writes an ordinary Go program using Google's own Cloud libraries, and kode-gopher builds and runs it in an isolated pod. The program makes as many API calls as it needs, and only its final answer goes back to the agent.
+
+```go
+func run(ctx context.Context) (any, error) {
+	c, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	// List buckets, check each one's last update, keep the stale ones...
+	return staleBuckets, nil
+}
+```
+
+This is Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) idea, built for Go and Google Cloud. In Go there's nothing to generate: the "SDK" is the real `cloud.google.com/go` packages, and models have seen plenty of real code that uses them.
+
+## What you get
+
+<CardGrid>
+  <Card title="Real Google Cloud libraries" icon="seti:go">
+    Storage, Compute, GKE, BigQuery, Secret Manager and `client-go` come precompiled in the sandbox, so a typical snippet builds and runs in about four seconds.
+  </Card>
+  <Card title="A sandbox per session" icon="approve-check">
+    Each MCP session gets its own pod: gVisor on GKE, no Kubernetes credentials, and network access only to public endpoints.
+  </Card>
+  <Card title="Your identity, not a shared one" icon="seti:lock">
+    Snippets run as you. On a shared server, users sign in with Google and each runs as themselves, with short-lived tokens only.
+  </Card>
+  <Card title="Answers the model can use" icon="list-format">
+    Results come back as JSON, with build errors, runtime errors and panics clearly told apart, so the agent knows what to fix.
+  </Card>
+</CardGrid>
+
+## Where to start
+
+<CardGrid>
+  <LinkCard title="Try it on your machine" description="Install the CLI, set up a sandbox cluster on kind or GKE, and connect Claude Code or another MCP client." href="/kode-gopher/getting-started/" />
+  <LinkCard title="Deploy it for a team" description="Run kode-gopher in GKE behind HTTPS, with Google sign-in so every user runs as themselves." href="/kode-gopher/deploy/" />
+  <LinkCard title="How it works" description="What happens between the model writing a snippet and the result coming back." href="/kode-gopher/how-it-works/" />
+  <LinkCard title="Reference" description="The MCP tools, the CLI, and the precompiled packages." href="/kode-gopher/reference/tools/" />
+</CardGrid>
+
+kode-gopher is pre-alpha and hasn't had a release yet. It's built on [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) and the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).
