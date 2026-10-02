@@ -1,0 +1,61 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# review-gate: PRs that touch Go code must carry an "Adversarial
+# review" section in their body, the record that the skeptic pass in
+# CONTRIBUTING.md actually ran (findings fixed or pinned; for bug
+# fixes, the regression test verified to FAIL on the pre-fix code).
+# PRs without Go changes pass. Edits that strip the section fail again
+# on the `edited` trigger. Ported from go-steer/core-agent.
+name: review-gate
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  review-gate:
+    # An explicit allowlist of exempt bots, not `user.type == 'Bot'`:
+    # any bot installed later (Dependabot, Renovate) would otherwise
+    # inherit the exemption. A skipped job satisfies branch protection.
+    if: >-
+      !contains(fromJSON('["github-actions[bot]"]'),
+      github.event.pull_request.user.login)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require adversarial-review section on Go-touching PRs
+        env:
+          # Body via env, never interpolated into the script: PR
+          # bodies are attacker-controlled on public repos.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          if ! grep -qE '\.go$' <<<"$files"; then
+            echo "No Go changes: review gate not required."
+            exit 0
+          fi
+          if grep -qi 'adversarial review' <<<"${PR_BODY:-}"; then
+            echo "Adversarial-review section present."
+            exit 0
+          fi
+          echo '::error::This PR touches Go code but its body has no "Adversarial review" section. Run the skeptic pass in CONTRIBUTING.md (fix or pin findings; for bug fixes verify the regression test FAILS on the pre-fix code) and record the outcome in the PR body.'
+          exit 1
