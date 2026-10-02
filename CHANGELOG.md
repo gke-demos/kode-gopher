@@ -6,7 +6,7 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [0.1.1] - 2026-10-02
 
-The first published release. It contains everything in 0.1.0 below, plus the release-signing fix.
+The first published release of kode-gopher: an MCP server (and CLI) that runs Go an AI agent writes against the real Google Cloud SDKs in a sandboxed Kubernetes pod, locally over stdio or as a shared server in GKE with Google sign-in. Pre-alpha. It's 0.1.0, whose release failed before publishing, plus the signing fix below; the full feature list is in [the 0.1.0 notes](https://github.com/gke-demos/kode-gopher/blob/main/CHANGELOG.md#010---2026-10-02). Documentation: https://gke-demos.github.io/kode-gopher/.
 
 ### Fixed
 
