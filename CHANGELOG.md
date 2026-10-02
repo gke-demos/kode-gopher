@@ -4,7 +4,17 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-02
+
+The first published release of kode-gopher: an MCP server (and CLI) that runs Go an AI agent writes against the real Google Cloud SDKs in a sandboxed Kubernetes pod, locally over stdio or as a shared server in GKE with Google sign-in. Pre-alpha. It's 0.1.0, whose release failed before publishing, plus the signing fix below; the full feature list is in [the 0.1.0 notes](https://github.com/gke-demos/kode-gopher/blob/main/CHANGELOG.md#010---2026-10-02). Documentation: https://gke-demos.github.io/kode-gopher/.
+
+### Fixed
+
+- **Release signing works with cosign 3.** The `checksums.txt` signature is now a Sigstore bundle, `checksums.txt.sigstore.json`, replacing `checksums.txt.sig` and `checksums.txt.pem`. Verify it with `cosign verify-blob --bundle`; see [docs/release-process.md](./docs/release-process.md). The v0.1.0 release failed at this step before anything was published. The release workflow's dry run now signs and verifies too.
+
 ## [0.1.0] - 2026-10-02
+
+Tagged, but there's no GitHub Release: the release workflow failed at signing before publishing anything (fixed in 0.1.1). The server image `ghcr.io/gke-demos/kode-gopher/server:0.1.0` was published from this tag.
 
 The first release. kode-gopher runs Go that an AI agent writes against the real Google Cloud SDKs, in a sandboxed Kubernetes pod, and returns a structured result. It runs locally over stdio, or as a shared server in GKE with Google sign-in. Pre-alpha: flags, the MCP tool contract and the manifests may change in 0.x releases. Documentation: https://gke-demos.github.io/kode-gopher/. Slice details are in [`docs/plan.md`](./docs/plan.md), and the evidence behind them in [`docs/decisions.md`](./docs/decisions.md).
 

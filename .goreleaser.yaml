@@ -20,7 +20,7 @@
 # supplies the notes from CHANGELOG.md via --release-notes. See
 # docs/release-process.md.
 #
-# Local check (no publish, no signing):
+# Local check (no publish, no signing; signing needs a CI OIDC token):
 #   goreleaser check
 #   goreleaser release --snapshot --clean --skip=publish,sign
 version: 2
@@ -60,18 +60,21 @@ checksum:
   algorithm: sha256
 
 # Sign the checksum file only: it attests every archive transitively.
-# Produces checksums.txt.sig and checksums.txt.pem. Needs cosign on
-# PATH and an OIDC token (release.yml grants id-token: write).
+# Produces checksums.txt.sigstore.json, a Sigstore bundle holding the
+# signature, certificate and transparency-log entry. cosign 3 (from
+# cosign-installer v4) writes only bundles: its old --output-signature
+# and --output-certificate flags fail, which broke the v0.1.0 release.
+# Needs cosign on PATH and an OIDC token (release.yml grants
+# id-token: write).
 signs:
   - cmd: cosign
     artifacts: checksum
     output: true
-    certificate: "${artifact}.pem"
+    signature: "${artifact}.sigstore.json"
     args:
       - sign-blob
       - --yes
-      - --output-certificate=${certificate}
-      - --output-signature=${signature}
+      - --bundle=${signature}
       - ${artifact}
 
 snapshot:

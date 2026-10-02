@@ -3,7 +3,7 @@
 kode-gopher releases follow the same process as [go-steer/core-agent](https://github.com/go-steer/core-agent) and [go-steer/mast](https://github.com/go-steer/mast). Pushing a `v*` tag runs [`.github/workflows/release.yml`](../.github/workflows/release.yml), which publishes a GitHub Release with:
 
 - `kode-gopher` binaries for linux and darwin on amd64 and arm64, built by GoReleaser ([`.goreleaser.yaml`](../.goreleaser.yaml)) with `CGO_ENABLED=0`, one `tar.gz` per platform;
-- `checksums.txt`, signed with Sigstore cosign keyless (`checksums.txt.sig`, `checksums.txt.pem`);
+- `checksums.txt`, signed with Sigstore cosign keyless (`checksums.txt.sigstore.json`, a bundle with the signature and certificate);
 - notes taken from [`CHANGELOG.md`](../CHANGELOG.md).
 
 The sandbox image is not part of this. CI publishes it from `main` under a content-derived tag, which the GKE overlay pins (see [`CONTRIBUTING.md`](../CONTRIBUTING.md#sandbox-image)).
@@ -51,14 +51,14 @@ GoReleaser's own git-log changelog is never used. It is not turned off with `cha
 3. **Watch the `release` workflow** on the Actions tab. It runs every presubmit, extracts the notes, runs GoReleaser and checks the published body. Nothing is published if any presubmit fails.
 4. **Check the Release page**:
    - the body is the CHANGELOG section;
-   - there are four archives, plus `checksums.txt`, `checksums.txt.sig` and `checksums.txt.pem`;
+   - there are four archives, plus `checksums.txt` and `checksums.txt.sigstore.json`;
    - "Latest" is shown only for a non-pre-release tag.
 
 Re-running the workflow against the same tag replaces the Release's body and assets (`mode: replace`). If the notes were wrong, fix `CHANGELOG.md` on `main` and edit the Release body by hand: don't move a published tag.
 
 ## Dry run
 
-Build everything without publishing or signing, and download `dist/` as a workflow artifact:
+Build and sign everything without publishing, verify the signature, and download `dist/` as a workflow artifact. Signing in the dry run catches signing breakage before a tag is pushed; it adds an entry to Sigstore's public transparency log, as any signature does.
 
 ```bash
 gh workflow run release.yml -f dry_run=true
@@ -76,12 +76,11 @@ goreleaser release --snapshot --clean --skip=publish,sign
 
 ## Verify a release
 
-`checksums.txt` is signed keyless by the release workflow's GitHub OIDC identity. Download the archive you need plus `checksums.txt`, `checksums.txt.sig` and `checksums.txt.pem`, then:
+`checksums.txt` is signed keyless by the release workflow's GitHub OIDC identity. Download the archive you need plus `checksums.txt` and `checksums.txt.sigstore.json`, then, with cosign 2.4 or later:
 
 ```bash
 cosign verify-blob \
-  --certificate checksums.txt.pem \
-  --signature checksums.txt.sig \
+  --bundle checksums.txt.sigstore.json \
   --certificate-identity-regexp '^https://github.com/gke-demos/kode-gopher/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
