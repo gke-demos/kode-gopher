@@ -121,9 +121,9 @@ The sandbox image ships a prewarmed ` + "`$GOCACHE`" + ` + ` + "`$GOMODCACHE`" +
 
 {{.PackageBlock}}
 
-Snippets that import only these packages build in ~5 seconds. Anything else triggers ` + "`go mod tidy`" + ` on first use — slower and may re-tidy shared transitives, invalidating the compile cache.
+Other packages from the same modules are compiled too: the generated ` + "`*pb`" + ` request and response types (` + "`monitoringpb`" + `, ` + "`tracepb`" + `, ` + "`containerpb`" + `, ...), ` + "`cloud.google.com/go/logging`" + `, ` + "`google.golang.org/api/iterator`" + ` and the well-known protobuf types. Snippets that stay within these modules build in ~5 seconds. A package from any other module triggers ` + "`go mod tidy`" + ` on first use — slower and may re-tidy shared transitives, invalidating the compile cache.
 
-Use ` + "`lookup_package_docs`" + ` to check a function signature or method set from any curated package without paying an ` + "`execute_go_code`" + ` round-trip.
+Use ` + "`lookup_package_docs`" + ` to check a function signature, method set or request field from any package in these modules without paying an ` + "`execute_go_code`" + ` round-trip.
 
 ## Two input shapes
 
@@ -187,7 +187,7 @@ const ExecuteGoCodeDescription = ` + "`" + `Build and run Go code in a sandboxed
 
 {{.PackageBlock}}
 
-The snippet's go.mod is inherited from the prewarm lockfile so builds cache-hit at steady state (~5 s). Anything not covered above is resolved on demand via go mod tidy (slower; may re-tidy shared transitives and cache-miss).
+The snippet's go.mod is inherited from the prewarm lockfile so builds cache-hit at steady state (~5 s). Other packages in the same modules (the *pb request types, cloud.google.com/go/logging, iterator) are compiled too; a package from any other module is resolved on demand via go mod tidy (slower; may re-tidy shared transitives and cache-miss).
 
 Two input modes. Provide EXACTLY ONE:
 

@@ -23,7 +23,8 @@ limitations under the License.
 // the runtime sandbox uses) ensures the caches end up at paths the
 // runtime can read.
 //
-// KEEP IN SYNC with internal/curated/packages.go. Blank imports are
+// KEEP IN SYNC with internal/curated/packages.go (TestPrewarmMatches
+// in internal/curated checks it). Blank imports are
 // sufficient — the compiler builds & caches the imported package even
 // without referenced symbols.
 package main
@@ -32,8 +33,11 @@ import (
 	_ "cloud.google.com/go/bigquery"
 	_ "cloud.google.com/go/compute/apiv1"
 	_ "cloud.google.com/go/container/apiv1"
+	_ "cloud.google.com/go/logging/logadmin"
+	_ "cloud.google.com/go/monitoring/apiv3/v2"
 	_ "cloud.google.com/go/secretmanager/apiv1"
 	_ "cloud.google.com/go/storage"
+	_ "cloud.google.com/go/trace/apiv1"
 	_ "google.golang.org/api/option"
 	_ "k8s.io/apimachinery/pkg/apis/meta/v1"
 	_ "k8s.io/client-go/dynamic"

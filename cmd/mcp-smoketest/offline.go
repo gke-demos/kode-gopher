@@ -62,7 +62,7 @@ func runOffline(ctx context.Context, session *sdk.ClientSession, namespace strin
 		fatalf("[offline] phase=%s exit=%d (want run, 0). stderr:\n%s", out.Phase, out.ExitCode, out.Stderr)
 	}
 	if out.Tidied {
-		fatal("[offline] the build ran go mod tidy: storage and option should come from the prewarmed lockfile")
+		fatal("[offline] the build ran go mod tidy: every curated package the snippet imports should come from the prewarmed lockfile")
 	}
 	if out.Result == nil || out.Result.Kind != "ok" {
 		fatalf("[offline] want result.kind=ok, got %+v", out.Result)
@@ -121,6 +121,24 @@ func runOffline(ctx context.Context, session *sdk.ClientSession, namespace strin
 
 	fmt.Println("\n========== lookup_package_docs ==========")
 	checkPackageDocs(ctx, session)
+
+	// A package in a curated module rather than in the list itself: the
+	// request types a ListTimeSeries snippet needs.
+	fmt.Println("\n========== lookup_package_docs (module package) ==========")
+	res, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "lookup_package_docs",
+		Arguments: map[string]any{
+			"package": "cloud.google.com/go/monitoring/apiv3/v2/monitoringpb",
+			"symbol":  "ListTimeSeriesRequest",
+		},
+	})
+	if err != nil {
+		fatalf("[docs-module] call: %v", err)
+	}
+	if res.IsError || !strings.Contains(contentText(res.Content), "type ListTimeSeriesRequest struct") {
+		fatalf("[docs-module] want monitoringpb.ListTimeSeriesRequest docs; got IsError=%v:\n%s", res.IsError, contentText(res.Content))
+	}
+	fmt.Println("  monitoringpb.ListTimeSeriesRequest: type ListTimeSeriesRequest struct {...}")
 
 	fmt.Println("\n✅ MCP smoketest (offline) complete")
 }

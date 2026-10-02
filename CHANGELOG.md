@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **Cloud Logging, Monitoring and Trace clients are precompiled** in the sandbox image (`cloud.google.com/go/logging/logadmin`, `monitoring/apiv3/v2`, `trace/apiv1`), so troubleshooting snippets build in seconds without `go mod tidy`. `lookup_package_docs` serves their docs. ([#27](https://github.com/gke-demos/kode-gopher/issues/27))
+
 ### Fixed
 
 - **A killed local kode-gopher no longer leaks its sandbox.** Sandbox claims from `serve` over stdio and from `exec` now carry the same renewed lease as the HTTP server's (`--claim-lease`, 10 minutes by default). A process that dies without a clean shutdown loses its sandbox within one lease, instead of holding it forever. `serve --persistent` and `exec --keep` stay lease-free, so their sandboxes outlive the process. Local users need permission to patch SandboxClaims. ([#34](https://github.com/gke-demos/kode-gopher/issues/34))

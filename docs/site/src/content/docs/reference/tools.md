@@ -19,6 +19,9 @@ Build and run Go code in a sandboxed Kubernetes pod (gVisor-isolated on GKE, run
   cloud.google.com/go/container/apiv1
   cloud.google.com/go/bigquery
   cloud.google.com/go/secretmanager/apiv1
+  cloud.google.com/go/logging/logadmin
+  cloud.google.com/go/monitoring/apiv3/v2
+  cloud.google.com/go/trace/apiv1
   google.golang.org/api/option
   k8s.io/apimachinery/pkg/apis/meta/v1
   k8s.io/client-go/kubernetes
@@ -26,7 +29,7 @@ Build and run Go code in a sandboxed Kubernetes pod (gVisor-isolated on GKE, run
   k8s.io/client-go/dynamic
   k8s.io/client-go/tools/watch
 
-The snippet's go.mod is inherited from the prewarm lockfile so builds cache-hit at steady state (~5 s). Anything not covered above is resolved on demand via go mod tidy (slower; may re-tidy shared transitives and cache-miss).
+The snippet's go.mod is inherited from the prewarm lockfile so builds cache-hit at steady state (~5 s). Other packages in the same modules (the *pb request types, cloud.google.com/go/logging, iterator) are compiled too; a package from any other module is resolved on demand via go mod tidy (slower; may re-tidy shared transitives and cache-miss).
 
 Two input modes. Provide EXACTLY ONE:
 
@@ -93,19 +96,22 @@ None.
 ```text
 Return godoc-style documentation for a curated Go package (optionally scoped to a specific symbol). Runs 'go doc <package> [symbol]' inside the sandbox against the prewarmed module cache — no build, no network, subsecond. Use when writing execute_go_code snippets and you need to check a function signature, method set, or constant name that isn't in your prior knowledge.
 
-Curated set (only these packages are supported):
+Curated set; other packages in the same modules work too, such as the *pb request types (monitoringpb, tracepb) and cloud.google.com/go/logging:
 
   cloud.google.com/go/storage
-  cloud.google.com/go/bigquery
   cloud.google.com/go/compute/apiv1
   cloud.google.com/go/container/apiv1
+  cloud.google.com/go/bigquery
   cloud.google.com/go/secretmanager/apiv1
+  cloud.google.com/go/logging/logadmin
+  cloud.google.com/go/monitoring/apiv3/v2
+  cloud.google.com/go/trace/apiv1
   google.golang.org/api/option
+  k8s.io/apimachinery/pkg/apis/meta/v1
   k8s.io/client-go/kubernetes
   k8s.io/client-go/tools/clientcmd
   k8s.io/client-go/dynamic
   k8s.io/client-go/tools/watch
-  k8s.io/apimachinery/pkg/apis/meta/v1
 
 The 'symbol' argument, when provided, narrows the output to that name (e.g. 'Client', 'Client.Bucket', 'NewClient'). Must be a plain Go identifier — no shell metacharacters.
 ```

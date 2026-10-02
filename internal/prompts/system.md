@@ -12,6 +12,9 @@ The sandbox image ships a prewarmed `$GOCACHE` + `$GOMODCACHE` for exactly this 
   cloud.google.com/go/container/apiv1
   cloud.google.com/go/bigquery
   cloud.google.com/go/secretmanager/apiv1
+  cloud.google.com/go/logging/logadmin
+  cloud.google.com/go/monitoring/apiv3/v2
+  cloud.google.com/go/trace/apiv1
   google.golang.org/api/option
   k8s.io/apimachinery/pkg/apis/meta/v1
   k8s.io/client-go/kubernetes
@@ -19,9 +22,9 @@ The sandbox image ships a prewarmed `$GOCACHE` + `$GOMODCACHE` for exactly this 
   k8s.io/client-go/dynamic
   k8s.io/client-go/tools/watch
 
-Snippets that import only these packages build in ~5 seconds. Anything else triggers `go mod tidy` on first use — slower and may re-tidy shared transitives, invalidating the compile cache.
+Other packages from the same modules are compiled too: the generated `*pb` request and response types (`monitoringpb`, `tracepb`, `containerpb`, ...), `cloud.google.com/go/logging`, `google.golang.org/api/iterator` and the well-known protobuf types. Snippets that stay within these modules build in ~5 seconds. A package from any other module triggers `go mod tidy` on first use — slower and may re-tidy shared transitives, invalidating the compile cache.
 
-Use `lookup_package_docs` to check a function signature or method set from any curated package without paying an `execute_go_code` round-trip.
+Use `lookup_package_docs` to check a function signature, method set or request field from any package in these modules without paying an `execute_go_code` round-trip.
 
 ## Two input shapes
 

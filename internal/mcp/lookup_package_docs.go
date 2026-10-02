@@ -55,7 +55,7 @@ func (s *Server) handleLookupPackageDocs(ctx context.Context, req *sdk.CallToolR
 	}
 	if !isCurated(args.Package) {
 		return toolError(fmt.Sprintf(
-			"package %q is not in the curated set. Curated packages: %s",
+			"package %q is not in the curated set or one of its modules. Curated packages: %s",
 			args.Package, strings.Join(curated.Packages, ", "),
 		)), nil, nil
 	}
@@ -112,29 +112,49 @@ func (s *Server) handleLookupPackageDocs(ctx context.Context, req *sdk.CallToolR
 	}, out, nil
 }
 
+// packagePattern is a plain Go import path. The path is interpolated
+// into a shell command, so isCurated requires it before any prefix
+// match: no spaces, quotes, $, ; or other shell characters.
+var packagePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$`)
+
+// isCurated reports whether pkg is a curated package or another package
+// in a curated package's module (monitoringpb next to monitoring/apiv3,
+// cloud.google.com/go/logging next to logadmin). Those modules are all
+// in the image's prewarmed module cache.
 func isCurated(pkg string) bool {
+	if !packagePattern.MatchString(pkg) || strings.Contains(pkg, "..") {
+		return false
+	}
 	for _, p := range curated.Packages {
-		if p == pkg {
+		root := moduleRoot(p)
+		if pkg == p || pkg == root || strings.HasPrefix(pkg, root+"/") {
 			return true
 		}
 	}
 	return false
 }
 
-const lookupPackageDocsDescription = `Return godoc-style documentation for a curated Go package (optionally scoped to a specific symbol). Runs 'go doc <package> [symbol]' inside the sandbox against the prewarmed module cache — no build, no network, subsecond. Use when writing execute_go_code snippets and you need to check a function signature, method set, or constant name that isn't in your prior knowledge.
+// moduleRoot approximates a curated package's module path:
+// cloud.google.com/go/<name> for the Cloud client libraries, else the
+// first two elements (google.golang.org/api, k8s.io/client-go).
+func moduleRoot(pkg string) string {
+	n := 2
+	if strings.HasPrefix(pkg, "cloud.google.com/go/") {
+		n = 3
+	}
+	parts := strings.Split(pkg, "/")
+	if len(parts) <= n {
+		return pkg
+	}
+	return strings.Join(parts[:n], "/")
+}
 
-Curated set (only these packages are supported):
+// lookupPackageDocsDescription lists curated.Packages itself, so the
+// tool never advertises a different set than isCurated allows.
+var lookupPackageDocsDescription = `Return godoc-style documentation for a curated Go package (optionally scoped to a specific symbol). Runs 'go doc <package> [symbol]' inside the sandbox against the prewarmed module cache — no build, no network, subsecond. Use when writing execute_go_code snippets and you need to check a function signature, method set, or constant name that isn't in your prior knowledge.
 
-  cloud.google.com/go/storage
-  cloud.google.com/go/bigquery
-  cloud.google.com/go/compute/apiv1
-  cloud.google.com/go/container/apiv1
-  cloud.google.com/go/secretmanager/apiv1
-  google.golang.org/api/option
-  k8s.io/client-go/kubernetes
-  k8s.io/client-go/tools/clientcmd
-  k8s.io/client-go/dynamic
-  k8s.io/client-go/tools/watch
-  k8s.io/apimachinery/pkg/apis/meta/v1
+Curated set; other packages in the same modules work too, such as the *pb request types (monitoringpb, tracepb) and cloud.google.com/go/logging:
+
+  ` + strings.Join(curated.Packages, "\n  ") + `
 
 The 'symbol' argument, when provided, narrows the output to that name (e.g. 'Client', 'Client.Bucket', 'NewClient'). Must be a plain Go identifier — no shell metacharacters.`
