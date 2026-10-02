@@ -1,81 +1,88 @@
 # kode-gopher
 
-A Go-native take on Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/), specialized for Google Cloud. An MCP server (and CLI) that ships a Go program into a sandboxed GKE pod, compiles and runs it against the real `cloud.google.com/go/...` SDKs with forwarded credentials, and returns a discriminated structured result.
+A Go-native take on Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/), for Google Cloud. kode-gopher is an MCP server (and a CLI). The model writes an ordinary Go program against the real `cloud.google.com/go/...` SDKs, and kode-gopher compiles it and runs it in a sandboxed Kubernetes pod. It returns a structured result.
 
-The wedge: in Go, the LLM's "tool surface" already exists as importable packages — `cloud.google.com/go/storage`, `cloud.google.com/go/compute/apiv1`, BigQuery, GKE, Secret Manager — and the model has seen plenty of real code that uses them. So instead of generating typed stubs from MCP tool schemas (Cloudflare's TS approach), we let the model write a normal Go program and execute it. One agent step → many GCP API calls → one structured result back.
+Why Go: the model's tool surface already exists as importable packages, and the model has seen plenty of real code that uses them. Those packages include `cloud.google.com/go/storage`, Compute, BigQuery, GKE and `k8s.io/client-go`. So instead of generating typed stubs from tool schemas, as Cloudflare's TypeScript version does, the model writes a normal program. One agent step can make many API calls and return one result.
 
-## Status
-
-Pre-alpha. Shipped through Slice 4 of [`docs/plan.md`](./docs/plan.md):
-
-- **CLI** (`kode-gopher {exec,serve,auth status,version}`). `exec <file.go>` and `serve` accept a snippet declaring `func run(ctx context.Context) (any, error)` (wrapped mode) or a full `package main` program (verbatim). Wrapper captures error / panic / json-marshal failure into a discriminated `result.json`. `auth status` reports the ambient identity kode-gopher will forward. `--context` flag on both `exec` and `serve` pins a kubeconfig context instead of inheriting ambient `kubectl config current-context`.
-- **MCP server** (`kode-gopher serve`) over stdio using `github.com/modelcontextprotocol/go-sdk`. Three tools:
-  - `execute_go_code(code | files, extra_imports?)` — build+run Go in the sandbox. `code` is single-file; `files` is `map[path -> source]` for multi-file snippets with helper subpackages.
-  - `gcp_auth_status()` — report the sandbox's credential identity (mode, credential type, email, project).
-  - `lookup_package_docs(package, symbol?)` — `go doc` for curated packages against the prewarmed cache, subsecond.
-  One long-lived `sandbox.Session` per MCP session: per process over stdio; per `Mcp-Session-Id` with `--transport=http` (streamable HTTP; `--auth=static` for one operator token, or `--auth=oauth` for kode-gopher's own OAuth 2.1 server fronting Google sign-in, so snippets run as the signed-in user; claim leases so a crashed server's sandboxes expire, per-user cap); mutex-serialized tool calls; `/app` reset between calls (caches survive); retry-once on `ErrSessionDead` so a pod eviction mid-call self-heals.
-- **Sandbox backend**: own thin wrapper at `internal/sandbox/` over `sigs.k8s.io/agent-sandbox/clients/go/sandbox`. Prewarmed image (`ghcr.io/gke-demos/kode-gopher/sandbox`, published by CI under a content-derived tag the GKE overlay pins; the in-pod server is our own `cmd/sandbox-server`) bakes GCP SDK + `k8s.io/client-go` into `$GOCACHE`/`$GOMODCACHE`; the tidied prewarm `go.mod` is preserved at `/opt/kode-gopher-base/` and the executor bootstraps each snippet's `/app/go.mod` from it so version selection is reproducible and builds cache-hit. `PerAttemptTimeout` is 3 minutes (was implicit 60 s from the upstream default).
-- **Credentials** unified as `creds.Source` — Materialize forwards ADC + env into the sandbox; Identity parses ADC and calls the OAuth2 userinfo endpoint for `authorized_user` creds (cached). `OAuthUser` carries a signed-in user's (or client-credentials client's) Google access token per request (OAuth mode). `Minted` and `Service` serve short-lived tokens, from kode-gopher's own ADC or an impersonated service account, to each run through the sandbox's metadata emulator.
-- **Substrates**: verified end-to-end on local `kind` and on a real GKE Autopilot cluster with the agent-sandbox addon + gVisor isolation. Both the direct-CLI and the MCP paths diff cleanly against `gcloud storage buckets list`; the MCP smoketest also exercises the GKE-composition and multi-file paths.
-- **Generated LLM prompt**: `make prompts` regenerates `internal/prompts/{system.md,description.go}` from `internal/curated.Packages`, keeping the LLM system prompt and the `execute_go_code` tool description in lockstep with the curated set.
-
-Planned slices in [`docs/plan.md`](./docs/plan.md):
-
-- **Slice 3** — full GKE deployment story (formalize Artifact Registry push, Workload Identity binding docs; largely done opportunistically).
-- **Slice 5** — HTTP/SSE transport. Scope gated on five explicit design questions (session topology, auth, per-end-user creds, streaming, deployment topology).
-- **Slice 6** — Yaegi (interpreter) runtime. **Shelved**: packaging worked, but the interpreter silently produces wrong output for common Go idioms (see `docs/decisions.md`). The PoC stays in `experiments/yaegi-poc/`.
-- **Slice 8** — agent-sandbox v1.0: v1.0.4 client, v1beta1 manifests, claims on a named warm pool, upstream's Go sandbox-router on both kind and GKE. Sandboxes get no KSA token anywhere; snippets reach GKE clusters, including their own, with forwarded Google credentials.
-- **Slice 7** — fast compiled path. Measured: a warm build under gVisor is ~7-8 s, and the ~55 s seen on GKE came from a stale published sandbox image. Shipped: our own CI-published, pinned sandbox image; `go mod tidy` only when the lockfile misses; C3-first sandbox nodes. The GCS snippet is ~4.4 s end to end on GKE.
-
-## Try it locally
-
-Prereqs: `kind`, `kubectl`, `docker`, `gcloud`, `go`, `python3`, plus a GCP project the executing user can list buckets in.
-
-```bash
-gcloud auth application-default login
-export GOOGLE_CLOUD_PROJECT=your-project
-
-# Bootstrap local kind cluster + agent-sandbox + sandbox-router +
-# kode-gopher-sandbox image + SandboxTemplate, then exercise both
-# verbatim and wrapped test snippets via the direct CLI, diffing each
-# against `gcloud storage buckets list`.
-./scripts/smoketest-kind.sh --compare
-
-# Same exercise via the MCP layer: spawn `kode-gopher serve` and
-# speak MCP over its stdio (no LLM required — the smoketest binary is
-# itself an MCP client).
-./scripts/smoketest-mcp.sh --target=kind --compare
+```
+MCP client ──► kode-gopher serve ──► sandbox pod (agent-sandbox, gVisor on GKE)
+ (Claude Code,    execute_go_code       go build + run, with the Google Cloud SDKs
+  Claude Desktop, gcp_auth_status       and client-go precompiled; credentials are
+  Gemini CLI, …)  lookup_package_docs   your own, or the signed-in user's
 ```
 
-For GKE (assumes a cluster with the agent-sandbox addon enabled + an `ap-gke-sandbox` context):
+A typical snippet:
 
-```bash
-./scripts/smoketest-gke.sh --compare
-./scripts/smoketest-mcp.sh --target=gke --compare
-```
+```go
+package snippet
 
-Once `kode-gopher serve` works locally, point any MCP client (Claude Desktop, Gemini CLI, custom) at it. Sample config snippet for Claude Desktop:
+import (
+	"context"
 
-```json
-{
-  "mcpServers": {
-    "kode-gopher": {
-      "command": "/path/to/bin/kode-gopher",
-      "args": ["serve", "--namespace=codemode"]
-    }
-  }
+	"cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
+)
+
+func run(ctx context.Context) (any, error) {
+	c, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	var names []string
+	it := c.Buckets(ctx, "my-project")
+	for {
+		b, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, b.Name)
+	}
+	return names, nil
 }
 ```
 
-All smoketests are idempotent and reuse infra across runs.
+Whatever `run` returns comes back to the model as JSON. Errors and panics come back as structured results too, and compile errors come back as `phase=build`. On GKE with gVisor, a snippet like this takes about 4 seconds end to end.
 
-## What's here
+## Two ways to run it
+
+| | On your machine | Shared, in a GKE cluster |
+|---|---|---|
+| Transport | stdio: your MCP client starts `kode-gopher serve` | streamable HTTP at `https://<host>/mcp` |
+| Sandboxes | in a kind or GKE cluster your kubectl reaches | in the same cluster as kode-gopher |
+| Snippets run as | you (your ADC) | each signed-in Google user, a service account, or kode-gopher's own Workload Identity |
+| Guide | [docs/getting-started.md](./docs/getting-started.md) | [docs/deploy.md](./docs/deploy.md) |
+
+## Status
+
+Pre-alpha, and no release has been tagged yet. Built and verified so far:
+- **Local mode:** the CLI and the stdio MCP server, on kind and on GKE Autopilot with gVisor.
+- **Fast builds:** a CI-published sandbox image with the SDKs precompiled.
+- **In-cluster server:** a GKE Gateway with a managed certificate, a static token or OAuth 2.1 sign-in fronting Google (with Google's Agent Identity credential vault), service-account mode, and the `client_credentials` grant for automation. Real Google sign-in from Claude Code has been tested on GKE.
+- **CI:** presubmits, a kind end-to-end test, and signed multi-arch images.
+
+What's next, and the evidence behind each step, are in [docs/plan.md](./docs/plan.md) and [docs/decisions.md](./docs/decisions.md).
+
+## Docs
+
+| | |
+|---|---|
+| [docs/getting-started.md](./docs/getting-started.md) | install the CLI, set up a sandbox cluster, connect your MCP client |
+| [docs/deploy.md](./docs/deploy.md) | deploy the shared server: static token, Google sign-in, service accounts, operations |
+| [docs/design.md](./docs/design.md) | architecture, execution modes, result protocol, sandbox boundary |
+| [docs/design-in-cluster.md](./docs/design-in-cluster.md) | the in-cluster server's design: sessions, OAuth, credentials in the sandbox, network policy |
+| [docs/plan.md](./docs/plan.md) | slice-by-slice build plan and status |
+| [docs/decisions.md](./docs/decisions.md) | the log of judgment calls and measurements |
+| [docs/release-process.md](./docs/release-process.md) | versions, tags, release notes |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | presubmits, CI, commit style |
+
+## Repository layout
 
 | path | what |
 | --- | --- |
-| [`docs/design.md`](./docs/design.md) | architecture, transport + runtime modes, auth, result protocol, sandbox boundary |
-| [`docs/plan.md`](./docs/plan.md) | slice-by-slice build sequence (0-6; 0-4 shipped, 5-6 planned) |
-| [`docs/decisions.md`](./docs/decisions.md) | append-only log of judgment calls per slice |
 | [`cmd/kode-gopher`](./cmd/kode-gopher) | the CLI binary — subcommands `exec` and `serve` |
 | [`cmd/mcp-smoketest`](./cmd/mcp-smoketest) | programmatic MCP client; spawns `kode-gopher serve` (stdio or streamable HTTP) and exercises `execute_go_code` end-to-end; `--offline` runs the checks that need no Google credentials |
 | [`cmd/sandbox-server`](./cmd/sandbox-server) | the in-pod HTTP server (agent-sandbox runtime protocol on :8888), built into the sandbox image |

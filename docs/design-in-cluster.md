@@ -1,6 +1,6 @@
 # In-cluster kode-gopher: design
 
-Status: proposed, 2026-09-30. Answers the open questions in `docs/plan.md > Slice 5` for an in-cluster deployment.
+Status: built (slice 9, steps 1-5), 2026-10-02. This doc answers the open questions in `docs/plan.md > Slice 5` for an in-cluster deployment, and records how each step was built and checked. To deploy kode-gopher, see [deploy.md](./deploy.md).
 
 ## Goal
 
