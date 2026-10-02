@@ -230,7 +230,7 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 	// IsError if the program crashed (non-zero exit) or the wrapper
 	// reported a non-ok result. The LLM uses IsError to decide
 	// whether to react.
-	isErr := outcome.ExitCode != 0 || (outcome.Result != nil && outcome.Result.Kind != "ok")
+	isErr := outcome.ExitCode != 0 || outcome.ResultError != "" || (outcome.Result != nil && outcome.Result.Kind != "ok")
 
 	return &sdk.CallToolResult{
 		Content: []sdk.Content{&sdk.TextContent{Text: renderText(out)}},

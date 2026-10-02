@@ -22,8 +22,8 @@ limitations under the License.
 //
 // --offline runs only the checks that need no Google credentials (CI's
 // kind e2e, dev/ci/e2e/kind.sh): a snippet that calls no Google API, a
-// build error, a panic, gcp_auth_status reporting mode=none, and
-// lookup_package_docs.
+// build error, a panic, a large result and one over the size limit,
+// gcp_auth_status reporting mode=none, and lookup_package_docs.
 //
 // Usage:
 //
@@ -405,13 +405,14 @@ func connect(ctx context.Context, serverPath, namespace string) (*sdk.ClientSess
 // executeGoCodeOutput mirrors the server's ExecuteGoCodeOutput so we
 // can decode the StructuredContent of each call.
 type executeGoCodeOutput struct {
-	Phase      string `json:"phase"`
-	Mode       string `json:"mode"`
-	ExitCode   int    `json:"exit_code"`
-	DurationMS int64  `json:"duration_ms"`
-	Tidied     bool   `json:"tidied"`
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
+	Phase      string   `json:"phase"`
+	Mode       string   `json:"mode"`
+	ExitCode   int      `json:"exit_code"`
+	DurationMS int64    `json:"duration_ms"`
+	Tidied     bool     `json:"tidied"`
+	Warnings   []string `json:"warnings"`
+	Stdout     string   `json:"stdout"`
+	Stderr     string   `json:"stderr"`
 	Result     *struct {
 		Kind    string          `json:"kind"`
 		Value   json.RawMessage `json:"value"`

@@ -134,6 +134,12 @@ type Request struct {
 	// Options.InCluster: the agent-sandbox client's Run sends only the
 	// command, so this call goes straight to the sandbox's Service.
 	Credentials *Credentials
+
+	// Raw returns stdout and stderr whole, skipping the head+tail
+	// truncation meant for output a model reads. For output code
+	// parses, such as the result file: a truncated JSON document is
+	// no longer JSON.
+	Raw bool
 }
 
 // Result is what Execute produced, post-truncation.
@@ -301,8 +307,12 @@ func (s *Session) Execute(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: run: %w", classifySessionErr(err))
 	}
-	stdout, outTrunc := truncate(raw.Stdout, s.truncate)
-	stderr, errTrunc := truncate(raw.Stderr, s.truncate)
+	tc := s.truncate
+	if req.Raw {
+		tc = TruncateConfig{}
+	}
+	stdout, outTrunc := truncate(raw.Stdout, tc)
+	stderr, errTrunc := truncate(raw.Stderr, tc)
 	return &Result{
 		Stdout:          stdout,
 		Stderr:          stderr,

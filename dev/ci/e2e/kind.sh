@@ -30,7 +30,8 @@
 #   5. cmd/mcp-smoketest --offline against `kode-gopher serve`, over
 #      stdio and over streamable HTTP: a snippet that compiles a
 #      Google Cloud package from the prewarmed cache, a build error, a
-#      panic, gcp_auth_status reporting mode=none, lookup_package_docs.
+#      panic, large results, gcp_auth_status reporting mode=none,
+#      lookup_package_docs.
 #
 # The cluster is deleted on exit, unless it existed before or KEEP=1.
 # On failure it prints pods, events and controller logs first.
