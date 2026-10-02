@@ -22,4 +22,5 @@ Everything built so far, before the first tagged release. Slice details are in [
 
 ### Fixed
 
+- **Large results no longer vanish.** A snippet's result over 16 KiB was cut by the same truncation as stdout, failed to parse, and was silently dropped, so `execute_go_code` reported `exit_code: 0` with no `result`. Results now come back whole up to 256 KiB. A larger result, or a `result.json` that isn't valid JSON, comes back as a warning that says why, and the call is flagged as an error.
 - With `--auth=static`, a 401 from `/mcp` now carries `WWW-Authenticate: Bearer`, as RFC 6750 requires.
