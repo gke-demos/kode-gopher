@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-03
+
+Sandboxes on a shared server now reach only an allowlist of hosts, and deploys are more reliable. **Upgrading a shared server needs one cluster change first:** `gcloud container clusters update <cluster> --location <location> --enable-fqdn-network-policy`. On Autopilot, GKE then restarts the nodes over a few hours. Documentation: https://gke-demos.github.io/kode-gopher/.
+
 ### Security
 
 - **Sandboxes on a shared server reach only an allowlist of hosts.** They used to reach any public IP address. The `gke-server` overlays now allow DNS, plus port 443 to `*.googleapis.com`, the Go module proxy and the cluster region's GKE control-plane endpoints, through a GKE FQDN network policy (`manifests/components/egress-allowlist`). `EGRESS_ALLOW` adds hosts. The cluster needs `--enable-fqdn-network-policy`, and `scripts/deploy-gke-server.sh` checks for it. Local use (kind, the plain `gke` overlay) is unchanged.
