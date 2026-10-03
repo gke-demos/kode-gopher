@@ -36,3 +36,8 @@ resources:
   - deployment.yaml
   - gateway.yaml
   - networkpolicy.yaml
+
+# Sandbox egress by hostname instead of to every public IP. Needs the
+# cluster's FQDN network policy feature; see the component.
+components:
+  - ../../components/egress-allowlist

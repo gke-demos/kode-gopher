@@ -1,0 +1,39 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# What sandboxes may reach, besides DNS. scripts/deploy-gke-server.sh
+# appends the cluster region's GKE control-plane DNS endpoints
+# (*.<region>.gke.goog) and EGRESS_ALLOW.
+#
+# A pattern matches exactly one label: *.googleapis.com matches
+# storage.googleapis.com, not a.b.googleapis.com or googleapis.com.
+apiVersion: networking.gke.io/v1alpha1
+kind: FQDNNetworkPolicy
+metadata:
+  name: kode-gopher-sandbox-egress
+spec:
+  podSelector:
+    matchLabels:
+      sandbox: kode-gopher-sandbox
+  egress:
+    - matches:
+        # Every Google Cloud API, and oauth2.googleapis.com for a
+        # forwarded ADC file's token refresh.
+        - pattern: "*.googleapis.com"
+        # go mod tidy, for imports outside the precompiled modules.
+        - name: proxy.golang.org
+        - name: sum.golang.org
+      ports:
+        - protocol: TCP
+          port: 443

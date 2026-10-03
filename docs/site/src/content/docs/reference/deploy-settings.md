@@ -19,6 +19,7 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 | `KUBECONFIG`, `CONTEXT` | current context | The cluster to deploy to. `CONTEXT` is passed as `--context`, so your current context is unchanged. |
 | `PROJECT` | `gcloud config get-value project` | Project for the static IP and the certificate. |
 | `IMAGE` | `ghcr.io/gke-demos/kode-gopher/server:main` | The server image. Pin a `main-<short-sha>` or version tag for a stable deployment. |
+| `EGRESS_ALLOW` | none | Extra hosts sandboxes may reach on port 443, comma-separated: `api.example.com,*.example.org`. A `*.` pattern matches one label. Always allowed: `*.googleapis.com`, `proxy.golang.org`, `sum.golang.org` and `*.<cluster-region>.gke.goog`. |
 | `KG_HOST` | `<ip-with-dashes>.sslip.io` | Public hostname. For your own domain, point a DNS A record at the IP; see [Operations](/deploy/operations/#your-own-domain). |
 
 ## Static token only
@@ -36,7 +37,7 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 | `ALLOW_GROUPS` | none | Comma-separated Google group emails to admit. Nested membership counts. |
 | `CUSTODY` | `vault` | Where users' Google grants are kept: `vault` (Google's Agent Identity credential vault) or `sealed` (inside kode-gopher's own refresh tokens). |
 | `VAULT_AUTH_PROVIDER` | none | With vault custody: `projects/<p>/locations/<l>/authProviders/<name>`. |
-| `CLIENTS_FILE` | none | Pre-registered clients, a JSON array. A client with a `service_account` uses the `client_credentials` grant; see [Clients](/deploy/clients/). |
+| `CLIENTS_FILE` | the existing Secret's | Pre-registered clients, a JSON array. Without it, a redeploy keeps the clients already deployed. A client with a `service_account` uses the `client_credentials` grant; see [Clients](/deploy/clients/). |
 | `OPEN_REGISTRATION` | `true` | Accept clients that register themselves (DCR, Client ID Metadata Documents), not only pre-registered ones. |
 
 At least one of `ALLOW_DOMAINS` and `ALLOW_GROUPS` must be set: an empty allow-list admits no one.

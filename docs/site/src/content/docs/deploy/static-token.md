@@ -19,7 +19,7 @@ claude mcp add --transport http kode-gopher https://<host>/mcp --header "Authori
 ```
 
 :::caution
-Anyone with the token can run code as the identity below. Share it like a password. To rotate it, delete the Secret and rerun the deploy script.
+Anyone with the token can run code as the identity below. Share it like a password. To rotate it, delete the Secret and rerun the deploy script, which creates a new token and restarts kode-gopher to load it.
 :::
 
 ## Who snippets run as
