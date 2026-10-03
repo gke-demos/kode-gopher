@@ -44,6 +44,10 @@
 #                         (gcloud config get-value project)
 #   IMAGE                 server image (ghcr.io/gke-demos/kode-gopher/server:main)
 #   KG_HOST               public hostname (<ip with dashes>.sslip.io)
+#   EGRESS_ALLOW          extra hosts sandboxes may reach on 443, comma-
+#                         separated ("api.example.com,*.example.org"); always
+#                         allowed: *.googleapis.com, the Go module proxy, and
+#                         the cluster region's *.<region>.gke.goog
 #   SERVICE_ACCOUNT       run snippets as this Google service account
 #                         (--credentials=service) instead of kode-gopher's
 #                         own Workload Identity; the KSA needs
@@ -52,7 +56,8 @@
 #                         carries its user's or client's own token
 #   oauth only:
 #   GOOGLE_CLIENT_FILE    the Google OAuth client JSON (required on first deploy)
-#   CLIENTS_FILE          pre-registered clients JSON (none); a client with
+#   CLIENTS_FILE          pre-registered clients JSON (kept from the existing
+#                         Secret if unset, else none); a client with
 #                         a service_account uses the client_credentials
 #                         grant, and the KSA needs
 #                         roles/iam.serviceAccountTokenCreator on that account
@@ -71,7 +76,7 @@ while [[ $# -gt 0 ]]; do
     --auth)    AUTH="$2"; shift 2;;
     --auth=*)  AUTH="${1#--auth=}"; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '17,63p' "$0"; exit 0;;
+    -h|--help) sed -n '17,68p' "$0"; exit 0;;
     *)         echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -109,6 +114,12 @@ PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
 k get ns "$NS" >/dev/null || die "namespace $NS not found"
 k get crd sandboxtemplates.extensions.agents.x-k8s.io >/dev/null \
   || die "agent-sandbox CRDs not installed"
+# Sandbox egress is an allowlist of hostnames (manifests/components/
+# egress-allowlist), which needs GKE's FQDN network policies.
+k get crd fqdnnetworkpolicies.networking.gke.io >/dev/null 2>&1 \
+  || die "FQDN network policy isn't enabled on this cluster; sandbox egress needs it: gcloud container clusters update <cluster> --location <location> --enable-fqdn-network-policy (on Autopilot GKE then restarts the nodes, which can take a few hours)"
+REGION="$(k get nodes -o jsonpath='{.items[0].metadata.labels.topology\.kubernetes\.io/region}')"
+[[ -n "$REGION" ]] || die "couldn't read the cluster's region from its nodes"
 echo "project=$PROJECT  auth=$AUTH  image=$IMAGE"
 
 step "static IP kode-gopher-ip"
@@ -161,6 +172,12 @@ else
       k -n "$NS" get secret kode-gopher-oauth -o jsonpath='{.data.google-client\.json}' \
         | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/google-client.json"
     fi
+    # Keep the pre-registered clients too, unless CLIENTS_FILE replaces
+    # them: a routine redeploy mustn't drop them.
+    if [[ -z "${CLIENTS_FILE:-}" ]]; then
+      k -n "$NS" get secret kode-gopher-oauth -o jsonpath='{.data.clients\.json}' \
+        | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/clients.json"
+    fi
   else
     python3 -c 'import base64, secrets; print("k1", base64.b64encode(secrets.token_bytes(32)).decode())' > "$tmp/keyring"
   fi
@@ -170,7 +187,7 @@ else
   [[ -s "$tmp/google-client.json" ]] || die "GOOGLE_CLIENT_FILE is required on first deploy"
   if [[ -n "${CLIENTS_FILE:-}" ]]; then
     cp "$CLIENTS_FILE" "$tmp/clients.json"
-  else
+  elif [[ ! -s "$tmp/clients.json" ]]; then
     echo '[]' > "$tmp/clients.json"
   fi
   k -n "$NS" create secret generic kode-gopher-oauth \
@@ -181,19 +198,37 @@ else
   echo "kode-gopher-oauth applied (Google client redirect URIs must include $ISSUER/callback)"
 fi
 
+# kode-gopher reads its Secret only at startup: hash it into the pod
+# template, so a changed token, client list or keyring rolls the pod.
+secret=kode-gopher-token
+[[ "$AUTH" == oauth ]] && secret=kode-gopher-oauth
+CONFIG_HASH="$(k -n "$NS" get secret "$secret" -o jsonpath='{.data}' 2>/dev/null | sha256sum | cut -c1-16)"
+
 step "render"
 work="$(mktemp -d)"
 trap 'rm -rf "$work" "${tmp:-}"' EXIT
-python3 - "$work" "$OVERLAY" "$IMAGE" "$AUTH" "$ISSUER" "$PROJECT" "$APISERVER" <<'PY'
-import json, os, sys
+python3 - "$work" "$OVERLAY" "$IMAGE" "$AUTH" "$ISSUER" "$PROJECT" "$APISERVER" "$REGION" "$CONFIG_HASH" <<'PY'
+import json, os, re, sys
 
-work, overlay, image, auth, issuer, project, apiserver = sys.argv[1:8]
+work, overlay, image, auth, issuer, project, apiserver, region, config_hash = sys.argv[1:10]
 env = os.environ.get
 
 ops = [{"op": "test", "path": "/spec/egress/2/to/0/ipBlock/cidr", "value": "192.0.2.1/32"},
        {"op": "replace", "path": "/spec/egress/2/to",
         "value": [{"ipBlock": {"cidr": ip + ("/128" if ":" in ip else "/32")}} for ip in apiserver.split()]}]
 patches = [{"target": {"kind": "NetworkPolicy", "name": "kode-gopher"}, "patch": json.dumps(ops)}]
+
+# Sandbox egress allowlist: the region's GKE control-plane DNS
+# endpoints, so snippets reach clusters as docs/design.md describes,
+# plus EGRESS_ALLOW ("host" or "*.domain", comma-separated).
+hosts = ["*." + region + ".gke.goog"] + [h.strip() for h in env("EGRESS_ALLOW", "").split(",") if h.strip()]
+host_re = re.compile(r"^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$")
+for h in hosts:
+    if not host_re.match(h):
+        sys.exit("EGRESS_ALLOW: %r isn't a hostname or *.domain pattern" % h)
+ops = [{"op": "add", "path": "/spec/egress/0/matches/-",
+        "value": {"pattern": h} if h.startswith("*.") else {"name": h}} for h in hosts]
+patches.append({"target": {"kind": "FQDNNetworkPolicy", "name": "kode-gopher-sandbox-egress"}, "patch": json.dumps(ops)})
 
 args = []
 if auth == "oauth":
@@ -203,7 +238,9 @@ if auth == "oauth":
                       ("--oauth-vault-auth-provider", "VAULT_AUTH_PROVIDER")]:
         if env(var):
             args.append(flag + "=" + env(var))
-ops = [{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": image}]
+# The pod template has no annotations of its own, so this sets the map.
+ops = [{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": image},
+       {"op": "add", "path": "/spec/template/metadata/annotations", "value": {"kode-gopher/config-hash": config_hash}}]
 if env("SERVICE_ACCOUNT"):
     ops += [{"op": "test", "path": "/spec/template/spec/containers/0/args/5", "value": "--credentials=access-token"},
             {"op": "replace", "path": "/spec/template/spec/containers/0/args/5", "value": "--credentials=service"}]

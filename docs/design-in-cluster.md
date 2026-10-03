@@ -265,7 +265,7 @@ This also fixes `docs/design.md > workload`, which predates slice 8's policy.
 
 | Policy | Ingress | Egress |
 |---|---|---|
-| sandbox (template, existing) | from `app=sandbox-router` **and** `app=kode-gopher`, :8888 | unchanged: DNS, public IPs |
+| sandbox (template, existing) | from `app=sandbox-router` **and** `app=kode-gopher`, :8888 | DNS; on the in-cluster server, :443 to an FQDN allowlist (`manifests/components/egress-allowlist`), else public IPs |
 | kode-gopher (new) | from the Gateway's proxy ranges and GFE health checks, :8080 | DNS, API server, sandbox pods :8888, Google APIs |
 | router (new) | none except port-forward (loopback) | sandboxes :8888, DNS |
 

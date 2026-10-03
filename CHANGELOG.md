@@ -4,8 +4,14 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Security
+
+- **Sandboxes on a shared server reach only an allowlist of hosts.** They used to reach any public IP address. The `gke-server` overlays now allow DNS, plus port 443 to `*.googleapis.com`, the Go module proxy and the cluster region's GKE control-plane endpoints, through a GKE FQDN network policy (`manifests/components/egress-allowlist`). `EGRESS_ALLOW` adds hosts. The cluster needs `--enable-fqdn-network-policy`, and `scripts/deploy-gke-server.sh` checks for it. Local use (kind, the plain `gke` overlay) is unchanged.
+
 ### Fixed
 
+- **Secret changes now reach kode-gopher on redeploy.** It reads its Secret only at startup, and the deploy script didn't restart it when only the Secret changed. So a rotated static token, a new `CLIENTS_FILE` or a new Google client file had no effect until something else changed the pod. The deploy script now hashes the Secret into the pod template.
+- **A redeploy without `CLIENTS_FILE` keeps the pre-registered clients.** It used to reset them to none, unlike the keyring and Google client file, which it kept.
 - **Deploying a new sandbox image reaches new sessions straight away.** agent-sandbox doesn't replace a warm pool's unclaimed sandboxes when the template changes, so after an upgrade new sessions kept getting old-image sandboxes. `scripts/deploy-gke-server.sh` now replaces them when their image differs from the template's, and waits for one on the new image, through the new `scripts/refresh-warm-pool.sh`. The kind scripts use it too. ([#41](https://github.com/gke-demos/kode-gopher/issues/41))
 
 ## [0.2.0] - 2026-10-02

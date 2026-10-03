@@ -28,9 +28,11 @@ Either way, the sandbox never holds a long-lived credential. Each run gets a sho
   ```bash
   gcloud container clusters create-auto kode-gopher \
     --location=us-central1 --release-channel=rapid --enable-agent-sandbox
+  gcloud container clusters update kode-gopher \
+    --location=us-central1 --enable-fqdn-network-policy
   kubectl create namespace codemode
   ```
-  Autopilot includes Workload Identity, gVisor and the Gateway API.
+  Autopilot includes Workload Identity, gVisor and the Gateway API. FQDN network policy lets sandboxes reach only an allowlist of hostnames (see [Sandbox isolation](/concepts/isolation/)). Autopilot can only turn it on after creation, and GKE then restarts the nodes, which can take a few hours. The deploy script won't run without it.
 - **A clone of the repository** (`git clone https://github.com/gke-demos/kode-gopher`). The deploy script applies its manifests.
 - **`kubectl`, `gcloud` and `python3`,** and permission to create a global static IP address and an SSL certificate in the project, and to apply manifests in `codemode`.
 

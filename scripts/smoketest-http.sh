@@ -25,6 +25,8 @@
 #   - execute_go_code runs a snippet that gets a token from the
 #     sandbox's metadata emulator, with no ADC file in the sandbox (in
 #     service mode, as the service account);
+#   - sandbox egress: Google APIs and the Go module proxy are reachable,
+#     example.com and github.com aren't;
 #   - a second session, and DELETE ends both.
 # Under --auth=oauth, the parts that need no browser:
 #   - protected-resource and authorization-server metadata;
@@ -63,7 +65,7 @@ while [[ $# -gt 0 ]]; do
     --url)          BASE="$2"; shift 2;;
     --file)         FILE="$2"; shift 2;;
     --client-credentials) CC_FILE="$2"; shift 2;;
-    -h|--help)      sed -n '17,52p' "$0"; exit 0;;
+    -h|--help)      sed -n '17,53p' "$0"; exit 0;;
     *)              echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -231,6 +233,31 @@ func run(ctx context.Context) (any, error) {
 '''
 
 
+EGRESS_SNIPPET = '''package kode_gopher_snippet
+
+import (
+	"context"
+	"net"
+	"time"
+)
+
+// Which hosts the sandbox can open a connection to on 443.
+func run(ctx context.Context) (any, error) {
+	out := map[string]string{}
+	for _, h := range []string{"storage.googleapis.com", "proxy.golang.org", "example.com", "github.com"} {
+		c, err := net.DialTimeout("tcp", h+":443", 5*time.Second)
+		if err != nil {
+			out[h] = "blocked"
+			continue
+		}
+		c.Close()
+		out[h] = "open"
+	}
+	return out, nil
+}
+'''
+
+
 def session_checks(token, modes):
     """initialize, tools, gcp_auth_status in modes, the metadata-emulator
     snippet, the --file snippet, a second session and DELETE."""
@@ -252,6 +279,15 @@ def session_checks(token, modes):
     if who.get("mode") == "service":
         check("execute_go_code: runs as " + str(who.get("email")), v.get("email") == who.get("email"), v)
     print("      build_ms=%s duration_ms=%s value=%s" % ((st or {}).get("build_ms"), (st or {}).get("duration_ms"), json.dumps(v)))
+
+    # The deployment's sandboxes may reach only the egress allowlist
+    # (manifests/components/egress-allowlist).
+    st, raw = tool(s, "execute_go_code", {"code": EGRESS_SNIPPET})
+    v = (((st or {}).get("result") or {}).get("value")) or {}
+    check("egress: Google APIs and the Go proxy open",
+          v.get("storage.googleapis.com") == "open" and v.get("proxy.golang.org") == "open", v or raw)
+    check("egress: other hosts blocked",
+          v.get("example.com") == "blocked" and v.get("github.com") == "blocked", v or raw)
 
     if extra:
         st, raw = tool(s, "execute_go_code", {"code": open(extra).read()})

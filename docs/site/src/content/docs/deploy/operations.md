@@ -37,9 +37,11 @@ The warm pool doesn't pick up a new sandbox image on its own: agent-sandbox keep
   - refresh tokens last 30 days, renewed by each use;
   - authorization codes last 1 minute.
 - **Network:**
-  - kode-gopher's egress is limited to DNS, the sandboxes, the API server, the GKE metadata server and public HTTPS;
+  - sandboxes may reach DNS and, on port 443, only the egress allowlist (see [Sandbox isolation](/concepts/isolation/)); add hosts with `EGRESS_ALLOW`;
+  - kode-gopher's own egress is limited to DNS, the sandboxes, the API server, the GKE metadata server and public HTTPS (it fetches clients' metadata documents from anywhere);
   - its ingress is limited to Google's load balancer ranges;
   - the sandbox router accepts no in-cluster traffic at all.
+- **Secret changes:** kode-gopher reads its Secret at startup. The deploy script restarts it whenever the Secret changes: a new token, `CLIENTS_FILE` or Google client file.
 
 ## Logs
 
