@@ -31,14 +31,14 @@ What the presubmits check:
 | build, vet, `gofmt -s` | `build.sh`, `vet.sh`, `fmt.sh` |
 | unit tests with `-race -timeout 5m` | `test.sh` |
 | golangci-lint v2.12.1 ([config](./dev/tools/.golangci.yml)) | `lint.sh` |
-| `go mod tidy` is a no-op | `mod-tidy.sh` |
+| `go mod tidy` is a no-op, in the root module and in `internal/prewarm` | `mod-tidy.sh` |
 | Go pins (go.mod `toolchain`, `sandbox/Dockerfile`, workflows) agree | `go-toolchain.sh` |
 | `internal/prompts/` regenerated (`make prompts`) | `prompts.sh` |
 | GKE overlay pins the current sandbox image (`make sandbox-pin`) | `sandbox-pin.sh` |
 | `dev/release/notes.sh` extracts release notes from `CHANGELOG.md` | `release-notes.sh` |
 | README and docs site carry no drift-prone counts or version pins (`dev/tools/docs-lint`) | `docs-lint.sh` |
 | no agent attribution | `agent-attribution.sh` |
-| govulncheck | `vuln.sh` |
+| govulncheck: the root module (reachable code), and `internal/prewarm`, the sandbox image's dependencies (any imported package) | `vuln.sh` |
 
 PRs that touch Go code, the sandbox image, `manifests/base` or `testdata/` also run an end-to-end test on a kind cluster ([`.github/workflows/e2e-kind.yml`](./.github/workflows/e2e-kind.yml)). It has no Google credentials, so it covers what runs without them: `kode-gopher serve`, over stdio and over streamable HTTP, building and running snippets in real agent-sandbox sandboxes. It takes a few minutes, needs docker and kind, and isn't part of `make presubmit`. To run it locally:
 

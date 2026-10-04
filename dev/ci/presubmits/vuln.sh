@@ -13,8 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# vuln.sh: presubmit: govulncheck over the whole module. Symbol-level
-# analysis, so only vulnerabilities in code kode-gopher reaches fail.
+# vuln.sh: presubmit: govulncheck over the root module and over
+# internal/prewarm, the nested module whose dependencies are baked into
+# the sandbox image.
+#
+# The root module gets symbol-level analysis: only vulnerabilities in
+# code kode-gopher reaches fail. The prewarm module gets package-level
+# analysis: its main.go only blank-imports the curated packages, while
+# snippets may call any of their APIs, so a vulnerability anywhere in
+# an imported package counts. It's scanned with the root module's
+# toolchain pin, which is what sandbox/Dockerfile builds with (the
+# go-toolchain presubmit keeps them equal), so standard-library
+# findings match the image.
 #
 # These scripts are exactly what CI runs (.github/workflows/ci.yml);
 # run dev/ci/presubmits/all.sh locally before pushing.
@@ -24,4 +34,7 @@ set -euo pipefail
 cd "$(repo_root)"
 
 ensure_tool govulncheck golang.org/x/vuln/cmd/govulncheck@latest
-exec govulncheck ./...
+govulncheck ./...
+
+toolchain="$(awk '/^toolchain/ {print $2}' go.mod)"
+(cd internal/prewarm && GOTOOLCHAIN="$toolchain" govulncheck -scan package ./...)

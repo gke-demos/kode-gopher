@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Security
+
+- **The sandbox image's dependencies are patched and scanned.** The prewarmed modules every snippet builds against carried six known vulnerabilities (gRPC, OpenTelemetry SDK, `golang.org/x/text`). They're bumped to fixed versions: gRPC v1.83.2, OpenTelemetry v1.45.0, `x/text` v0.41.0. CI now runs govulncheck (package level, with the image's Go version) and `go mod tidy -diff` on `internal/prewarm` too. Before, it only checked the root module.
+
 ## [0.3.0] - 2026-10-03
 
 Sandboxes on a shared server now reach only an allowlist of hosts, and deploys are more reliable. **Upgrading a shared server needs one cluster change first:** `gcloud container clusters update <cluster> --location <location> --enable-fqdn-network-policy`. On Autopilot, GKE then restarts the nodes over a few hours. Documentation: https://gke-demos.github.io/kode-gopher/.
