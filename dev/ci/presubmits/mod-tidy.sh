@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# mod-tidy.sh: presubmit: `go mod tidy` must be a no-op.
+# mod-tidy.sh: presubmit: `go mod tidy` must be a no-op, in the root
+# module and in internal/prewarm (the sandbox image's lockfile).
 #
 # Compares file content before and after rather than using `git diff`,
 # so legitimately uncommitted go.mod edits during local development
@@ -38,6 +39,11 @@ if ! cmp -s go.mod "$tmp/go.mod" || ! cmp -s go.sum "$tmp/go.sum"; then
   cp "$tmp/go.mod" go.mod
   cp "$tmp/go.sum" go.sum
   echo "go.mod / go.sum are not tidy. Run 'go mod tidy' locally and commit the result." >&2
+  exit 1
+fi
+# internal/prewarm is its own module (the sandbox image's lockfile).
+if ! (cd internal/prewarm && go mod tidy -diff); then
+  echo "internal/prewarm's go.mod / go.sum are not tidy. Run 'go mod tidy' in internal/prewarm, then 'make sandbox-pin', and commit the result." >&2
   exit 1
 fi
 echo "mod-tidy: OK"
