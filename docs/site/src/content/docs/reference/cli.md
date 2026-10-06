@@ -88,13 +88,15 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
   -oauth-allow-domains string
     	oauth: comma-separated Workspace domains (the ID token's hd claim) to admit
   -oauth-allow-groups string
-    	oauth: comma-separated Google group emails to admit (nested membership counts; needs the Groups Reader admin role)
+    	oauth: comma-separated Google group emails to admit (nested membership counts; the checking identity needs the Groups Reader admin role)
   -oauth-clients-file string
     	oauth: JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris}, or {client_id, client_secret, service_account} for the client_credentials grant)
   -oauth-custody string
     	oauth: who holds users' Google grants: vault (Agent Identity credential vault) or sealed (inside kode-gopher's refresh token) (default "vault")
   -oauth-google-client-file string
     	oauth: kode-gopher's Google OAuth client, as the JSON the Cloud console downloads
+  -oauth-groups-service-account string
+    	oauth: check --oauth-allow-groups as this Google service account (impersonated; it holds Groups Reader) instead of kode-gopher's own identity, which as a Workload Identity principal has no email to assign the role to
   -oauth-issuer string
     	oauth: public base URL of this server, e.g. https://kg.example.com (the MCP endpoint is <issuer>/mcp)
   -oauth-keyring-file string

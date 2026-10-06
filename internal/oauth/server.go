@@ -265,3 +265,11 @@ func (c *replayCache) use(id string, exp time.Time) bool {
 	c.seen[id] = exp
 	return true
 }
+
+// release forgets id, for a use that failed for a transient reason, so
+// the client's retry isn't refused as a replay.
+func (c *replayCache) release(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.seen, id)
+}

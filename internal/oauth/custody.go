@@ -80,6 +80,14 @@ type google struct {
 // errReauth is a grant that can't be renewed without the user.
 var errReauth = errors.New("the Google grant is gone; sign in again")
 
+// reauthError is a specific reason the user must sign in again; it
+// matches errReauth, so a refresh answers invalid_grant (sign in) rather
+// than server_error (retry).
+type reauthError string
+
+func (e reauthError) Error() string        { return string(e) }
+func (e reauthError) Is(target error) bool { return target == errReauth }
+
 // SealedCustody is the fallback: the Google refresh token travels inside
 // kode-gopher's own sealed refresh token, held by the MCP client.
 type SealedCustody struct{}
@@ -206,9 +214,9 @@ func (v *VaultCustody) grant(ctx context.Context, g *google, u User, r *vaultRet
 	for attempt := 0; ; attempt++ {
 		switch {
 		case r.ConsentRejected != nil:
-			return nil, errors.New("vault: the user declined consent")
+			return nil, reauthError("vault: the user declined consent")
 		case r.Success == nil || r.Success.Token == "":
-			return nil, errors.New("vault: no token (consent pending)")
+			return nil, reauthError("vault: no token (consent pending)")
 		}
 		tok := r.Success.Token
 		ti, err := g.client.tokenInfo(ctx, g.hc, tok)
@@ -218,10 +226,10 @@ func (v *VaultCustody) grant(ctx context.Context, g *google, u User, r *vaultRet
 		if ti.Sub != u.Sub {
 			// Someone other than the signed-in user consented. The vault
 			// has no delete API, so this only refuses.
-			return nil, errors.New("vault: the stored Google grant belongs to a different account than the one signed in")
+			return nil, reauthError("vault: the stored Google grant belongs to a different account than the one signed in")
 		}
 		if !slices.Contains(ti.Scopes, scopeCloudPlatform) {
-			return nil, errors.New("vault: token lacks the Google Cloud scope")
+			return nil, reauthError("vault: token lacks the Google Cloud scope")
 		}
 		if time.Until(ti.Expiry) >= minGoogleTokenLife {
 			return &Grant{AccessToken: tok, Expiry: ti.Expiry}, nil

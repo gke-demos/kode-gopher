@@ -63,6 +63,9 @@
 #                         roles/iam.serviceAccountTokenCreator on that account
 #   ALLOW_DOMAINS         comma-separated hd domains to admit
 #   ALLOW_GROUPS          comma-separated Google groups to admit
+#   GROUPS_SERVICE_ACCOUNT  service account that checks ALLOW_GROUPS (holds
+#                         the Groups Reader admin role; kode-gopher needs
+#                         roles/iam.serviceAccountTokenCreator on it)
 #   CUSTODY               vault or sealed (vault)
 #   VAULT_AUTH_PROVIDER   projects/<p>/locations/<l>/authProviders/<name>
 #   OPEN_REGISTRATION     true or false (true)
@@ -76,7 +79,7 @@ while [[ $# -gt 0 ]]; do
     --auth)    AUTH="$2"; shift 2;;
     --auth=*)  AUTH="${1#--auth=}"; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '17,68p' "$0"; exit 0;;
+    -h|--help) sed -n '17,71p' "$0"; exit 0;;
     *)         echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -235,6 +238,7 @@ if auth == "oauth":
     args = ["--oauth-issuer=" + issuer, "--oauth-custody=" + env("CUSTODY", "vault"),
             "--oauth-open-registration=" + env("OPEN_REGISTRATION", "true"), "--project=" + project]
     for flag, var in [("--oauth-allow-domains", "ALLOW_DOMAINS"), ("--oauth-allow-groups", "ALLOW_GROUPS"),
+                      ("--oauth-groups-service-account", "GROUPS_SERVICE_ACCOUNT"),
                       ("--oauth-vault-auth-provider", "VAULT_AUTH_PROVIDER")]:
         if env(var):
             args.append(flag + "=" + env(var))

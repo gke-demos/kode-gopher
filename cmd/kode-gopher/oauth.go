@@ -20,10 +20,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
+	"net/http"
 	"regexp"
 	"slices"
 	"strings"
 
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
 	"github.com/gke-demos/kode-gopher/internal/creds"
@@ -40,6 +43,7 @@ type oauthFlags struct {
 	authProvider *string
 	allowDomains *string
 	allowGroups  *string
+	groupsSA     *string
 	clientsFile  *string
 	openReg      *bool
 	project      *string
@@ -54,7 +58,8 @@ func addOAuthFlags(fs *flag.FlagSet) *oauthFlags {
 		custody:      fs.String("oauth-custody", "vault", "oauth: who holds users' Google grants: vault (Agent Identity credential vault) or sealed (inside kode-gopher's refresh token)"),
 		authProvider: fs.String("oauth-vault-auth-provider", "", "oauth, vault custody: projects/<p>/locations/<l>/authProviders/<name>"),
 		allowDomains: fs.String("oauth-allow-domains", "", "oauth: comma-separated Workspace domains (the ID token's hd claim) to admit"),
-		allowGroups:  fs.String("oauth-allow-groups", "", "oauth: comma-separated Google group emails to admit (nested membership counts; needs the Groups Reader admin role)"),
+		allowGroups:  fs.String("oauth-allow-groups", "", "oauth: comma-separated Google group emails to admit (nested membership counts; the checking identity needs the Groups Reader admin role)"),
+		groupsSA:     fs.String("oauth-groups-service-account", "", "oauth: check --oauth-allow-groups as this Google service account (impersonated; it holds Groups Reader) instead of kode-gopher's own identity, which as a Workload Identity principal has no email to assign the role to"),
 		clientsFile:  fs.String("oauth-clients-file", "", "oauth: JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris}, or {client_id, client_secret, service_account} for the client_credentials grant)"),
 		openReg:      fs.Bool("oauth-open-registration", true, "oauth: accept dynamically registered (DCR) and Client ID Metadata Document clients, not just pre-registered ones"),
 		project:      fs.String("project", "", "oauth: project reported to snippets as GOOGLE_CLOUD_PROJECT"),
@@ -96,8 +101,11 @@ func (f *oauthFlags) server(ctx context.Context) (*oauth.Server, error) {
 		return nil, fmt.Errorf("--oauth-custody must be vault or sealed, got %q", *f.custody)
 	}
 	allow := &oauth.AllowList{Domains: splitList(*f.allowDomains), Groups: splitList(*f.allowGroups)}
+	if *f.groupsSA != "" && len(allow.Groups) == 0 {
+		return nil, fmt.Errorf("--oauth-groups-service-account needs --oauth-allow-groups")
+	}
 	if len(allow.Groups) > 0 {
-		hc, err := google.DefaultClient(ctx, "https://www.googleapis.com/auth/cloud-identity.groups.readonly")
+		hc, err := groupsClient(ctx, *f.groupsSA)
 		if err != nil {
 			return nil, fmt.Errorf("cloud identity client: %w", err)
 		}
@@ -137,4 +145,37 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// serviceAccountRE is a Google service account email.
+var serviceAccountRE = regexp.MustCompile(`(?i)^[^@\s]+@[^@\s]+\.gserviceaccount\.com$`)
+
+// groupsScope is all the group checks need, on either identity.
+const groupsScope = "https://www.googleapis.com/auth/cloud-identity.groups.readonly"
+
+// groupsClient is the Cloud Identity client for group allow-list
+// checks: as the impersonated service account when one is set, else as
+// kode-gopher's own identity.
+func groupsClient(ctx context.Context, serviceAccount string) (*http.Client, error) {
+	if serviceAccount == "" {
+		return google.DefaultClient(ctx, groupsScope)
+	}
+	if !serviceAccountRE.MatchString(serviceAccount) {
+		return nil, fmt.Errorf("--oauth-groups-service-account %q isn't a service account email (…@….gserviceaccount.com)", serviceAccount)
+	}
+	imp, err := creds.NewImpersonator(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ts := imp.TokenSource(serviceAccount, groupsScope)
+	// Mint once in the background, so a missing token-creator grant shows
+	// in the log at startup rather than as the first sign-in's
+	// server_error, without holding startup up. Not fatal: the grant may
+	// still be propagating.
+	go func() {
+		if _, err := ts.Token(); err != nil {
+			log.Printf("oauth: can't yet impersonate %s for group checks (sign-ins checking groups will fail until it works): %v", serviceAccount, err)
+		}
+	}()
+	return &http.Client{Transport: &oauth2.Transport{Source: ts}}, nil
 }

@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"html"
 	"io"
 	"net/http"
@@ -381,5 +382,44 @@ func TestMetadata(t *testing.T) {
 	m := get("/.well-known/oauth-authorization-server")
 	if m["issuer"] != e.srv.URL || m["registration_endpoint"] != e.srv.URL+"/register" || m["client_id_metadata_document_supported"] != true {
 		t.Errorf("AS metadata: %v", m)
+	}
+}
+
+// A transient allow-list failure during refresh must not spend the
+// refresh token: the client retries with the same one and succeeds.
+func TestRefreshSurvivesTransientAllowListError(t *testing.T) {
+	e := newTestEnv(t, true, nil)
+	e.google.signInAs = bob
+	id := e.register()
+	v := rand.Text() + rand.Text()
+	first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+	form := url.Values{"grant_type": {"refresh_token"}, "client_id": {id}, "refresh_token": {first.Refresh}}
+
+	e.as.cfg.Allow.cache = nil // force a group check
+	e.groups.failNext = 1
+	if r := e.token(form, "", ""); r.Error != "server_error" {
+		t.Fatalf("refresh during a directory outage: %q, want server_error", r.Error)
+	}
+	if r := e.token(form, "", ""); r.status != http.StatusOK || r.Access == "" {
+		t.Errorf("retry with the same refresh token: %+v, want new tokens", r)
+	}
+	if r := e.token(form, "", ""); r.Error != "invalid_grant" {
+		t.Errorf("third use after a successful refresh: %q, want invalid_grant", r.Error)
+	}
+}
+
+// Vault grants only the user can repair are errReauth (a refresh says
+// invalid_grant: sign in again), not transient (server_error: retry).
+func TestPermanentVaultErrorsAreReauth(t *testing.T) {
+	for _, e := range []error{
+		reauthError("vault: the user declined consent"),
+		reauthError("vault: token lacks the Google Cloud scope"),
+	} {
+		if !errors.Is(e, errReauth) {
+			t.Errorf("%v doesn't match errReauth", e)
+		}
+	}
+	if errors.Is(errors.New("vault retrieve: HTTP 503"), errReauth) {
+		t.Error("a transient vault error matches errReauth")
 	}
 }
