@@ -136,6 +136,16 @@ func (i *Impersonator) Token(_ context.Context, email string) (*oauth2.Token, er
 	return ts.Token()
 }
 
+// TokenSource is an oauth2.TokenSource for email, sharing Token's cache,
+// for clients that take one (oauth2.NewClient).
+func (i *Impersonator) TokenSource(email string) oauth2.TokenSource {
+	return tokenSourceFunc(func() (*oauth2.Token, error) { return i.Token(context.Background(), email) })
+}
+
+type tokenSourceFunc func() (*oauth2.Token, error)
+
+func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
+
 // impersonated is one account's token source. oauth2.TokenSource has no
 // context, so each mint gets its own timeout.
 type impersonated struct {

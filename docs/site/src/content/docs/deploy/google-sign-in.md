@@ -68,13 +68,24 @@ What to get right:
 ## 3. Decide who's admitted
 
 - **`ALLOW_DOMAINS`:** Workspace domains, matched against the ID token's `hd` claim, not the email address.
-- **`ALLOW_GROUPS`:** Google group emails. Nested membership counts.
+- **`ALLOW_GROUPS`:** Google group emails. Nested membership counts. Needs the setup below.
 
 Set either or both. An empty allow-list admits no one. Membership is checked at sign-in and at every token refresh, so removing someone takes effect within 15 minutes.
 
-:::caution[Groups need an extra grant]
-kode-gopher checks group membership through Cloud Identity, as its own identity, which needs the Groups Reader admin role in your Workspace. That role is assigned by email, and kode-gopher's Workload Identity principal doesn't have one, so it's not clear how to grant it. This is untested. Domains work with no extra setup.
-:::
+### Groups
+
+kode-gopher checks group membership with the Cloud Identity Groups API. The calling identity needs the **Groups Reader** admin role in each Workspace whose groups it checks. Admin roles are assigned by email, and kode-gopher's Workload Identity principal has none, so it checks groups as a dedicated service account that it impersonates for that call only:
+
+```bash
+gcloud services enable cloudidentity.googleapis.com
+gcloud iam service-accounts create kode-gopher-groups
+gcloud iam service-accounts add-iam-policy-binding kode-gopher-groups@<PROJECT_ID>.iam.gserviceaccount.com \
+  --role=roles/iam.serviceAccountTokenCreator --member=<principal>
+```
+
+Then, in each Workspace's Admin console, as a super admin: **Account > Admin roles > Groups Reader > Admins > Assign service accounts**, and enter the service account's email. The account needs no project roles.
+
+Deploy with `ALLOW_GROUPS=<group emails>` and `GROUPS_SERVICE_ACCOUNT=kode-gopher-groups@<PROJECT_ID>.iam.gserviceaccount.com`. A group can belong to a different Workspace than the user, as long as the service account holds Groups Reader there too.
 
 ## 4. Deploy
 

@@ -35,6 +35,7 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 | `GOOGLE_CLIENT_FILE` | none (required on first deploy) | The Google OAuth client JSON downloaded from the console. |
 | `ALLOW_DOMAINS` | none | Comma-separated Workspace domains to admit, matched against the ID token's `hd` claim. |
 | `ALLOW_GROUPS` | none | Comma-separated Google group emails to admit. Nested membership counts. |
+| `GROUPS_SERVICE_ACCOUNT` | none | The service account that checks `ALLOW_GROUPS`: it holds the Groups Reader admin role, and kode-gopher impersonates it. See [Groups](/deploy/google-sign-in/#groups). |
 | `CUSTODY` | `vault` | Where users' Google grants are kept: `vault` (Google's Agent Identity credential vault) or `sealed` (inside kode-gopher's own refresh tokens). |
 | `VAULT_AUTH_PROVIDER` | none | With vault custody: `projects/<p>/locations/<l>/authProviders/<name>`. |
 | `CLIENTS_FILE` | the existing Secret's | Pre-registered clients, a JSON array. Without it, a redeploy keeps the clients already deployed. A client with a `service_account` uses the `client_credentials` grant; see [Clients](/deploy/clients/). |

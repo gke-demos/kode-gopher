@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **Group allow lists work on GKE.** `serve --oauth-groups-service-account` (`GROUPS_SERVICE_ACCOUNT` for the deploy script) checks `--oauth-allow-groups` as a service account that kode-gopher impersonates for that call. That service account holds the Groups Reader admin role. kode-gopher's own Workload Identity principal has no email, so it can't be assigned an admin role. ([#36](https://github.com/gke-demos/kode-gopher/issues/36))
+
 ## [0.3.1] - 2026-10-05
 
 A security patch: the sandbox image's dependencies are updated to fix six known vulnerabilities. Redeploy to pick up the new sandbox image; the deploy script replaces the warm pool's old sandboxes itself.
