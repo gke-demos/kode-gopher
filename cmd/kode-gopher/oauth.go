@@ -147,6 +147,9 @@ func splitList(s string) []string {
 	return out
 }
 
+// serviceAccountRE is a Google service account email.
+var serviceAccountRE = regexp.MustCompile(`(?i)^[^@\s]+@[^@\s]+\.gserviceaccount\.com$`)
+
 // groupsScope is all the group checks need, on either identity.
 const groupsScope = "https://www.googleapis.com/auth/cloud-identity.groups.readonly"
 
@@ -157,7 +160,7 @@ func groupsClient(ctx context.Context, serviceAccount string) (*http.Client, err
 	if serviceAccount == "" {
 		return google.DefaultClient(ctx, groupsScope)
 	}
-	if !strings.HasSuffix(serviceAccount, ".gserviceaccount.com") {
+	if !serviceAccountRE.MatchString(serviceAccount) {
 		return nil, fmt.Errorf("--oauth-groups-service-account %q isn't a service account email (…@….gserviceaccount.com)", serviceAccount)
 	}
 	imp, err := creds.NewImpersonator(ctx)
@@ -165,11 +168,14 @@ func groupsClient(ctx context.Context, serviceAccount string) (*http.Client, err
 		return nil, err
 	}
 	ts := imp.TokenSource(serviceAccount, groupsScope)
-	// Mint once now, so a missing token-creator grant shows at startup
-	// rather than as the first sign-in's server_error. Not fatal: the
-	// grant may still be propagating.
-	if _, err := ts.Token(); err != nil {
-		log.Printf("oauth: can't yet impersonate %s for group checks (sign-ins checking groups will fail until it works): %v", serviceAccount, err)
-	}
+	// Mint once in the background, so a missing token-creator grant shows
+	// in the log at startup rather than as the first sign-in's
+	// server_error, without holding startup up. Not fatal: the grant may
+	// still be propagating.
+	go func() {
+		if _, err := ts.Token(); err != nil {
+			log.Printf("oauth: can't yet impersonate %s for group checks (sign-ins checking groups will fail until it works): %v", serviceAccount, err)
+		}
+	}()
 	return &http.Client{Transport: &oauth2.Transport{Source: ts}}, nil
 }

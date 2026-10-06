@@ -87,7 +87,11 @@ Then, in each Workspace's Admin console, as a super admin: **Account > Admin rol
 
 Deploy with `ALLOW_GROUPS=<group emails>` and `GROUPS_SERVICE_ACCOUNT=kode-gopher-groups@<PROJECT_ID>.iam.gserviceaccount.com`. At startup kode-gopher mints one token for the account and logs a warning if it can't, for example because the token-creator grant is missing or still propagating.
 
-**Workspace editions.** Cloud Identity's one-call transitive membership check is only available on Google Workspace Enterprise and Cloud Identity Premium. On other editions (Business Starter, Standard, ...) it answers 403, and kode-gopher falls back to walking the group and its nested groups with the membership list, which every edition has. The walk stops at 10 levels and 100 groups. A nested group the service account can't read makes the check fail (`server_error`) rather than answer "not a member".
+**Workspace editions.** Cloud Identity's one-call transitive membership check is only available on Google Workspace Enterprise and Cloud Identity Premium. On other editions (Business Starter, Standard and Plus) it answers 403, and kode-gopher walks the group and its nested groups with the membership list instead, which every edition has:
+- It checks each group's direct members before its nested groups, and a match anywhere admits.
+- Users and service accounts match by email. Devices, shared drives and organization-wide entries ("everyone in the organization") aren't expanded.
+- If a nested group can't be read (no Groups Reader in its Workspace, deleted, or from an external identity source), or nesting goes past 10 levels or 100 groups, members found elsewhere still get in. Only accounts not found anywhere get `server_error` instead of a refusal, since they might be in the group that couldn't be read.
+- Membership lists are cached for 5 minutes, so one walk serves every user checked against the same groups.
 
 :::note
 Groups in another Workspace than the user's, such as a group in a second domain you administer, should work if the service account holds Groups Reader in the group's Workspace and that group allows external members. This hasn't been verified yet.

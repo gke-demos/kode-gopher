@@ -207,7 +207,8 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 	// The token is claimed above, so two concurrent refreshes can't both
 	// use it. A transient failure below (server_error) gives the claim
 	// back, or the client's retry would be refused as a replay and its
-	// user signed out; a final refusal (invalid_grant) keeps it spent.
+	// user signed out; a final refusal (invalid_grant: not allowed, or a
+	// grant only the user can restore, errReauth) keeps it spent.
 	if err := s.cfg.Allow.admit(ctx, p.User); err != nil {
 		log.Printf("oauth: refresh refused for %s: %v", p.User.Email, err)
 		if errors.Is(err, errNotAllowed) {

@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -136,7 +137,7 @@ func (i *Impersonator) TokenSource(email string, scopes ...string) oauth2.TokenS
 	if len(scopes) == 0 {
 		scopes = []string{cloudPlatformScope}
 	}
-	return i.source(email, scopes)
+	return i.source(email, slices.Clone(scopes))
 }
 
 func (i *Impersonator) source(email string, scopes []string) oauth2.TokenSource {

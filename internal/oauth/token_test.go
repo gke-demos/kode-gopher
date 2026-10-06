@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"html"
 	"io"
 	"net/http"
@@ -404,5 +405,21 @@ func TestRefreshSurvivesTransientAllowListError(t *testing.T) {
 	}
 	if r := e.token(form, "", ""); r.Error != "invalid_grant" {
 		t.Errorf("third use after a successful refresh: %q, want invalid_grant", r.Error)
+	}
+}
+
+// Vault grants only the user can repair are errReauth (a refresh says
+// invalid_grant: sign in again), not transient (server_error: retry).
+func TestPermanentVaultErrorsAreReauth(t *testing.T) {
+	for _, e := range []error{
+		reauthError("vault: the user declined consent"),
+		reauthError("vault: token lacks the Google Cloud scope"),
+	} {
+		if !errors.Is(e, errReauth) {
+			t.Errorf("%v doesn't match errReauth", e)
+		}
+	}
+	if errors.Is(errors.New("vault retrieve: HTTP 503"), errReauth) {
+		t.Error("a transient vault error matches errReauth")
 	}
 }
