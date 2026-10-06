@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-05
+
+A security patch: the sandbox image's dependencies are updated to fix six known vulnerabilities. Redeploy to pick up the new sandbox image; the deploy script replaces the warm pool's old sandboxes itself.
+
 ### Security
 
 - **The sandbox image's dependencies are patched and scanned.** The prewarmed modules every snippet builds against carried six known vulnerabilities (gRPC, OpenTelemetry SDK, `golang.org/x/text`). They're bumped to fixed versions: gRPC v1.83.2, OpenTelemetry v1.45.0, `x/text` v0.41.0. CI now runs govulncheck (package level, with the image's Go version) and `go mod tidy -diff` on `internal/prewarm` too. Before, it only checked the root module.
