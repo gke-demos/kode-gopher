@@ -52,10 +52,10 @@ func TestGroupsAsServiceAccount(t *testing.T) {
 			http.Error(w, `{"error":{"code":403,"message":"caller lacks Groups Reader"}}`, http.StatusForbidden)
 			return
 		}
-		switch {
-		case r.URL.Path == "/groups:lookup":
+		switch r.URL.Path {
+		case "/groups:lookup":
 			writeJSON(w, http.StatusOK, map[string]string{"name": "groups/abc"})
-		case r.URL.Path == "/groups/abc/memberships:checkTransitiveMembership":
+		case "/groups/abc/memberships:checkTransitiveMembership":
 			writeJSON(w, http.StatusOK, map[string]bool{"hasMembership": strings.Contains(r.URL.RawQuery, "in%40example.com")})
 		default:
 			http.NotFound(w, r)
