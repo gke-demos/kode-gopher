@@ -6,7 +6,11 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ### Added
 
-- **Group allow lists work on GKE.** `serve --oauth-groups-service-account` (`GROUPS_SERVICE_ACCOUNT` for the deploy script) checks `--oauth-allow-groups` as a service account that kode-gopher impersonates for that call. That service account holds the Groups Reader admin role. kode-gopher's own Workload Identity principal has no email, so it can't be assigned an admin role. ([#36](https://github.com/gke-demos/kode-gopher/issues/36))
+- **Group allow lists work on GKE.** `serve --oauth-groups-service-account` (`GROUPS_SERVICE_ACCOUNT` for the deploy script) checks `--oauth-allow-groups` as a service account that kode-gopher impersonates for that call. That service account holds the Groups Reader admin role. kode-gopher's own Workload Identity principal has no email, so it can't be assigned an admin role. On Workspace editions without Cloud Identity's transitive membership check (Business Starter, Standard), kode-gopher walks nested groups with the membership list instead. ([#36](https://github.com/gke-demos/kode-gopher/issues/36))
+
+### Fixed
+
+- **A failed allow-list check during a token refresh no longer signs the user out.** The refresh token was marked used before the check, so after a transient failure (`server_error`) the client's retry was refused as a replay. Transient failures now leave the token usable.
 
 ## [0.3.1] - 2026-10-05
 

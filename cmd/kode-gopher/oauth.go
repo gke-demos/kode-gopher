@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"slices"
@@ -146,20 +147,29 @@ func splitList(s string) []string {
 	return out
 }
 
+// groupsScope is all the group checks need, on either identity.
+const groupsScope = "https://www.googleapis.com/auth/cloud-identity.groups.readonly"
+
 // groupsClient is the Cloud Identity client for group allow-list
-// checks: as the impersonated service account when one is set (its
-// cloud-platform token is accepted by groups.lookup and
-// checkTransitiveMembership), else as kode-gopher's own identity.
+// checks: as the impersonated service account when one is set, else as
+// kode-gopher's own identity.
 func groupsClient(ctx context.Context, serviceAccount string) (*http.Client, error) {
 	if serviceAccount == "" {
-		return google.DefaultClient(ctx, "https://www.googleapis.com/auth/cloud-identity.groups.readonly")
+		return google.DefaultClient(ctx, groupsScope)
 	}
-	if !strings.Contains(serviceAccount, "@") {
-		return nil, fmt.Errorf("--oauth-groups-service-account %q isn't a service account email", serviceAccount)
+	if !strings.HasSuffix(serviceAccount, ".gserviceaccount.com") {
+		return nil, fmt.Errorf("--oauth-groups-service-account %q isn't a service account email (…@….gserviceaccount.com)", serviceAccount)
 	}
 	imp, err := creds.NewImpersonator(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return oauth2.NewClient(ctx, imp.TokenSource(serviceAccount)), nil
+	ts := imp.TokenSource(serviceAccount, groupsScope)
+	// Mint once now, so a missing token-creator grant shows at startup
+	// rather than as the first sign-in's server_error. Not fatal: the
+	// grant may still be propagating.
+	if _, err := ts.Token(); err != nil {
+		log.Printf("oauth: can't yet impersonate %s for group checks (sign-ins checking groups will fail until it works): %v", serviceAccount, err)
+	}
+	return &http.Client{Transport: &oauth2.Transport{Source: ts}}, nil
 }

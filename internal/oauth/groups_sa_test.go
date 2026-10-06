@@ -18,6 +18,7 @@ package oauth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,13 +33,26 @@ import (
 
 // TestGroupsAsServiceAccount: with --oauth-groups-service-account, the
 // group check calls Cloud Identity with the impersonated account's
-// token, minted once and reused (the composition cmd/kode-gopher's
-// groupsClient builds).
+// token, minted with the read-only groups scope only, once, and reused
+// (the composition cmd/kode-gopher's groupsClient builds).
 func TestGroupsAsServiceAccount(t *testing.T) {
 	const sa = "kode-gopher-groups@proj.iam.gserviceaccount.com"
 	var mints atomic.Int32
+	const groupsScope = "https://www.googleapis.com/auth/cloud-identity.groups.readonly"
 	iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		email := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/projects/-/serviceAccounts/"), ":generateAccessToken")
+		var body struct {
+			Scope []string `json:"scope"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Scope) != 1 || body.Scope[0] != groupsScope {
+			t.Errorf("minted with scopes %v, want only %s", body.Scope, groupsScope)
+		}
+		if email != sa {
+			// kode-gopher has no token-creator grant on this account.
+			http.Error(w, `{"error":{"code":403,"message":"Permission 'iam.serviceAccounts.getAccessToken' denied"}}`, http.StatusForbidden)
+			return
+		}
 		mints.Add(1)
 		writeJSON(w, http.StatusOK, map[string]string{
 			"accessToken": "tok-for-" + email,
@@ -65,7 +79,10 @@ func TestGroupsAsServiceAccount(t *testing.T) {
 
 	imp := &creds.Impersonator{Client: iam.Client(), Endpoint: iam.URL}
 	ctx := context.Background()
-	groups := &CloudIdentityGroups{Client: oauth2.NewClient(ctx, imp.TokenSource(sa)), Endpoint: ci.URL + "/"}
+	client := func(email string) *http.Client {
+		return &http.Client{Transport: &oauth2.Transport{Source: imp.TokenSource(email, groupsScope)}}
+	}
+	groups := &CloudIdentityGroups{Client: client(sa), Endpoint: ci.URL + "/"}
 	for member, want := range map[string]bool{"in@example.com": true, "out@example.com": false} {
 		got, err := groups.IsMember(ctx, "g@example.com", member)
 		if err != nil || got != want {
@@ -76,10 +93,11 @@ func TestGroupsAsServiceAccount(t *testing.T) {
 		t.Errorf("minted %d tokens for three calls, want 1 (cached)", n)
 	}
 
-	// Another account (no Groups Reader) is refused, and the error
-	// reaches the caller rather than reading as "not a member".
-	other := &CloudIdentityGroups{Client: oauth2.NewClient(ctx, imp.TokenSource("other@proj.iam.gserviceaccount.com")), Endpoint: ci.URL + "/"}
-	if ok, err := other.IsMember(ctx, "g@example.com", "in@example.com"); err == nil || ok {
-		t.Errorf("IsMember as another account = %v, %v; want a 403 error", ok, err)
+	// An account kode-gopher can't impersonate: the refused mint reaches
+	// the caller as an error naming it, not as "not a member".
+	other := &CloudIdentityGroups{Client: client("other@proj.iam.gserviceaccount.com"), Endpoint: ci.URL + "/"}
+	ok, err := other.IsMember(ctx, "g@example.com", "in@example.com")
+	if err == nil || ok || !strings.Contains(err.Error(), "impersonate") {
+		t.Errorf("IsMember with a refused mint = %v, %v; want an impersonate error", ok, err)
 	}
 }

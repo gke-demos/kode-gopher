@@ -70,7 +70,7 @@ What to get right:
 - **`ALLOW_DOMAINS`:** Workspace domains, matched against the ID token's `hd` claim, not the email address.
 - **`ALLOW_GROUPS`:** Google group emails. Nested membership counts. Needs the setup below.
 
-Set either or both. An empty allow-list admits no one. Membership is checked at sign-in and at every token refresh, so removing someone takes effect within 15 minutes.
+Set either or both. An empty allow-list admits no one. Membership is checked at sign-in and at every token refresh, and a decision is reused for 5 minutes, so removing someone takes effect within about 20 minutes.
 
 ### Groups
 
@@ -83,9 +83,15 @@ gcloud iam service-accounts add-iam-policy-binding kode-gopher-groups@<PROJECT_I
   --role=roles/iam.serviceAccountTokenCreator --member=<principal>
 ```
 
-Then, in each Workspace's Admin console, as a super admin: **Account > Admin roles > Groups Reader > Admins > Assign service accounts**, and enter the service account's email. The account needs no project roles.
+Then, in each Workspace's Admin console, as a super admin: **Account > Admin roles**, point to **Groups Reader**, then **Assign admin > Assign service accounts**, enter the service account's email, **Add**, **Assign role**. Don't limit the assignment to security groups unless all your groups are security groups. The account needs no project roles, and kode-gopher mints its token with the read-only groups scope only.
 
-Deploy with `ALLOW_GROUPS=<group emails>` and `GROUPS_SERVICE_ACCOUNT=kode-gopher-groups@<PROJECT_ID>.iam.gserviceaccount.com`. A group can belong to a different Workspace than the user, as long as the service account holds Groups Reader there too.
+Deploy with `ALLOW_GROUPS=<group emails>` and `GROUPS_SERVICE_ACCOUNT=kode-gopher-groups@<PROJECT_ID>.iam.gserviceaccount.com`. At startup kode-gopher mints one token for the account and logs a warning if it can't, for example because the token-creator grant is missing or still propagating.
+
+**Workspace editions.** Cloud Identity's one-call transitive membership check is only available on Google Workspace Enterprise and Cloud Identity Premium. On other editions (Business Starter, Standard, ...) it answers 403, and kode-gopher falls back to walking the group and its nested groups with the membership list, which every edition has. The walk stops at 10 levels and 100 groups. A nested group the service account can't read makes the check fail (`server_error`) rather than answer "not a member".
+
+:::note
+Groups in another Workspace than the user's, such as a group in a second domain you administer, should work if the service account holds Groups Reader in the group's Workspace and that group allows external members. This hasn't been verified yet.
+:::
 
 ## 4. Deploy
 

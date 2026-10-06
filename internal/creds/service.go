@@ -96,11 +96,13 @@ func (s *Service) Identity(_ context.Context) (Identity, error) {
 	return Identity{Mode: "service", CredType: "service_account", Email: s.email, ProjectID: s.project}, nil
 }
 
-// Impersonator mints cloud-platform access tokens for Google service
-// accounts with the IAM Credentials API (generateAccessToken). Its
-// Client calls as kode-gopher's own identity, which needs
+// Impersonator mints access tokens for Google service accounts with the
+// IAM Credentials API (generateAccessToken): cloud-platform by default,
+// or narrower scopes through TokenSource. Its Client calls as
+// kode-gopher's own identity, which needs
 // roles/iam.serviceAccountTokenCreator on each account. Tokens are
-// cached per account and reused until minTokenLife before expiry.
+// cached per account and scopes, and reused until minTokenLife before
+// expiry.
 type Impersonator struct {
 	// Client is authorized as kode-gopher (see NewImpersonator).
 	Client *http.Client
@@ -121,36 +123,43 @@ func NewImpersonator(ctx context.Context) (*Impersonator, error) {
 	return &Impersonator{Client: hc}, nil
 }
 
-// Token returns a token for the service account email.
+// Token returns a cloud-platform token for the service account email.
 func (i *Impersonator) Token(_ context.Context, email string) (*oauth2.Token, error) {
+	return i.source(email, []string{cloudPlatformScope}).Token()
+}
+
+// TokenSource is a cached token source for email with the given scopes
+// (cloud-platform if none), for clients that take one. Wrap it in an
+// oauth2.Transport rather than oauth2.NewClient, which would cache it a
+// second time and drop the early refresh.
+func (i *Impersonator) TokenSource(email string, scopes ...string) oauth2.TokenSource {
+	if len(scopes) == 0 {
+		scopes = []string{cloudPlatformScope}
+	}
+	return i.source(email, scopes)
+}
+
+func (i *Impersonator) source(email string, scopes []string) oauth2.TokenSource {
+	key := email + " " + strings.Join(scopes, " ")
 	i.mu.Lock()
+	defer i.mu.Unlock()
 	if i.sources == nil {
 		i.sources = map[string]oauth2.TokenSource{}
 	}
-	ts, ok := i.sources[email]
+	ts, ok := i.sources[key]
 	if !ok {
-		ts = oauth2.ReuseTokenSourceWithExpiry(nil, impersonated{i, email}, minTokenLife)
-		i.sources[email] = ts
+		ts = oauth2.ReuseTokenSourceWithExpiry(nil, impersonated{i, email, scopes}, minTokenLife)
+		i.sources[key] = ts
 	}
-	i.mu.Unlock()
-	return ts.Token()
+	return ts
 }
-
-// TokenSource is an oauth2.TokenSource for email, sharing Token's cache,
-// for clients that take one (oauth2.NewClient).
-func (i *Impersonator) TokenSource(email string) oauth2.TokenSource {
-	return tokenSourceFunc(func() (*oauth2.Token, error) { return i.Token(context.Background(), email) })
-}
-
-type tokenSourceFunc func() (*oauth2.Token, error)
-
-func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
 
 // impersonated is one account's token source. oauth2.TokenSource has no
 // context, so each mint gets its own timeout.
 type impersonated struct {
-	i     *Impersonator
-	email string
+	i      *Impersonator
+	email  string
+	scopes []string
 }
 
 func (s impersonated) Token() (*oauth2.Token, error) {
@@ -161,7 +170,7 @@ func (s impersonated) Token() (*oauth2.Token, error) {
 		base = "https://iamcredentials.googleapis.com"
 	}
 	u := base + "/v1/projects/-/serviceAccounts/" + url.PathEscape(s.email) + ":generateAccessToken"
-	body, _ := json.Marshal(map[string]any{"scope": []string{cloudPlatformScope}, "lifetime": "3600s"})
+	body, _ := json.Marshal(map[string]any{"scope": s.scopes, "lifetime": "3600s"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

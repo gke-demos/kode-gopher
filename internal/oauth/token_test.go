@@ -383,3 +383,26 @@ func TestMetadata(t *testing.T) {
 		t.Errorf("AS metadata: %v", m)
 	}
 }
+
+// A transient allow-list failure during refresh must not spend the
+// refresh token: the client retries with the same one and succeeds.
+func TestRefreshSurvivesTransientAllowListError(t *testing.T) {
+	e := newTestEnv(t, true, nil)
+	e.google.signInAs = bob
+	id := e.register()
+	v := rand.Text() + rand.Text()
+	first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+	form := url.Values{"grant_type": {"refresh_token"}, "client_id": {id}, "refresh_token": {first.Refresh}}
+
+	e.as.cfg.Allow.cache = nil // force a group check
+	e.groups.failNext = 1
+	if r := e.token(form, "", ""); r.Error != "server_error" {
+		t.Fatalf("refresh during a directory outage: %q, want server_error", r.Error)
+	}
+	if r := e.token(form, "", ""); r.status != http.StatusOK || r.Access == "" {
+		t.Errorf("retry with the same refresh token: %+v, want new tokens", r)
+	}
+	if r := e.token(form, "", ""); r.Error != "invalid_grant" {
+		t.Errorf("third use after a successful refresh: %q, want invalid_grant", r.Error)
+	}
+}

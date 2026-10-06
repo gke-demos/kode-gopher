@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -273,15 +274,20 @@ func (v *fakeVault) consent(w http.ResponseWriter, r *http.Request) {
 
 // fakeGroups is a GroupChecker over a fixed membership table.
 type fakeGroups struct {
-	mu      sync.Mutex
-	members map[string]map[string]bool
-	calls   int
+	mu       sync.Mutex
+	members  map[string]map[string]bool
+	calls    int
+	failNext int // fail this many calls (a directory outage)
 }
 
 func (f *fakeGroups) IsMember(_ context.Context, group, member string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	if f.failNext > 0 {
+		f.failNext--
+		return false, errors.New("directory unavailable")
+	}
 	return f.members[group][member], nil
 }
 

@@ -204,11 +204,16 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 		log.Printf("oauth: reused refresh token for %s (client %s)", p.User.Email, p.ClientID)
 		return nil, invalidGrant("refresh token already used")
 	}
+	// The token is claimed above, so two concurrent refreshes can't both
+	// use it. A transient failure below (server_error) gives the claim
+	// back, or the client's retry would be refused as a replay and its
+	// user signed out; a final refusal (invalid_grant) keeps it spent.
 	if err := s.cfg.Allow.admit(ctx, p.User); err != nil {
 		log.Printf("oauth: refresh refused for %s: %v", p.User.Email, err)
 		if errors.Is(err, errNotAllowed) {
 			return nil, invalidGrant(err.Error())
 		}
+		s.used.release("refresh:" + p.JTI)
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't check the allow-list"}
 	}
 	g, err := s.cfg.Custody.refresh(ctx, s.google, p.User, p.Secret, s.continueURI())
@@ -217,6 +222,7 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 	}
 	if err != nil {
 		log.Printf("oauth: %s refresh for %s: %v", s.cfg.Custody.Name(), p.User.Email, err)
+		s.used.release("refresh:" + p.JTI)
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't refresh the Google grant"}
 	}
 	return s.issueTokens(p.User, c.ID, p.Aud, p.Scope, g)

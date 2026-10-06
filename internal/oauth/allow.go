@@ -32,7 +32,7 @@ import (
 
 // allowCacheTTL is how long an allow-list decision is reused. Removing
 // someone from a group takes effect within this plus one access-token
-// lifetime.
+// lifetime (15 min): about 20 minutes.
 const allowCacheTTL = 5 * time.Minute
 
 // AllowList admits users by Workspace domain or Google group. Any match
@@ -99,8 +99,15 @@ type GroupChecker interface {
 }
 
 // CloudIdentityGroups checks membership with the Cloud Identity Groups
-// API, as kode-gopher's own identity (which needs the Groups Reader
-// admin role). Users don't consent to any groups scope.
+// API, as kode-gopher's own identity or a service account it
+// impersonates (either needs the Groups Reader admin role). Users don't
+// consent to any groups scope.
+//
+// checkTransitiveMembership answers in one call, but only for Workspace
+// Enterprise and Cloud Identity Premium; other editions (Business
+// Starter, ...) get 403. Then IsMember walks the group and its nested
+// groups with memberships.list, which every edition has, and stops
+// trying the transitive call.
 type CloudIdentityGroups struct {
 	// Client is authenticated with the
 	// cloud-identity.groups.readonly scope.
@@ -108,9 +115,17 @@ type CloudIdentityGroups struct {
 	// Endpoint defaults to https://cloudidentity.googleapis.com/v1/.
 	Endpoint string
 
-	mu    sync.Mutex
-	names map[string]string // group email -> groups/<id>
+	mu           sync.Mutex
+	names        map[string]string // group email -> groups/<id>
+	noTransitive bool              // checkTransitiveMembership got 403: walk instead
 }
+
+// Limits on a membership walk, against runaway nesting; beyond them the
+// check fails (server_error) rather than answering.
+const (
+	walkMaxDepth  = 10
+	walkMaxGroups = 100
+)
 
 // IsMember implements GroupChecker.
 func (c *CloudIdentityGroups) IsMember(ctx context.Context, group, member string) (bool, error) {
@@ -118,11 +133,30 @@ func (c *CloudIdentityGroups) IsMember(ctx context.Context, group, member string
 	if err != nil {
 		return false, err
 	}
+	c.mu.Lock()
+	walk := c.noTransitive
+	c.mu.Unlock()
+	if !walk {
+		in, err := c.transitive(ctx, name, member)
+		var se *statusError
+		if !errors.As(err, &se) || se.code != http.StatusForbidden {
+			return in, err
+		}
+		// Not this edition (or no rights: then the walk fails too, with
+		// its own 403).
+		c.mu.Lock()
+		c.noTransitive = true
+		c.mu.Unlock()
+	}
+	return c.walk(ctx, name, member)
+}
+
+func (c *CloudIdentityGroups) transitive(ctx context.Context, name, member string) (bool, error) {
 	q := url.Values{"query": {fmt.Sprintf("member_key_id == '%s'", strings.ReplaceAll(member, "'", ""))}}
 	var r struct {
 		HasMembership bool `json:"hasMembership"`
 	}
-	err = c.get(ctx, name+"/memberships:checkTransitiveMembership?"+q.Encode(), &r)
+	err := c.get(ctx, name+"/memberships:checkTransitiveMembership?"+q.Encode(), &r)
 	var se *statusError
 	if errors.As(err, &se) && se.code == http.StatusNotFound {
 		// A member key the directory doesn't know isn't a member.
@@ -132,6 +166,80 @@ func (c *CloudIdentityGroups) IsMember(ctx context.Context, group, member string
 		return false, err
 	}
 	return r.HasMembership, nil
+}
+
+// walk looks for member in the group and, breadth first, in the groups
+// nested in it. A nested group that can't be read is an error, not a
+// "no": the answer would be wrong for its members.
+func (c *CloudIdentityGroups) walk(ctx context.Context, root, member string) (bool, error) {
+	member = strings.ToLower(member)
+	seen := map[string]bool{root: true}
+	level := []string{root}
+	for depth := 0; len(level) > 0; depth++ {
+		if depth >= walkMaxDepth {
+			return false, fmt.Errorf("group nesting deeper than %d levels", walkMaxDepth)
+		}
+		var next []string
+		for _, g := range level {
+			members, err := c.members(ctx, g)
+			if err != nil {
+				return false, err
+			}
+			for _, m := range members {
+				id := strings.ToLower(m.PreferredMemberKey.ID)
+				if m.Type != "GROUP" {
+					if id == member {
+						return true, nil
+					}
+					continue
+				}
+				child, err := c.groupName(ctx, id)
+				if err != nil {
+					return false, fmt.Errorf("nested group %s: %w", id, err)
+				}
+				if !seen[child] {
+					if len(seen) >= walkMaxGroups {
+						return false, fmt.Errorf("more than %d nested groups", walkMaxGroups)
+					}
+					seen[child] = true
+					next = append(next, child)
+				}
+			}
+		}
+		level = next
+	}
+	return false, nil
+}
+
+type membership struct {
+	PreferredMemberKey struct {
+		ID string `json:"id"`
+	} `json:"preferredMemberKey"`
+	Type string `json:"type"`
+}
+
+// members lists a group's direct memberships, all pages.
+func (c *CloudIdentityGroups) members(ctx context.Context, name string) ([]membership, error) {
+	var all []membership
+	token := ""
+	for {
+		q := url.Values{"view": {"FULL"}, "pageSize": {"200"}}
+		if token != "" {
+			q.Set("pageToken", token)
+		}
+		var r struct {
+			Memberships   []membership `json:"memberships"`
+			NextPageToken string       `json:"nextPageToken"`
+		}
+		if err := c.get(ctx, name+"/memberships?"+q.Encode(), &r); err != nil {
+			return nil, err
+		}
+		all = append(all, r.Memberships...)
+		if r.NextPageToken == "" {
+			return all, nil
+		}
+		token = r.NextPageToken
+	}
 }
 
 func (c *CloudIdentityGroups) groupName(ctx context.Context, group string) (string, error) {
