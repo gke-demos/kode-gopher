@@ -193,7 +193,7 @@ The vault and Cloud Identity calls use kode-gopher's own ADC (its Workload Ident
 
 **Consent page.** kode-gopher acts as a proxy for Google, so the spec requires user consent per dynamically registered client: without it, a malicious DCR or CIMD client could ride a user's existing Google session. So DCR and CIMD clients get a kode-gopher page naming the client (and the CIMD URL) and its redirect host, with Continue and Cancel, before Google sign-in. Pre-registered clients skip it.
 
-**Browser binding.** `/authorize` sets a random `kg_auth` cookie (HttpOnly, SameSite=Lax, Secure on https). The consent form and Google `state` carry its hash, and the callback refuses a different browser. Vault consent carries the pending sign-in in a sealed `kg_consent` cookie.
+**Browser binding.** `/authorize` sets a random `kg_auth` cookie (HttpOnly, SameSite=Lax; on https Secure and named `__Host-kg_auth`). The consent form and Google `state` carry its hash, and the callback refuses a different browser. A browser that already has the cookie keeps it, so two sign-ins started in one browser (a retry, a copied link next to the client's tab) don't break each other. The `__Host-` prefix stops that reuse from accepting a value planted over http or from another host. A refused flow says why, on the page and in the log: unreadable, more than 10 minutes old, no cookie, or another sign-in's cookie. Vault consent carries the pending sign-in in a sealed `kg_consent` cookie.
 
 **Sign-in scopes by custody.**
 - Sealed: `openid`, `userinfo.email` and `cloud-platform`, offline. The callback refuses a grant missing `cloud-platform` or the refresh token.

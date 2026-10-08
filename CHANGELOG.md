@@ -10,6 +10,7 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ### Fixed
 
+- **Starting sign-in twice in one browser no longer fails both.** Each start replaced the browser's sign-in cookie, so an earlier tab, or a copied link opened next to the client's own tab, ended on "Sign-in expired". The cookie is now kept across starts, and renewed when you approve kode-gopher's page, and on https it's named `__Host-kg_auth` so it can't be planted. Two sign-ins that both reach the vault's own consent screen still collide; finish one first. A sign-in in progress during the upgrade fails once, since the cookie's name changes. When a sign-in can't continue, the page and the server log now say why: the link is unreadable, it's more than 10 minutes old, this browser didn't start it, or this browser started a different one.
 - **A failed allow-list check during a token refresh no longer signs the user out.** The refresh token was marked used before the check, so after a transient failure (`server_error`) the client's retry was refused as a replay. Transient failures now leave the token usable.
 
 ## [0.3.1] - 2026-10-05

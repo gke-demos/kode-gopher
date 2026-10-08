@@ -102,7 +102,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, r, redirectURI, q.Get("state"), s.cfg.Issuer, aerr)
 		return
 	}
-	browser := s.bindBrowser(w)
+	browser := s.bindBrowser(w, r)
 	if _, ok := s.static[c.ID]; ok {
 		s.toGoogle(w, r, req, browser)
 		return
@@ -146,9 +146,13 @@ func (s *Server) validateAuthRequest(q url.Values, c *client, redirectURI string
 // sign-in, Cancel returns access_denied to the client.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	var b browserBound
-	if s.keys.open(purposeConsent, r.PostFormValue("request"), &b) != nil || time.Now().Unix() > b.Exp || !s.sameBrowser(r, b.Browser) {
-		authPage(w, http.StatusBadRequest, "Sign-in expired", "This sign-in page has expired or was opened in another browser. Start again from your MCP client.")
+	if !s.openBound(w, r, purposeConsent, r.PostFormValue("request"), &b) {
 		return
+	}
+	// Renew the binding cookie: Google sign-in gets a fresh 10 minutes
+	// in the state, and the cookie must last as long.
+	if ck, err := r.Cookie(s.cookieName(cookieBrowser)); err == nil {
+		s.setCookie(w, cookieBrowser, ck.Value)
 	}
 	if r.PostFormValue("action") != "approve" {
 		redirectError(w, r, b.Req.RedirectURI, b.Req.State, s.cfg.Issuer, &authError{"access_denied", "the user declined"})
@@ -175,11 +179,11 @@ func (s *Server) toGoogle(w http.ResponseWriter, r *http.Request, req *authReque
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var b browserBound
-	if s.keys.open(purposeState, q.Get("state"), &b) != nil || time.Now().Unix() > b.Exp || !s.sameBrowser(r, b.Browser) {
-		authPage(w, http.StatusBadRequest, "Sign-in expired", "This sign-in has expired or was started in another browser. Start again from your MCP client.")
+	if !s.openBound(w, r, purposeState, q.Get("state"), &b) {
 		return
 	}
-	s.clearCookie(w, cookieBrowser)
+	// The binding cookie stays: another sign-in started in this browser
+	// may still need it. It expires with the flow.
 	req := &b.Req
 	fail := func(code, desc string) {
 		redirectError(w, r, req.RedirectURI, req.State, s.cfg.Issuer, &authError{code, desc})
@@ -241,10 +245,19 @@ func (s *Server) toConsent(w http.ResponseWriter, r *http.Request, req *authRequ
 
 // handleConsentContinue is where the vault's consent leg returns.
 func (s *Server) handleConsentContinue(w http.ResponseWriter, r *http.Request) {
-	ck, err := r.Cookie(cookieConsent)
+	ck, err := r.Cookie(s.cookieName(cookieConsent))
 	var p pendingConsent
-	if err != nil || s.keys.open(purposePending, ck.Value, &p) != nil || time.Now().Unix() > p.Exp {
-		authPage(w, http.StatusBadRequest, "Sign-in expired", "This consent has expired or was started in another browser. Start again from your MCP client.")
+	var why string
+	switch {
+	case err != nil:
+		why = whyNoCookie
+	case s.keys.open(purposePending, ck.Value, &p) != nil:
+		why = whyUnreadable
+	case time.Now().Unix() > p.Exp:
+		why = whyExpired
+	}
+	if why != "" {
+		signInFailed(w, purposePending, why)
 		return
 	}
 	s.clearCookie(w, cookieConsent)
@@ -283,20 +296,58 @@ func clientLabel(req *authRequest) string {
 	return req.ClientID
 }
 
-// bindBrowser sets a fresh random cookie and returns its hash, which
-// the sealed flow state carries.
-func (s *Server) bindBrowser(w http.ResponseWriter) string {
+// bindBrowser returns the hash of the browser's binding cookie, which
+// the sealed flow state carries. It keeps a cookie the browser already
+// has, so a second sign-in started in the same browser (a retry, a
+// copied link, a prefetch) doesn't break the first, and renews its
+// lifetime.
+func (s *Server) bindBrowser(w http.ResponseWriter, r *http.Request) string {
 	v := rand.Text()
+	if ck, err := r.Cookie(s.cookieName(cookieBrowser)); err == nil && browserCookieRE.MatchString(ck.Value) {
+		v = ck.Value
+	}
 	s.setCookie(w, cookieBrowser, v)
 	return hashCookie(v)
 }
 
-func (s *Server) sameBrowser(r *http.Request, want string) bool {
-	ck, err := r.Cookie(cookieBrowser)
-	if err != nil {
-		return false
+// browserCookieRE matches what rand.Text makes.
+var browserCookieRE = regexp.MustCompile(`^[A-Z2-7]{26}$`)
+
+// Why a flow can't continue in this browser. Each is shown to the user
+// and logged.
+const (
+	whyUnreadable = "The sign-in link is damaged, or was issued by a different kode-gopher server."
+	whyExpired    = "This sign-in was started more than 10 minutes ago."
+	whyNoCookie   = "This browser has no record of starting this sign-in. It was probably started in another browser or browser profile (signing in to a different Google account can move you to another Chrome profile), or this browser blocks cookies for this site."
+	whyOtherFlow  = "This browser started a different sign-in. This one was started in another browser or browser profile, or after this browser's sign-in record expired."
+)
+
+// openBound opens a browser-bound envelope and checks it belongs to
+// this browser. If not, it shows why and returns false.
+func (s *Server) openBound(w http.ResponseWriter, r *http.Request, purpose, sealed string, b *browserBound) bool {
+	why := ""
+	ck, ckErr := r.Cookie(s.cookieName(cookieBrowser))
+	switch {
+	case s.keys.open(purpose, sealed, b) != nil:
+		why = whyUnreadable
+	case time.Now().Unix() > b.Exp:
+		why = whyExpired
+	case ckErr != nil:
+		why = whyNoCookie
+	case subtle.ConstantTimeCompare([]byte(hashCookie(ck.Value)), []byte(b.Browser)) != 1:
+		why = whyOtherFlow
+	default:
+		return true
 	}
-	return subtle.ConstantTimeCompare([]byte(hashCookie(ck.Value)), []byte(want)) == 1
+	signInFailed(w, purpose, why)
+	return false
+}
+
+// signInFailed logs why at step (a fixed name, not the request's path)
+// and shows it.
+func signInFailed(w http.ResponseWriter, step, why string) {
+	log.Printf("oauth: sign-in stopped at %s: %s", step, why)
+	authPage(w, http.StatusBadRequest, "Sign-in can't continue", why+" Start again from your MCP client.")
 }
 
 func hashCookie(v string) string {
@@ -304,14 +355,27 @@ func hashCookie(v string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
+func (s *Server) secureCookies() bool { return strings.HasPrefix(s.cfg.Issuer, "https://") }
+
+// cookieName adds the __Host- prefix on https. Browsers only accept
+// such a cookie from this exact host over https, so a network attacker
+// (over http) or a sibling domain can't plant a binding cookie whose
+// value they know, which bindBrowser would otherwise reuse.
+func (s *Server) cookieName(name string) string {
+	if s.secureCookies() {
+		return "__Host-" + name
+	}
+	return name
+}
+
 // setCookie sets a flow cookie. SameSite=Lax: it must ride the
 // top-level redirects back from Google.
 func (s *Server) setCookie(w http.ResponseWriter, name, value string) {
 	//nolint:gosec // Secure whenever the issuer is https; http only on loopback for testing
 	http.SetCookie(w, &http.Cookie{
-		Name: name, Value: value, Path: "/",
+		Name: s.cookieName(name), Value: value, Path: "/",
 		MaxAge:   int(authRequestTTL.Seconds()),
-		HttpOnly: true, Secure: strings.HasPrefix(s.cfg.Issuer, "https://"),
+		HttpOnly: true, Secure: s.secureCookies(),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -319,8 +383,8 @@ func (s *Server) setCookie(w http.ResponseWriter, name, value string) {
 func (s *Server) clearCookie(w http.ResponseWriter, name string) {
 	//nolint:gosec // as setCookie
 	http.SetCookie(w, &http.Cookie{
-		Name: name, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, Secure: strings.HasPrefix(s.cfg.Issuer, "https://"),
+		Name: s.cookieName(name), Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: s.secureCookies(),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
