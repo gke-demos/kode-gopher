@@ -77,7 +77,7 @@ We target the MCP authorization spec 2025-11-25 and the go-sdk client in v1.6.0 
 - There's no implicit grant and no password grant.
 - Refresh tokens rotate for public clients: each refresh returns a new one, and the old one is invalid.
 
-**Resource indicators (RFC 8707).** Clients send `resource=https://<host>/mcp`. Tokens carry that audience, and the verifier rejects any other. This is the spec's defence against token reuse across servers.
+**Resource indicators (RFC 8707).** Clients send `resource=https://<host>/mcp`. Tokens carry that audience, and the verifier rejects any other. This is the spec's defence against token reuse across servers. A request naming more than one `resource`, at `/authorize` or `/token`, gets `invalid_target`.
 
 **Scopes and step-up.**
 - One scope, `kode-gopher:execute`, is required for `execute_go_code`.
@@ -218,6 +218,8 @@ Refresh doesn't take a `resource`; it keeps the original audience. Each envelope
 **Scope.** `kode-gopher:execute` is always granted; unknown requested scopes are dropped. A valid token without it gets `403` with `Bearer error="insufficient_scope"`. go-sdk's own 403 lacks the error code, so kode-gopher answers that case itself.
 
 **Allow-list failures.** If the group check itself fails (Cloud Identity down or denied), the callback returns `server_error` and a refresh returns HTTP 500. Neither is cached, and neither revokes anything.
+
+**Custody failures.** If the vault or Google fails at sign-in (no answer, 429, 5xx), the client gets `server_error`, and trying again may work. Only a grant the user has to repair gets `access_denied`: consent declined, another account's grant in the vault, or the Google Cloud scope left unticked. The reason goes to the server log, never into the redirect.
 
 **Why not IAP.** IAP authenticates the user but gives the backend an identity assertion, not a Google access token for the user. So snippets couldn't act as the user. MCP clients also don't do IAP's browser flow. IAP would fit only the service-identity mode below.
 

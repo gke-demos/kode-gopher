@@ -103,6 +103,12 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, terr)
 		return
 	}
+	if len(r.PostForm["resource"]) > 1 {
+		// Each grant checks the first; refuse a second rather than
+		// leave it checked by no one (RFC 8707).
+		writeTokenError(w, &tokenError{Code: "invalid_target", Desc: "one resource only"})
+		return
+	}
 	var resp map[string]any
 	switch r.PostForm.Get("grant_type") {
 	case "authorization_code":
@@ -275,6 +281,7 @@ func (s *Server) sealAccess(p accessPayload, now time.Time) (string, time.Time, 
 }
 
 func writeTokenError(w http.ResponseWriter, e *tokenError) {
+	e.Desc = cleanDesc(e.Desc)
 	code := http.StatusBadRequest
 	if e.Code == "invalid_client" {
 		code = http.StatusUnauthorized
@@ -313,7 +320,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(desc, "redirect") {
 			code = "invalid_redirect_uri"
 		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": code, "error_description": desc})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": code, "error_description": cleanDesc(desc)})
 		return
 	}
 	if len(m.ClientName) > 100 {

@@ -103,10 +103,10 @@ func (SealedCustody) signInOffline() bool { return true }
 
 func (SealedCustody) begin(_ context.Context, _ *google, _ User, t *googleTokens, _ string) (*Grant, *Consent, error) {
 	if !slices.Contains(strings.Fields(t.Scope), scopeCloudPlatform) {
-		return nil, nil, errors.New("the Google Cloud scope wasn't granted at consent")
+		return nil, nil, reauthError("the Google Cloud scope wasn't granted at consent")
 	}
 	if t.RefreshToken == "" {
-		return nil, nil, errors.New("google returned no refresh token")
+		return nil, nil, reauthError("google returned no refresh token")
 	}
 	return &Grant{AccessToken: t.AccessToken, Expiry: t.expiry, Secret: t.RefreshToken}, nil, nil
 }
