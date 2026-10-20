@@ -320,7 +320,9 @@ func clientLabel(req *authRequest) string {
 	if isSealed(req.ClientID) {
 		return "dynamically registered"
 	}
-	return req.ClientID
+	// A nameless CIMD client's ID is the client's own URL: escape it to
+	// printable ASCII, as the consent page does, before it reaches a log.
+	return displayURL(req.ClientID)
 }
 
 // bindBrowser returns the hash of the browser's binding cookie, which

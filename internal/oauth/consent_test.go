@@ -235,3 +235,17 @@ func TestDisplayURL(t *testing.T) {
 		}
 	}
 }
+
+// A nameless CIMD client's ID reaches the sign-in log line escaped to
+// printable ASCII, like the consent page shows it.
+func TestClientLabelEscapesClientID(t *testing.T) {
+	got := clientLabel(&authRequest{ClientID: "https://ev\u202eil.example/c.json"})
+	for _, r := range got {
+		if r < 0x20 || r > 0x7e {
+			t.Fatalf("clientLabel = %q, contains %U", got, r)
+		}
+	}
+	if !strings.Contains(got, "ev%E2%80%AEil.example") {
+		t.Errorf("clientLabel = %q, want the client ID percent-encoded", got)
+	}
+}
