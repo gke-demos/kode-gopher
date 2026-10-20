@@ -197,6 +197,7 @@ type fakeVault struct {
 	grants    map[string]User   // userId -> account whose grant is stored
 	shortLife bool              // retrieve hands out nearly spent tokens
 	forced    int
+	script    []string // canned bodies for the next retrieve calls, before the grants are consulted ("!400 <message>": a refused call)
 }
 
 func newFakeVault(t *testing.T, g *fakeGoogle) *fakeVault {
@@ -229,6 +230,18 @@ func (v *fakeVault) api(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(r.URL.Path, "/authProviders/kg/credentials:retrieve"):
 		if strings.Join(body.Scopes, " ") != scopeOpenID+" "+scopeEmail+" "+scopeCloudPlatform {
 			http.Error(w, "scopes don't match the stored grant", http.StatusBadRequest)
+			return
+		}
+		if len(v.script) > 0 {
+			a := v.script[0]
+			v.script = v.script[1:]
+			w.Header().Set("Content-Type", "application/json")
+			if msg, ok := strings.CutPrefix(a, "!400 "); ok {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"status":"INVALID_ARGUMENT","message":"` + strings.ReplaceAll(msg, "$forced", body.ForceRefreshToken) + `"}}`))
+				return
+			}
+			_, _ = w.Write([]byte(a))
 			return
 		}
 		if u, ok := v.grants[body.UserID]; ok {

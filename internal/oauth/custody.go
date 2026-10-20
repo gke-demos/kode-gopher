@@ -30,10 +30,17 @@ import (
 	"time"
 )
 
-// minGoogleTokenLife is the least life a Google access token must have
-// left to be sealed into a kode-gopher access token. A vault token
-// closer to expiry than this is force-refreshed.
+// minGoogleTokenLife is the least life a Google access token should
+// have left to be sealed into a kode-gopher access token. A vault token
+// closer to expiry than this is force-refreshed, and used as it is only
+// if the vault doesn't bring a better one (see minLiveTokenLife).
 const minGoogleTokenLife = 5 * time.Minute
+
+// minLiveTokenLife is the least life a nearly spent vault token must
+// have left to be used when the vault won't refresh it: an access token
+// stops a minute before the Google token inside it, a sign-in's code may
+// wait codeTTL to be exchanged, and a minute's margin.
+const minLiveTokenLife = time.Minute + codeTTL + time.Minute
 
 // Grant is a Google access token for a user, plus what the custody
 // backend needs to mint the next one: the Google refresh token for
@@ -145,7 +152,9 @@ func (SealedCustody) refresh(ctx context.Context, g *google, u User, secret, _ s
 // credential vault (agentidentitycredentials.googleapis.com). The vault
 // trusts whatever user ID it's given, and stores whichever account
 // consented, so every token it returns is checked against the
-// signed-in user's sub before use.
+// signed-in user's sub before use. The vault's expireTime is ignored in
+// favour of tokeninfo's, and a token with under 5 minutes left, or one
+// tokeninfo refuses, is force-refreshed once.
 type VaultCustody struct {
 	// AuthProvider is the full resource name,
 	// projects/<p>/locations/<l>/authProviders/<name>.
@@ -171,14 +180,29 @@ func (v *VaultCustody) begin(ctx context.Context, g *google, u User, _ *googleTo
 	if err != nil {
 		return nil, nil, err
 	}
-	if c := r.UriConsentRequired; c != nil {
-		if c.AuthorizationURI == "" || c.ConsentNonce == "" {
-			return nil, nil, errors.New("vault: incomplete consent request")
+	c := consentOf(r)
+	if c == nil {
+		// A consent request from grant comes from forcing a refresh of a
+		// token Google refused: the user is in the browser, so they're
+		// sent to it as well.
+		var gr *Grant
+		if gr, c, err = v.grant(ctx, g, u, r, continueURI); err != nil || c == nil {
+			return gr, nil, err
 		}
-		return nil, &Consent{URL: c.AuthorizationURI, Nonce: c.ConsentNonce, UID: c.UID}, nil
 	}
-	gr, err := v.grant(ctx, g, u, r, continueURI)
-	return gr, nil, err
+	if c.URL == "" || c.Nonce == "" {
+		return nil, nil, errors.New("vault: incomplete consent request")
+	}
+	return nil, c, nil
+}
+
+// consentOf is the consent leg the vault asks for in r, or nil.
+func consentOf(r *vaultRetrieveResponse) *Consent {
+	c := r.UriConsentRequired
+	if c == nil {
+		return nil
+	}
+	return &Consent{URL: c.AuthorizationURI, Nonce: c.ConsentNonce, UID: c.UID}
 }
 
 func (v *VaultCustody) finish(ctx context.Context, g *google, u User, c Consent, q url.Values, continueURI string) (*Grant, error) {
@@ -200,7 +224,12 @@ func (v *VaultCustody) finish(ctx context.Context, g *google, u User, c Consent,
 	if r.UriConsentRequired != nil {
 		return nil, errors.New("vault: still asks for consent after finalize")
 	}
-	return v.grant(ctx, g, u, r, continueURI)
+	gr, again, err := v.grant(ctx, g, u, r, continueURI)
+	if again != nil {
+		// Consent just ran, and the grant it stored is already gone.
+		return nil, errReauth
+	}
+	return gr, err
 }
 
 func (v *VaultCustody) refresh(ctx context.Context, g *google, u User, _, continueURI string) (*Grant, error) {
@@ -211,51 +240,92 @@ func (v *VaultCustody) refresh(ctx context.Context, g *google, u User, _, contin
 	if r.UriConsentRequired != nil {
 		return nil, errReauth
 	}
-	return v.grant(ctx, g, u, r, continueURI)
+	gr, c, err := v.grant(ctx, g, u, r, continueURI)
+	if c != nil {
+		return nil, errReauth
+	}
+	return gr, err
 }
 
 // grant turns a retrieve result into a Grant. It checks the token is
 // the signed-in user's and carries cloud-platform, takes the expiry from
-// tokeninfo (the vault's expireTime can be wrong), and force-refreshes a
-// token that's nearly spent.
-func (v *VaultCustody) grant(ctx context.Context, g *google, u User, r *vaultRetrieveResponse, continueURI string) (*Grant, error) {
-	for attempt := 0; ; attempt++ {
+// tokeninfo (the vault's expireTime can be wrong), and force-refreshes
+// once a token that's nearly spent or that Google refuses.
+//
+// Only the vault or Google refusing is a reauthError (access_denied at
+// sign-in, invalid_grant at refresh, which signs the user out). Per the
+// vault's API reference, "pending" means "retry the RetrieveCredentials
+// request after some time": the vault busy, like an answer with nothing
+// usable in it, is a plain error, server_error, and a retry may work.
+//
+// A forced refresh "fetches a new token or initiates a new consent flow".
+// For a token Google refuses, a consent request is the grant gone: it's
+// returned, for a sign-in to detour through and a refresh to refuse. For
+// a token Google still accepts it says nothing about the grant: the vault
+// asks for consent rather than force-refresh a valid token (the phase B
+// spike, docs/design-in-cluster.md). So when a forced refresh of a valid
+// token brings no better one, short of a refusal, that token is used if
+// it still has minLiveTokenLife left.
+func (v *VaultCustody) grant(ctx context.Context, g *google, u User, r *vaultRetrieveResponse, continueURI string) (*Grant, *Consent, error) {
+	var (
+		forced string // the token whose refresh was forced, if any
+		live   *Grant // that token, if Google still accepted it
+	)
+	fallback := func(err error) (*Grant, *Consent, error) {
+		if live != nil && time.Until(live.Expiry) >= minLiveTokenLife {
+			return live, nil, nil
+		}
+		return nil, nil, err
+	}
+	for {
 		switch {
+		case r.UriConsentRequired != nil && live != nil:
+			return fallback(errors.New("vault: would not force-refresh a nearly spent token that is still valid; try again"))
+		case r.UriConsentRequired != nil:
+			return nil, consentOf(r), nil
 		case r.ConsentRejected != nil:
-			return nil, reauthError("vault: the user declined consent")
+			return nil, nil, reauthError("vault: the user declined consent")
+		case r.Pending != nil:
+			return fallback(errors.New("vault: the grant is pending; try again"))
 		case r.Success == nil || r.Success.Token == "":
-			return nil, reauthError("vault: no token (consent pending)")
+			return fallback(errors.New("vault: answered with neither a token nor a consent request"))
+		case forced != "" && r.Success.Token == forced:
+			return fallback(errors.New("vault: a forced refresh returned the same token"))
 		}
 		tok := r.Success.Token
 		ti, err := g.client.tokenInfo(ctx, g.hc, tok)
-		if err != nil {
-			return nil, err
-		}
-		if ti.Sub != u.Sub {
+		switch {
+		case errors.Is(err, errGoogleToken) && forced == "":
+			// Expired early (the vault's expireTime can be wrong) or
+			// revoked: force a new one.
+		case errors.Is(err, errGoogleToken) && live == nil:
+			// Refused before the forced refresh and after it.
+			return nil, nil, reauthError("vault: Google refuses the force-refreshed token")
+		case err != nil:
+			return fallback(err)
+		case ti.Sub != u.Sub:
 			// Someone other than the signed-in user consented. The vault
 			// has no delete API, so this only refuses.
-			return nil, reauthError("vault: the stored Google grant belongs to a different account than the one signed in")
-		}
-		if !slices.Contains(ti.Scopes, scopeCloudPlatform) {
-			return nil, reauthError("vault: token lacks the Google Cloud scope")
-		}
-		if ti.Email != "" && !strings.EqualFold(ti.Email, u.Email) {
+			return nil, nil, reauthError("vault: the stored Google grant belongs to a different account than the one signed in")
+		case !slices.Contains(ti.Scopes, scopeCloudPlatform):
+			return nil, nil, reauthError("vault: token lacks the Google Cloud scope")
+		case ti.Email != "" && !strings.EqualFold(ti.Email, u.Email):
 			// Same account, new address: the identity (and the allow-list
 			// decision) sealed at sign-in is stale. tokeninfo reports the
 			// email because retrieve always asks for userinfo.email.
-			return nil, reauthError("vault: the Google account's email changed since sign-in")
+			return nil, nil, reauthError("vault: the Google account's email changed since sign-in")
+		case time.Until(ti.Expiry) >= minGoogleTokenLife:
+			return &Grant{AccessToken: tok, Expiry: ti.Expiry}, nil, nil
+		case forced == "":
+			live = &Grant{AccessToken: tok, Expiry: ti.Expiry}
 		}
-		if time.Until(ti.Expiry) >= minGoogleTokenLife {
-			return &Grant{AccessToken: tok, Expiry: ti.Expiry}, nil
+		if forced != "" {
+			// The forced token is nearly spent too.
+			return fallback(errors.New("vault: force-refreshed token is still nearly expired"))
 		}
-		if attempt > 0 {
-			return nil, errors.New("vault: force-refreshed token is still nearly expired")
-		}
+		forced = tok
 		if r, err = v.retrieve(ctx, u.Sub, continueURI, tok); err != nil {
-			return nil, err
-		}
-		if r.UriConsentRequired != nil {
-			return nil, errReauth
+			return fallback(err)
 		}
 	}
 }
@@ -286,6 +356,11 @@ func (v *VaultCustody) retrieve(ctx context.Context, userID, continueURI, forceR
 	}
 	var r vaultRetrieveResponse
 	if err := v.call(ctx, "retrieve", body, &r); err != nil {
+		if forceRefresh != "" && strings.Contains(err.Error(), forceRefresh) {
+			// The vault's error message quotes the token back: keep it
+			// out of the error, which is logged.
+			return nil, errors.New(strings.ReplaceAll(err.Error(), forceRefresh, "[token]"))
+		}
 		return nil, err
 	}
 	return &r, nil
