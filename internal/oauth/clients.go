@@ -410,7 +410,7 @@ var errRedirect = errors.New("redirects aren't followed")
 // client-supplied URL mustn't reach: "this network", shared address
 // space (CGNAT), IETF protocol assignments, benchmarking, the 6to4 relay
 // anycast, reserved space, documentation, deprecated site-local IPv6,
-// and the IPv6 prefixes that embed an IPv4 address (IPv4-compatible,
+// IPv6 discard-only and SRv6 SIDs, and the IPv6 prefixes that embed an IPv4 address (IPv4-compatible,
 // SIIT, NAT64, Teredo and the rest of the IETF block, 6to4): NAT64's
 // 64:ff9b::a9fe:a9fe reaches 169.254.169.254.
 var nonPublic = []netip.Prefix{
@@ -425,12 +425,14 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("::/96"),
 	netip.MustParsePrefix("::ffff:0:0:0/96"),
+	netip.MustParsePrefix("100::/64"),
 	netip.MustParsePrefix("64:ff9b::/96"),
 	netip.MustParsePrefix("64:ff9b:1::/48"),
 	netip.MustParsePrefix("2001::/23"),
 	netip.MustParsePrefix("2001:db8::/32"),
 	netip.MustParsePrefix("2002::/16"),
 	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
 	netip.MustParsePrefix("fec0::/10"),
 }
 

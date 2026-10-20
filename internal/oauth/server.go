@@ -109,8 +109,8 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	cfg.Issuer = strings.TrimRight(cfg.Issuer, "/")
 	switch {
-	case !httpsOrLoopback(cfg.Issuer):
-		return nil, fmt.Errorf("oauth: issuer %q must be https (or http on loopback, for testing)", cfg.Issuer)
+	case !validIssuer(cfg.Issuer):
+		return nil, fmt.Errorf("oauth: issuer %q must be a lowercase https URL with no query or fragment (or http on loopback, for testing)", cfg.Issuer)
 	case cfg.Google.ClientID == "" || cfg.Google.ClientSecret == "":
 		return nil, errors.New("oauth: Google client ID and secret are required")
 	case cfg.Custody == nil:
@@ -179,6 +179,16 @@ func checkGoogleEndpoints(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+// validIssuer reports whether raw can be the issuer: httpsOrLoopback, the
+// scheme written in lowercase (url.Parse lowercases it, but secureCookies
+// and every URL built from the issuer use the raw string), and no query or
+// fragment, which would break every endpoint appended to it.
+func validIssuer(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && httpsOrLoopback(raw) && strings.HasPrefix(raw, u.Scheme+"://") &&
+		u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
 }
 
 // httpsOrLoopback reports whether raw is an absolute https URL, or http

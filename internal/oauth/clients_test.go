@@ -128,6 +128,8 @@ func TestIsPublicSpecialRanges(t *testing.T) {
 		"203.0.113.1",          // documentation (TEST-NET-3)
 		"3fff::1",              // documentation (RFC 9637)
 		"fec0::1",              // deprecated site-local
+		"100::1",               // discard-only
+		"5f00::1",              // SRv6 SIDs
 		// Prefix.Contains is false for a zoned address, so a zone mustn't
 		// carry one past the ranges, nor make a public address dialable.
 		"64:ff9b::a9fe:a9fe%eth0",
@@ -467,12 +469,13 @@ func TestIssuerLoopback(t *testing.T) {
 		return Config{Issuer: issuer, Google: GoogleClient{ClientID: "id", ClientSecret: "s"},
 			Custody: SealedCustody{}, Allow: &AllowList{Domains: []string{"example.com"}}, Keys: keys}
 	}
-	for _, bad := range []string{"http://localhost.evil.example", "http://127.0.0.1.nip.io", "http://localhost@evil.example", "https://", "ftp://kg.example.com"} {
+	for _, bad := range []string{"http://localhost.evil.example", "http://127.0.0.1.nip.io", "http://localhost@evil.example", "https://", "ftp://kg.example.com",
+		"HTTPS://kg.example.com", "Https://kg.example.com", "https://kg.example.com?x=1", "https://kg.example.com?", "https://kg.example.com#f"} {
 		if _, err := New(cfg(bad)); err == nil {
 			t.Errorf("issuer %q accepted", bad)
 		}
 	}
-	for _, good := range []string{"https://kg.example.com", "http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"} {
+	for _, good := range []string{"https://kg.example.com", "https://KG.Example.com:8443/base/", "http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"} {
 		if _, err := New(cfg(good)); err != nil {
 			t.Errorf("issuer %q refused: %v", good, err)
 		}
