@@ -31,9 +31,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 // The fixes in this file came from go-steer/steward's review of its port
@@ -120,6 +123,17 @@ func TestIsPublicSpecialRanges(t *testing.T) {
 		"192.88.99.1",          // 6to4 relay anycast
 		"198.18.0.1",           // benchmarking
 		"240.0.0.1",            // reserved
+		"192.0.2.1",            // documentation (TEST-NET-1)
+		"198.51.100.1",         // documentation (TEST-NET-2)
+		"203.0.113.1",          // documentation (TEST-NET-3)
+		"3fff::1",              // documentation (RFC 9637)
+		"fec0::1",              // deprecated site-local
+		// Prefix.Contains is false for a zoned address, so a zone mustn't
+		// carry one past the ranges, nor make a public address dialable.
+		"64:ff9b::a9fe:a9fe%eth0",
+		"2002:a9fe:a9fe::1%lo",
+		"2001:db8::1%x",
+		"2606:4700::1%x",
 	} {
 		if isPublic(netip.MustParseAddr(a)) {
 			t.Errorf("isPublic(%s) = true", a)
@@ -342,5 +356,125 @@ func TestGoogleEndpointsHTTPS(t *testing.T) {
 	c.Custody = &VaultCustody{AuthProvider: "projects/p/locations/l/authProviders/kg", Client: http.DefaultClient, Endpoint: "http://[::1]:9/v1/"}
 	if _, err := New(c); err != nil {
 		t.Errorf("https and loopback endpoints refused: %v", err)
+	}
+}
+
+// TestCIMDRedirectIsUnknownClient checks a metadata host that answers
+// with a redirect makes the client unknown, not the host unavailable:
+// a retry won't change it.
+func TestCIMDRedirectIsUnknownClient(t *testing.T) {
+	doc := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere.json", http.StatusFound)
+	}))
+	defer doc.Close()
+	hc := doc.Client()
+	hc.CheckRedirect = SSRFSafeClient(time.Second).CheckRedirect
+	_, err := newCIMDFetcher(hc).fetch(context.Background(), doc.URL+"/c.json")
+	if err == nil || errors.Is(err, errCIMDUnavailable) || !errors.Is(err, errRedirect) {
+		t.Errorf("redirecting metadata host: %v, want an unknown client", err)
+	}
+}
+
+// TestCIMDCacheBounded checks the metadata document cache can't grow
+// without bound: anyone can name a new client_id URL. When it's full,
+// expired entries go first, then everything.
+func TestCIMDCacheBounded(t *testing.T) {
+	var docURL string
+	doc := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60") // writeJSON says no-store
+		_ = json.NewEncoder(w).Encode(map[string]any{"client_id": docURL, "redirect_uris": []string{clientRedirect}})
+	}))
+	defer doc.Close()
+	docURL = doc.URL + "/c.json"
+	f := newCIMDFetcher(doc.Client())
+	fill := func(expired int) {
+		clear(f.cache)
+		for i := range cimdMaxCached {
+			exp := time.Now().Add(time.Hour)
+			if i < expired {
+				exp = time.Now().Add(-time.Second)
+			}
+			f.cache["https://c"+strconv.Itoa(i)+".example/c.json"] = cimdEntry{c: &client{}, expires: exp}
+		}
+	}
+	fill(10)
+	if _, err := f.fetch(context.Background(), docURL); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.cache[docURL]; !ok || len(f.cache) != cimdMaxCached-10+1 {
+		t.Errorf("full cache with expired entries: %d entries, want %d", len(f.cache), cimdMaxCached-10+1)
+	}
+	fill(0)
+	if _, err := f.fetch(context.Background(), docURL); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.cache[docURL]; !ok || len(f.cache) != 1 {
+		t.Errorf("full cache of live entries: %d entries, want 1", len(f.cache))
+	}
+}
+
+// TestClientNamesTruncated checks client names are cut to
+// maxClientName bytes on a character boundary: a CIMD client's name, so
+// a long one can't push its URL off the consent page or bloat the flow,
+// and a DCR client's, which used to be cut mid-character.
+func TestClientNamesTruncated(t *testing.T) {
+	long := strings.Repeat("é", 300)
+	check := func(where, name string) {
+		t.Helper()
+		if len(name) > maxClientName || len(name) < maxClientName-1 || !utf8.ValidString(name) || strings.ContainsRune(name, utf8.RuneError) {
+			t.Errorf("%s: client name is %d bytes, valid UTF-8 %v", where, len(name), utf8.ValidString(name) && !strings.ContainsRune(name, utf8.RuneError))
+		}
+	}
+	var docURL string
+	doc := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"client_id": docURL, "client_name": "x" + long, "redirect_uris": []string{clientRedirect}})
+	}))
+	defer doc.Close()
+	docURL = doc.URL + "/c.json"
+	c, err := newCIMDFetcher(doc.Client()).fetch(context.Background(), docURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("CIMD", c.Name)
+
+	e := newTestEnv(t, false, nil)
+	body, _ := json.Marshal(map[string]any{"client_name": "x" + long, "redirect_uris": []string{clientRedirect}})
+	resp, err := http.Post(e.srv.URL+"/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var m struct {
+		ClientID   string `json:"client_id"`
+		ClientName string `json:"client_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		t.Fatal(err)
+	}
+	check("DCR response", m.ClientName)
+	dc, err := e.as.resolveClient(context.Background(), m.ClientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("DCR registration", dc.Name)
+}
+
+// TestIssuerLoopback checks an http issuer must really be on loopback,
+// not merely start with "http://localhost".
+func TestIssuerLoopback(t *testing.T) {
+	keys, _ := NewKeyring(KeyringKey{ID: "k", Secret: []byte(strings.Repeat("k", 32))})
+	cfg := func(issuer string) Config {
+		return Config{Issuer: issuer, Google: GoogleClient{ClientID: "id", ClientSecret: "s"},
+			Custody: SealedCustody{}, Allow: &AllowList{Domains: []string{"example.com"}}, Keys: keys}
+	}
+	for _, bad := range []string{"http://localhost.evil.example", "http://127.0.0.1.nip.io", "http://localhost@evil.example", "https://", "ftp://kg.example.com"} {
+		if _, err := New(cfg(bad)); err == nil {
+			t.Errorf("issuer %q accepted", bad)
+		}
+	}
+	for _, good := range []string{"https://kg.example.com", "http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"} {
+		if _, err := New(cfg(good)); err != nil {
+			t.Errorf("issuer %q refused: %v", good, err)
+		}
 	}
 }

@@ -109,7 +109,7 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	cfg.Issuer = strings.TrimRight(cfg.Issuer, "/")
 	switch {
-	case !strings.HasPrefix(cfg.Issuer, "https://") && !strings.HasPrefix(cfg.Issuer, "http://localhost") && !strings.HasPrefix(cfg.Issuer, "http://127.0.0.1"):
+	case !httpsOrLoopback(cfg.Issuer):
 		return nil, fmt.Errorf("oauth: issuer %q must be https (or http on loopback, for testing)", cfg.Issuer)
 	case cfg.Google.ClientID == "" || cfg.Google.ClientSecret == "":
 		return nil, errors.New("oauth: Google client ID and secret are required")
@@ -174,15 +174,21 @@ func checkGoogleEndpoints(cfg Config) error {
 		endpoints = append(endpoints, [2]string{"VaultCustody.Endpoint", v.Endpoint})
 	}
 	for _, e := range endpoints {
-		if e[1] == "" {
-			continue // Google's default
-		}
-		u, err := url.Parse(e[1])
-		if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname()))) {
+		if e[1] != "" && !httpsOrLoopback(e[1]) { // empty: Google's default
 			return fmt.Errorf("oauth: %s %q must be an https URL (or http on loopback, for testing)", e[0], e[1])
 		}
 	}
 	return nil
+}
+
+// httpsOrLoopback reports whether raw is an absolute https URL, or http
+// on a loopback host (for tests), with no userinfo.
+func httpsOrLoopback(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	return u.Scheme == "https" || (u.Scheme == "http" && isLoopbackHost(u.Hostname()))
 }
 
 // Resource is the MCP endpoint URL tokens are bound to.
