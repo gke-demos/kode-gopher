@@ -20,7 +20,7 @@ limitations under the License.
 // and get kode-gopher's own sealed tokens; each access token carries
 // the user's Google access token, which a tool call hands to the
 // sandbox's metadata emulator. Nothing is stored server-side except a
-// replay cache for single-use codes and rotated refresh tokens.
+// replay cache for single-use codes and refresh-token families.
 package oauth
 
 import (
@@ -239,12 +239,29 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// replayCache remembers single-use IDs (authorization codes, rotated
-// refresh tokens) until they'd have expired anyway. It's in memory: v1
-// runs one replica, and a restart forgets it (docs/design-in-cluster.md).
+// replayCache remembers single-use IDs (authorization codes) until
+// they'd have expired anyway, and tracks refresh-token families. It's in
+// memory: v1 runs one replica, and a restart forgets it
+// (docs/design-in-cluster.md).
+//
+// Every refresh token belongs to a family, started when its sign-in's
+// code was exchanged, and carries a generation number. A refresh moves
+// the family from the presented token's generation to the next.
+// Presenting a generation the family has already moved past is a replay:
+// one of the token's two holders isn't the client it was issued to, so
+// the whole family is revoked and the user signs in again (OAuth 2.1
+// §4.3.1). Memory grows with families (one per sign-in per client that
+// has refreshed), not with refreshes.
 type replayCache struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
+	mu       sync.Mutex
+	seen     map[string]time.Time
+	families map[string]family
+}
+
+type family struct {
+	gen     uint64
+	exp     time.Time
+	revoked bool
 }
 
 // use records id, valid until exp, and reports whether it was fresh.
@@ -272,4 +289,49 @@ func (c *replayCache) release(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.seen, id)
+}
+
+// rotate moves family fam from generation gen to gen+1, until exp, and
+// reports whether it could. It reports false, and revokes the family, if
+// the family is already past gen; false also for a revoked family. An
+// unknown or expired family (one never refreshed, or forgotten by a
+// restart) starts at gen+1.
+func (c *replayCache) rotate(fam string, gen uint64, exp time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if c.families == nil {
+		c.families = map[string]family{}
+	}
+	if len(c.families) > 1024 {
+		for k, f := range c.families {
+			if now.After(f.exp) {
+				delete(c.families, k)
+			}
+		}
+	}
+	if f, ok := c.families[fam]; ok && now.Before(f.exp) {
+		if f.revoked {
+			return false
+		}
+		if gen < f.gen {
+			f.revoked = true
+			c.families[fam] = f
+			return false
+		}
+	}
+	c.families[fam] = family{gen: gen + 1, exp: exp}
+	return true
+}
+
+// unrotate moves family fam back from gen+1 to gen, for a refresh that
+// failed for a transient reason, so the client's retry isn't taken for a
+// replay. A family that has moved on or been revoked is left alone.
+func (c *replayCache) unrotate(fam string, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if f, ok := c.families[fam]; ok && !f.revoked && f.gen == gen+1 {
+		f.gen = gen
+		c.families[fam] = f
+	}
 }

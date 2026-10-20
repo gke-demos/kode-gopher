@@ -62,18 +62,29 @@ type accessPayload struct {
 	Exp      int64  `json:"e"`
 	// Mode is modeService for a client-credentials token, else empty.
 	Mode string `json:"m,omitempty"`
+	// SH is a tag of a client-credentials client's secret, so rotating
+	// the secret revokes the tokens minted with the old one.
+	SH string `json:"sh,omitempty"`
 }
 
 // refreshPayload is a sealed kode-gopher refresh token. Secret is the
 // Google refresh token under sealed custody, empty under the vault.
+// Family and Gen place it in its rotation chain (see replayCache).
 type refreshPayload struct {
 	User     User   `json:"u"`
 	ClientID string `json:"c"`
 	Aud      string `json:"aud"`
 	Scope    string `json:"s"`
 	Secret   string `json:"g,omitempty"`
-	JTI      string `json:"j"`
-	Exp      int64  `json:"e"`
+	Family   string `json:"f,omitempty"`
+	Gen      uint64 `json:"n,omitempty"`
+	// JTI is unique per token. A token issued before families has no
+	// Family, and starts one named after its JTI, at generation 0, so
+	// the upgrade signs no one out. (New tokens keep a JTI so that a
+	// rollback to a release without families doesn't take them all for
+	// one reused token.)
+	JTI string `json:"j"`
+	Exp int64  `json:"e"`
 }
 
 // tokenError is an RFC 6749 §5.2 error response.
@@ -179,7 +190,12 @@ func (s *Server) exchangeCode(r *http.Request, c *client) (map[string]any, *toke
 		return nil, invalidGrant("authorization code already used")
 	}
 	g := &Grant{AccessToken: p.Token, Expiry: time.Unix(p.TokenExp, 0), Secret: p.Secret}
-	return s.issueTokens(p.User, c.ID, p.Req.Resource, p.Req.Scope, g)
+	resp, terr := s.issueTokens(p.User, c.ID, p.Req.Resource, p.Req.Scope, refreshChain{family: rand.Text(), exp: now.Add(refreshTTL)}, g)
+	if terr != nil {
+		// Nothing was handed out: let the client try the code again.
+		s.used.release("code:" + p.JTI)
+	}
+	return resp, terr
 }
 
 func pkceMatches(verifier, challenge string) bool {
@@ -191,13 +207,17 @@ func pkceMatches(verifier, challenge string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(challenge)) == 1
 }
 
-// refreshTokens rotates a refresh token: the old one is spent, the
-// allow-list is checked again, and custody mints a fresh Google token.
+// refreshTokens rotates a refresh token: its family moves on a
+// generation, the allow-list is checked again, and custody mints a fresh
+// Google token.
 func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) (map[string]any, *tokenError) {
 	f := r.PostForm
 	var p refreshPayload
 	if s.keys.open(purposeRefresh, f.Get("refresh_token"), &p) != nil {
 		return nil, invalidGrant("invalid refresh token")
+	}
+	if p.Family == "" {
+		p.Family = p.JTI
 	}
 	switch {
 	case time.Now().Unix() > p.Exp:
@@ -206,38 +226,71 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 		return nil, invalidGrant("refresh token was issued to another client")
 	case f.Get("resource") != "" && f.Get("resource") != p.Aud:
 		return nil, &tokenError{Code: "invalid_target", Desc: "resource doesn't match the original grant"}
-	case !s.used.use("refresh:"+p.JTI, time.Unix(p.Exp, 0)):
-		log.Printf("oauth: reused refresh token for %s (client %s)", p.User.Email, p.ClientID)
+	case p.Aud != s.resource:
+		// Sealed by a server with the same keys at another address.
+		return nil, invalidGrant("refresh token is for another resource")
+	case p.Family == "":
+		return nil, invalidGrant("invalid refresh token")
+	}
+	// The family outlives the token that will carry it, which is accepted
+	// until the end of its expiry's second, so the family is never
+	// forgotten while its newest token is still good.
+	next := refreshChain{family: p.Family, gen: p.Gen + 1, exp: time.Now().Add(refreshTTL)}
+	if !s.used.rotate(p.Family, p.Gen, time.Unix(next.exp.Unix()+1, 0)) {
+		log.Printf("oauth: reused refresh token for %s (client %s); its family is revoked", p.User.Email, p.ClientID)
 		return nil, invalidGrant("refresh token already used")
 	}
-	// The token is claimed above, so two concurrent refreshes can't both
-	// use it. A transient failure below (server_error) gives the claim
+	// The family is rotated above, so two concurrent refreshes can't both
+	// use the token. A transient failure below (server_error) rotates it
 	// back, or the client's retry would be refused as a replay and its
 	// user signed out; a final refusal (invalid_grant: not allowed, or a
 	// grant only the user can restore, errReauth) keeps it spent.
-	if err := s.cfg.Allow.admit(ctx, p.User); err != nil {
-		log.Printf("oauth: refresh refused for %s: %v", p.User.Email, err)
+	g, terr := s.renewGrant(ctx, p.User, p.Secret)
+	if terr == nil {
+		var resp map[string]any
+		if resp, terr = s.issueTokens(p.User, c.ID, p.Aud, p.Scope, next, g); terr == nil {
+			return resp, nil
+		}
+	}
+	if terr.Code == "server_error" {
+		s.used.unrotate(p.Family, p.Gen)
+	}
+	return nil, terr
+}
+
+// renewGrant checks the allow-list again and has custody mint a fresh
+// Google token for u.
+func (s *Server) renewGrant(ctx context.Context, u User, secret string) (*Grant, *tokenError) {
+	if err := s.cfg.Allow.admit(ctx, u); err != nil {
+		log.Printf("oauth: refresh refused for %s: %v", u.Email, err)
 		if errors.Is(err, errNotAllowed) {
 			return nil, invalidGrant(err.Error())
 		}
-		s.used.release("refresh:" + p.JTI)
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't check the allow-list"}
 	}
-	g, err := s.cfg.Custody.refresh(ctx, s.google, p.User, p.Secret, s.continueURI())
+	g, err := s.cfg.Custody.refresh(ctx, s.google, u, secret, s.continueURI())
 	if errors.Is(err, errReauth) {
 		return nil, invalidGrant(err.Error())
 	}
 	if err != nil {
-		log.Printf("oauth: %s refresh for %s: %v", s.cfg.Custody.Name(), p.User.Email, err)
-		s.used.release("refresh:" + p.JTI)
+		log.Printf("oauth: %s refresh for %s: %v", s.cfg.Custody.Name(), u.Email, err)
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't refresh the Google grant"}
 	}
-	return s.issueTokens(p.User, c.ID, p.Aud, p.Scope, g)
+	return g, nil
 }
 
-// issueTokens seals a new access and refresh token pair. The access
-// token never outlives the Google token inside it.
-func (s *Server) issueTokens(u User, clientID, aud, scope string, g *Grant) (map[string]any, *tokenError) {
+// refreshChain is where a new refresh token goes in its rotation chain:
+// generation gen of family, expiring at exp.
+type refreshChain struct {
+	family string
+	gen    uint64
+	exp    time.Time
+}
+
+// issueTokens seals a new access and refresh token pair, the refresh
+// token at chain's place in its family. The access token never outlives
+// the Google token inside it.
+func (s *Server) issueTokens(u User, clientID, aud, scope string, chain refreshChain, g *Grant) (map[string]any, *tokenError) {
 	now := time.Now()
 	at, exp, terr := s.sealAccess(accessPayload{
 		Sub: u.Sub, Email: u.Email, ClientID: clientID, Aud: aud, Scope: scope,
@@ -248,7 +301,7 @@ func (s *Server) issueTokens(u User, clientID, aud, scope string, g *Grant) (map
 	}
 	rt, err := s.keys.seal(purposeRefresh, refreshPayload{
 		User: u, ClientID: clientID, Aud: aud, Scope: scope, Secret: g.Secret,
-		JTI: rand.Text(), Exp: now.Add(refreshTTL).Unix(),
+		Family: chain.family, Gen: chain.gen, JTI: rand.Text(), Exp: chain.exp.Unix(),
 	})
 	if err != nil {
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't seal the refresh token"}

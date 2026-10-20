@@ -115,7 +115,7 @@ func (SealedCustody) finish(context.Context, *google, User, Consent, url.Values,
 	return nil, errors.New("sealed custody has no consent detour")
 }
 
-func (SealedCustody) refresh(ctx context.Context, g *google, _ User, secret, _ string) (*Grant, error) {
+func (SealedCustody) refresh(ctx context.Context, g *google, u User, secret, _ string) (*Grant, error) {
 	if secret == "" {
 		return nil, errReauth
 	}
@@ -125,6 +125,14 @@ func (SealedCustody) refresh(ctx context.Context, g *google, _ User, secret, _ s
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Google includes a fresh ID token when it can. If the account's
+	// email or domain has changed since sign-in, the identity (and the
+	// allow-list decision) sealed in the refresh token is stale.
+	if t.IDToken != "" {
+		if now, err := g.client.verifyIDToken(t.IDToken, time.Now()); err == nil && (now.Sub != u.Sub || now.Email != u.Email || now.Domain != u.Domain) {
+			return nil, reauthError("the Google account's identity changed since sign-in")
+		}
 	}
 	next := secret
 	if t.RefreshToken != "" {
@@ -230,6 +238,12 @@ func (v *VaultCustody) grant(ctx context.Context, g *google, u User, r *vaultRet
 		}
 		if !slices.Contains(ti.Scopes, scopeCloudPlatform) {
 			return nil, reauthError("vault: token lacks the Google Cloud scope")
+		}
+		if ti.Email != "" && !strings.EqualFold(ti.Email, u.Email) {
+			// Same account, new address: the identity (and the allow-list
+			// decision) sealed at sign-in is stale. tokeninfo reports the
+			// email because retrieve always asks for userinfo.email.
+			return nil, reauthError("vault: the Google account's email changed since sign-in")
 		}
 		if time.Until(ti.Expiry) >= minGoogleTokenLife {
 			return &Grant{AccessToken: tok, Expiry: ti.Expiry}, nil

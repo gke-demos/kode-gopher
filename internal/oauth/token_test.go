@@ -25,8 +25,10 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -254,33 +256,268 @@ func TestRefresh(t *testing.T) {
 	id := e.register()
 	v := rand.Text() + rand.Text()
 	first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
-	refreshForm := func(rt string) url.Values {
-		return url.Values{"grant_type": {"refresh_token"}, "client_id": {id}, "refresh_token": {rt}}
-	}
-	other := refreshForm(first.Refresh)
+	other := refreshForm(id, first.Refresh)
 	other.Set("client_id", e.register())
 	if r := e.token(other, "", ""); r.Error != "invalid_grant" {
 		t.Errorf("refresh by another client: %q", r.Error)
 	}
-	wrongRes := refreshForm(first.Refresh)
+	wrongRes := refreshForm(id, first.Refresh)
 	wrongRes.Set("resource", "https://evil.example/mcp")
 	if r := e.token(wrongRes, "", ""); r.Error != "invalid_target" {
 		t.Errorf("refresh for another resource: %q", r.Error)
 	}
 
-	second := e.token(refreshForm(first.Refresh), "", "")
+	second := e.token(refreshForm(id, first.Refresh), "", "")
 	if second.status != http.StatusOK || second.Access == "" || second.Refresh == first.Refresh {
 		t.Fatalf("refresh: %+v", second)
 	}
-	if r := e.token(refreshForm(first.Refresh), "", ""); r.Error != "invalid_grant" {
-		t.Errorf("reused refresh token: %q, want invalid_grant", r.Error)
+	third := e.token(refreshForm(id, second.Refresh), "", "")
+	if third.status != http.StatusOK || third.Refresh == "" {
+		t.Fatalf("second refresh: %+v", third)
 	}
 
 	// Removed from the group: refused once the cached decision ages out.
 	delete(e.groups.members["kg-users@example.com"], bob.Email)
 	e.as.cfg.Allow.cache = nil
-	if r := e.token(refreshForm(second.Refresh), "", ""); r.Error != "invalid_grant" {
+	if r := e.token(refreshForm(id, third.Refresh), "", ""); r.Error != "invalid_grant" {
 		t.Errorf("refresh after removal from the allow-list: %q", r.Error)
+	}
+}
+
+func refreshForm(clientID, rt string) url.Values {
+	return url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "refresh_token": {rt}}
+}
+
+// Reusing a rotated refresh token revokes its whole family (OAuth 2.1
+// §4.3.1): whichever holder refreshed first, the other isn't the client,
+// so the newest token is refused too and the user signs in again. Other
+// sign-ins are untouched.
+func TestRefreshReuseRevokesFamily(t *testing.T) {
+	e := newTestEnv(t, true, nil)
+	id := e.register()
+	v := rand.Text() + rand.Text()
+	first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+	other := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+	second := e.token(refreshForm(id, first.Refresh), "", "")
+	if second.status != http.StatusOK || second.Refresh == "" {
+		t.Fatalf("refresh: %+v", second)
+	}
+	if r := e.token(refreshForm(id, first.Refresh), "", ""); r.Error != "invalid_grant" {
+		t.Fatalf("reused refresh token: %q, want invalid_grant", r.Error)
+	}
+	if r := e.token(refreshForm(id, second.Refresh), "", ""); r.Error != "invalid_grant" {
+		t.Errorf("newest refresh token after a reuse revoked its family: %q (HTTP %d), want invalid_grant", r.Error, r.status)
+	}
+	if r := e.token(refreshForm(id, other.Refresh), "", ""); r.status != http.StatusOK {
+		t.Errorf("another sign-in's refresh token after a reuse in a different family: %+v", r)
+	}
+}
+
+// A refresh refused for good (invalid_grant) keeps its token spent; one
+// that failed for a transient reason (server_error) gives it back.
+func TestRefreshFailuresAndTheFamily(t *testing.T) {
+	e := newTestEnv(t, true, nil)
+	id := e.register()
+	v := rand.Text() + rand.Text()
+	first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer down.Close()
+	tokenURL := e.as.google.client.TokenURL
+	e.as.google.client.TokenURL = down.URL
+	if r := e.token(refreshForm(id, first.Refresh), "", ""); r.Error != "server_error" {
+		t.Fatalf("refresh while Google's token endpoint is down: %q, want server_error", r.Error)
+	}
+	e.as.google.client.TokenURL = tokenURL
+	second := e.token(refreshForm(id, first.Refresh), "", "")
+	if second.status != http.StatusOK {
+		t.Fatalf("retry once Google is back: %+v", second)
+	}
+
+	e.google.mu.Lock()
+	e.google.revoked[alice.Sub] = true
+	e.google.mu.Unlock()
+	if r := e.token(refreshForm(id, second.Refresh), "", ""); r.Error != "invalid_grant" {
+		t.Fatalf("refresh after Google revoked the grant: %q, want invalid_grant", r.Error)
+	}
+	e.google.mu.Lock()
+	e.google.revoked[alice.Sub] = false
+	e.google.mu.Unlock()
+	if r := e.token(refreshForm(id, second.Refresh), "", ""); r.Error != "invalid_grant" {
+		t.Errorf("the same refresh token after Google restored the grant: %q, want invalid_grant", r.Error)
+	}
+}
+
+// Concurrent refreshes with one token: exactly one wins.
+func TestRefreshConcurrentReuse(t *testing.T) {
+	e := newTestEnv(t, true, nil)
+	id := e.register()
+	v := rand.Text() + rand.Text()
+	first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok := 0
+	for range 8 {
+		wg.Go(func() {
+			if r := e.token(refreshForm(id, first.Refresh), "", ""); r.status == http.StatusOK {
+				mu.Lock()
+				ok++
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if ok != 1 {
+		t.Errorf("%d concurrent refreshes with one token succeeded, want 1", ok)
+	}
+}
+
+// A refresh token issued before families (a jti, no family) still works
+// once, and starts a family of its own.
+func TestRefreshTokenWithoutFamily(t *testing.T) {
+	e := newTestEnv(t, true, nil)
+	id := e.register()
+	v := rand.Text() + rand.Text()
+	first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+	var p refreshPayload
+	if err := e.as.keys.open(purposeRefresh, first.Refresh, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Family, p.Gen, p.JTI = "", 0, rand.Text()
+	legacy, err := e.as.keys.seal(purposeRefresh, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := e.token(refreshForm(id, legacy), "", "")
+	if second.status != http.StatusOK {
+		t.Fatalf("refresh with a pre-family token: %+v", second)
+	}
+	if r := e.token(refreshForm(id, legacy), "", ""); r.Error != "invalid_grant" {
+		t.Errorf("reused pre-family token: %q, want invalid_grant", r.Error)
+	}
+	if r := e.token(refreshForm(id, second.Refresh), "", ""); r.Error != "invalid_grant" {
+		t.Errorf("its successor after the reuse: %q, want invalid_grant", r.Error)
+	}
+	p.JTI = ""
+	none, _ := e.as.keys.seal(purposeRefresh, p)
+	if r := e.token(refreshForm(id, none), "", ""); r.Error != "invalid_grant" {
+		t.Errorf("refresh token with neither family nor jti: %q, want invalid_grant", r.Error)
+	}
+}
+
+func TestReplayCacheFamilies(t *testing.T) {
+	c := &replayCache{seen: map[string]time.Time{}}
+	exp := time.Now().Add(time.Hour)
+	if !c.rotate("f", 0, exp) || !c.rotate("f", 1, exp) {
+		t.Fatal("rotating a fresh family refused")
+	}
+	c.unrotate("f", 1) // gives back the last rotation
+	if !c.rotate("f", 1, exp) {
+		t.Error("rotation after unrotate refused")
+	}
+	c.unrotate("f", 0) // not the last rotation: no effect
+	if c.rotate("f", 1, exp) {
+		t.Error("a replayed generation accepted")
+	}
+	if c.rotate("f", 2, exp) {
+		t.Error("the current generation accepted after the family was revoked")
+	}
+	c.unrotate("f", 1) // a revoked family stays revoked
+	if c.rotate("f", 2, exp) {
+		t.Error("unrotate revived a revoked family")
+	}
+	if !c.rotate("g", 7, exp) {
+		t.Error("an unknown family (forgotten by a restart) refused")
+	}
+	c.families["f"] = family{gen: 2, exp: time.Now().Add(-time.Second), revoked: true}
+	if !c.rotate("f", 0, exp) {
+		t.Error("an expired family still refused")
+	}
+}
+
+// A refresh token sealed for another resource (a server at another
+// address with the same keys) is refused, not turned into tokens.
+func TestRefreshForAnotherResource(t *testing.T) {
+	e := newTestEnv(t, true, nil)
+	id := e.register()
+	v := rand.Text() + rand.Text()
+	first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+	var p refreshPayload
+	if err := e.as.keys.open(purposeRefresh, first.Refresh, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Aud = "https://elsewhere.example/mcp"
+	rt, err := e.as.keys.seal(purposeRefresh, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := e.token(refreshForm(id, rt), "", ""); r.Error != "invalid_grant" || r.Access != "" {
+		t.Errorf("refresh token for another resource: %q (HTTP %d), want invalid_grant", r.Error, r.status)
+	}
+}
+
+// If the tokens can't be issued, the code isn't spent: nothing was
+// handed out, so the client may try it again.
+func TestCodeGivenBackWhenIssuingFails(t *testing.T) {
+	e := newTestEnv(t, true, nil)
+	id := e.register()
+	v := rand.Text() + rand.Text()
+	now := time.Now()
+	// The Google token inside is too nearly spent to seal an access
+	// token around (sealAccess's server_error).
+	code, err := e.as.keys.seal(purposeCode, codePayload{
+		Req:  authRequest{ClientID: id, RedirectURI: clientRedirect, Challenge: challengeFor(v), Resource: e.as.Resource(), Scope: ScopeExecute},
+		User: alice, Token: "ya29.x", TokenExp: now.Add(30 * time.Second).Unix(), Secret: "1//x",
+		JTI: rand.Text(), Exp: now.Add(codeTTL).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if r := e.token(exchangeForm(id, code, v), "", ""); r.Error != "server_error" {
+			t.Errorf("exchange %d: %q (HTTP %d), want server_error, the code not spent", i+1, r.Error, r.status)
+		}
+	}
+}
+
+// An account whose email (or domain) changed since sign-in signs in
+// again: the identity sealed into the refresh token, and the allow-list
+// decision made on it, are stale.
+func TestIdentityChangeAtRefresh(t *testing.T) {
+	renamed := User{Sub: alice.Sub, Email: "alice.new@example.com", Domain: alice.Domain}
+	recased := User{Sub: alice.Sub, Email: "Alice@Example.com", Domain: alice.Domain}
+	for _, tc := range []struct {
+		name   string
+		sealed bool
+		as     User
+		want   string
+	}{
+		{"sealed, renamed", true, renamed, "invalid_grant"},
+		{"sealed, domain gone", true, User{Sub: alice.Sub, Email: alice.Email}, "invalid_grant"},
+		{"vault, renamed", false, renamed, "invalid_grant"},
+		{"vault, same email in another case", false, recased, ""},
+	} {
+		e := newTestEnv(t, tc.sealed, nil)
+		id := e.register()
+		v := rand.Text() + rand.Text()
+		e.code(id, v) // vault: consent stores the grant
+		first := e.token(exchangeForm(id, e.code(id, v), v), "", "")
+		if first.status != http.StatusOK {
+			t.Fatalf("%s: exchange: %+v", tc.name, first)
+		}
+		e.google.mu.Lock()
+		for rt := range e.google.refresh {
+			e.google.refresh[rt] = tc.as
+		}
+		e.google.mu.Unlock()
+		e.vault.mu.Lock()
+		e.vault.grants[alice.Sub] = tc.as
+		e.vault.mu.Unlock()
+		if r := e.token(refreshForm(id, first.Refresh), "", ""); r.Error != tc.want {
+			t.Errorf("%s: refresh: %q (HTTP %d), want %q", tc.name, r.Error, r.status, tc.want)
+		}
 	}
 }
 

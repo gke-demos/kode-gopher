@@ -60,7 +60,7 @@ Rules for these clients:
 - **No redirect URIs:** they can't sign users in.
 - **Access tokens only:** there's no refresh token, so the client asks again with its secret.
 - **Scope and resource:** `scope` may only be `kode-gopher:execute`, which is also the default, and `resource`, if sent, must be the MCP endpoint.
-- **Revocation:** removing the client from the file, or changing its account, revokes its tokens at the next request.
+- **Revocation:** removing the client from the file, changing its account, or rotating its secret revokes its tokens at the next request.
 - **IAM:** kode-gopher needs `roles/iam.serviceAccountTokenCreator` on the account, as in [service-account mode](/deploy/static-token/#or-as-a-service-account).
 
 In Go, the MCP SDK's `extauth.ClientCredentialsHandler` speaks this grant. To check it end to end, run `scripts/smoketest-http.sh --client-credentials <file>` with a file holding `{"client_id", "client_secret"}`.

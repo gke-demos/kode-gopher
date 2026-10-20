@@ -209,11 +209,13 @@ The vault and Cloud Identity calls use kode-gopher's own ADC (its Workload Ident
 |---|---|---|
 | authorization code | the request, user, Google access token (and refresh token, sealed custody) | 1 min, single use |
 | access token | `{sub, email, client_id, aud, scope, google_access_token, google_token_exp}` | `min(15 min, Google token's life - 1 min)` |
-| refresh token | `{user, client_id, aud, scope, google_refresh_token (sealed custody only), jti}` | 30 days, renewed by each use; rotated for every client |
+| refresh token | `{user, client_id, aud, scope, google_refresh_token (sealed custody only), family, generation, jti}` | 30 days, renewed by each use; rotated for every client |
 
-Refresh doesn't take a `resource`; it keeps the original audience. Each envelope's purpose is in its AEAD associated data, so one kind never opens as another.
+Refresh doesn't take a `resource`; it keeps the original audience, and a refresh token whose audience isn't this server's MCP endpoint is refused. Each envelope's purpose is in its AEAD associated data, so one kind never opens as another.
 
-**Replay cache.** Spent codes and rotated refresh tokens are remembered in memory, until they'd have expired anyway. v1 runs one replica, and a restart forgets: a refresh token already rotated before the restart could be used once more. A shared cache comes with multiple replicas.
+**Replay cache.** Spent codes are remembered in memory, until they'd have expired anyway. A code is given back if its tokens can't be issued. Refresh tokens come in families: the code exchange starts one, and each refresh moves it to the next generation. Presenting a generation the family has moved past is a reuse, so the whole family is revoked, newest token included, and the user signs in again (OAuth 2.1 §4.3.1). The cache keeps one entry per family, not per refresh. A refresh that fails for a transient reason moves the family back, so the client's retry works. v1 runs one replica, and a restart forgets: a refresh token already rotated before the restart could be used once more. A shared cache comes with multiple replicas.
+
+**Identity at refresh.** If the account's email has changed since sign-in, a refresh says `invalid_grant` and the user signs in again, because the allow-list decision was made on the old identity. Sealed custody compares the `sub`, email and `hd` of the ID token Google returns with the refresh. The vault compares tokeninfo's email.
 
 **Scope.** `kode-gopher:execute` is always granted; unknown requested scopes are dropped. A valid token without it gets `403` with `Bearer error="insufficient_scope"`. go-sdk's own 403 lacks the error code, so kode-gopher answers that case itself.
 
@@ -375,7 +377,7 @@ Two ways to run snippets as a Google service account rather than a user. Both mi
   - `resource`, if sent, must be the MCP endpoint, or `invalid_target`.
   - If minting fails, `server_error`, with the IAM error logged.
 - The sealed access token has the same shape as a user's, with the service account's Google token inside, `mode=service`, and subject `client:<client_id>`. MCP sessions and the per-user sandbox cap bind to that subject.
-- At each request the verifier also checks that the client still exists with the same service account. Removing it, or changing its account, revokes its tokens at once.
+- At each request the verifier also checks that the client still exists with the same service account and secret: the token carries a digest of the secret, sealed. Removing the client, changing its account, or rotating its secret revokes its tokens at once.
 - Authorization-server metadata adds `client_credentials` to `grant_types_supported` when such a client is configured.
 - The allow-list doesn't apply: an operator who pre-registers the client has admitted it.
 - go-sdk's `extauth.ClientCredentialsHandler` connects unchanged (`internal/oauth/client_credentials_test.go`).
