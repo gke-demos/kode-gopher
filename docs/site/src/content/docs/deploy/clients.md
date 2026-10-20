@@ -40,7 +40,7 @@ To accept only clients you list, set `OPEN_REGISTRATION=false` and pass `CLIENTS
 ]
 ```
 
-Pre-registered clients skip the confirmation page.
+Pre-registered clients skip the confirmation page. Their `redirect_uris` must be https, `http` on a loopback host (`localhost`, `127.0.0.1`, `[::1]`), or an app's private-use scheme (`com.example.app:/cb`), as for a client that registers itself; kode-gopher refuses to start otherwise.
 
 ## CI and automation: client credentials
 

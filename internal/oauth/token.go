@@ -152,10 +152,18 @@ func (s *Server) authenticateClient(r *http.Request) (*client, *tokenError) {
 		return nil, &tokenError{Code: "invalid_client", Desc: "client_id is required", basic: basic}
 	}
 	c, err := s.resolveClient(r.Context(), id)
-	if err != nil {
-		return nil, &tokenError{Code: "invalid_client", Desc: err.Error(), basic: basic}
+	if clientUnavailable(err) {
+		log.Printf("oauth: token endpoint: couldn't resolve client: %v", err)
+		return nil, &tokenError{Code: "server_error", Desc: "the client couldn't be resolved right now"}
 	}
-	if c.Secret != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(c.Secret)) != 1 {
+	if err != nil {
+		// The reason may quote a client-supplied metadata document or a
+		// dial error naming an internal address: it goes to the log, not
+		// to the caller.
+		log.Printf("oauth: token endpoint: unknown client: %v", err)
+		return nil, &tokenError{Code: "invalid_client", Desc: "unknown client", basic: basic}
+	}
+	if c.Secret != "" && !secretMatches(secret, c.Secret) {
 		return nil, &tokenError{Code: "invalid_client", Desc: "client authentication failed", basic: basic}
 	}
 	return c, nil

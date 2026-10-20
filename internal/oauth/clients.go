@@ -18,6 +18,10 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +95,11 @@ func (c StaticClient) validate() error {
 	case c.ServiceAccount != "" && !strings.Contains(c.ServiceAccount, "@"):
 		return fmt.Errorf("client %q: service_account %q isn't an email", c.ID, c.ServiceAccount)
 	}
+	for _, r := range c.RedirectURIs {
+		if !validRedirectURI(r) {
+			return fmt.Errorf("client %q: redirect URI %q isn't allowed (https, loopback http, or a private-use scheme)", c.ID, r)
+		}
+	}
 	return nil
 }
 
@@ -103,6 +112,22 @@ type dcrClient struct {
 }
 
 var errUnknownClient = errors.New("unknown client")
+
+// errCIMDUnavailable is a client's metadata document that couldn't be
+// fetched right now (no answer, 5xx, 429): the client's host failing,
+// not the client being unknown.
+var errCIMDUnavailable = errors.New("client metadata document unavailable")
+
+// clientUnavailable reports whether a resolveClient error is the
+// client's metadata host failing, rather than an unknown client.
+func clientUnavailable(err error) bool { return errors.Is(err, errCIMDUnavailable) }
+
+// secretMatches compares digests in constant time, so neither the
+// content nor the length of the secret leaks through timing.
+func secretMatches(got, want string) bool {
+	g, w := sha256.Sum256([]byte(got)), sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(g[:], w[:]) == 1
+}
 
 // resolveClient finds the client a client_id names: pre-registered, a
 // sealed DCR registration, or a CIMD URL.
@@ -223,15 +248,21 @@ func (f *cimdFetcher) fetch(ctx context.Context, id string) (*client, error) {
 	req.Header.Set("Accept", "application/json")
 	resp, err := f.hc.Do(req) //nolint:gosec // client-supplied URL, fetched with SSRFSafeClient
 	if err != nil {
-		return nil, fmt.Errorf("fetch client metadata: %w", err)
+		if permanentFetchError(err) {
+			return nil, fmt.Errorf("fetch client metadata: %w", err)
+		}
+		return nil, fmt.Errorf("%w: %w", errCIMDUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= http.StatusInternalServerError || resp.StatusCode == http.StatusTooManyRequests {
+		return nil, fmt.Errorf("%w: HTTP %d", errCIMDUnavailable, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch client metadata: HTTP %d", resp.StatusCode)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, cimdMaxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("fetch client metadata: %w", err)
+		return nil, fmt.Errorf("%w: %w", errCIMDUnavailable, err)
 	}
 	if len(b) > cimdMaxBytes {
 		return nil, errors.New("client metadata document is too large")
@@ -267,6 +298,21 @@ func (f *cimdFetcher) fetch(ctx context.Context, id string) (*client, error) {
 	return c, nil
 }
 
+// permanentFetchError reports whether a metadata fetch failed for a
+// reason a retry won't fix: an address SSRFSafeClient refuses, a name
+// that doesn't resolve, or a certificate that doesn't verify. Those make
+// the client unknown; anything else (timeouts, refused or reset
+// connections) is its host being unavailable.
+func permanentFetchError(err error) bool {
+	var dns *net.DNSError
+	var cert *tls.CertificateVerificationError
+	var unknownCA x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.Is(err, errNonPublic) || (errors.As(err, &dns) && dns.IsNotFound) ||
+		errors.As(err, &cert) || errors.As(err, &unknownCA) || errors.As(err, &hostname) || errors.As(err, &invalid)
+}
+
 // cacheTTL reads max-age from Cache-Control, capped; no-store and
 // no-cache mean don't cache.
 func cacheTTL(cc string) time.Duration {
@@ -300,7 +346,7 @@ func SSRFSafeClient(timeout time.Duration) *http.Client {
 			}
 			ip, err := netip.ParseAddr(host)
 			if err != nil || !isPublic(ip) {
-				return fmt.Errorf("refusing to dial non-public address %s", host)
+				return fmt.Errorf("%w %s", errNonPublic, host)
 			}
 			return nil
 		},
@@ -318,9 +364,41 @@ func SSRFSafeClient(timeout time.Duration) *http.Client {
 	}
 }
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+// errNonPublic is SSRFSafeClient refusing an address.
+var errNonPublic = errors.New("refusing to dial non-public address")
+
+// nonPublic are special-purpose ranges that IsGlobalUnicast admits but a
+// client-supplied URL mustn't reach: "this network", shared address
+// space (CGNAT), IETF protocol assignments, benchmarking, the 6to4 relay
+// anycast, reserved space, documentation, and the IPv6 prefixes that
+// embed an IPv4 address (IPv4-compatible, SIIT, NAT64, Teredo and the
+// rest of the IETF block, 6to4): NAT64's 64:ff9b::a9fe:a9fe reaches
+// 169.254.169.254.
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/96"),
+	netip.MustParsePrefix("::ffff:0:0:0/96"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+}
 
 func isPublic(ip netip.Addr) bool {
 	ip = ip.Unmap()
-	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !cgnat.Contains(ip)
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+	for _, p := range nonPublic {
+		if p.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }

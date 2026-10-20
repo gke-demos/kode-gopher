@@ -88,9 +88,9 @@ We target the MCP authorization spec 2025-11-25 and the go-sdk client in v1.6.0 
 
 | Mechanism | How we support it |
 |---|---|
-| **Client ID Metadata Documents** (spec-preferred) | `client_id` is an HTTPS URL. We fetch the document (size cap, timeout, public IPs only, cached per HTTP caching headers) and check `redirect_uris` and the client name shown at consent. |
+| **Client ID Metadata Documents** (spec-preferred) | `client_id` is an HTTPS URL. We fetch the document (size cap, timeout, public IPs only, not the special-purpose ranges such as NAT64 and 6to4 that embed private IPv4 addresses, cached per HTTP caching headers) and check `redirect_uris` and the client name shown at consent. |
 | **Dynamic Client Registration (RFC 7591)** | Open registration for public clients at `/register`. Stateless: the issued `client_id` is a sealed envelope of the registered metadata, so there's nothing to store and any replica can check it. |
-| **Pre-registered clients** | Static client IDs (and secrets for confidential clients) from config, for operators who want a closed set. |
+| **Pre-registered clients** | Static client IDs (and secrets for confidential clients) from config, for operators who want a closed set. Their redirect URIs pass the same check as a registered client's. |
 
 An operator can turn off open registration (CIMD and DCR) and keep only pre-registered clients.
 

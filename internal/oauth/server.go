@@ -28,6 +28,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -120,6 +122,9 @@ func New(cfg Config) (*Server, error) {
 	case cfg.Keys == nil:
 		return nil, errors.New("oauth: a sealing keyring is required")
 	}
+	if err := checkGoogleEndpoints(cfg); err != nil {
+		return nil, err
+	}
 	for i, d := range cfg.Allow.Domains {
 		cfg.Allow.Domains[i] = strings.ToLower(d)
 	}
@@ -143,6 +148,9 @@ func New(cfg Config) (*Server, error) {
 		if err := c.validate(); err != nil {
 			return nil, fmt.Errorf("oauth: %w", err)
 		}
+		// A copy, so changing the caller's slice can't change a client
+		// after New.
+		c.RedirectURIs = slices.Clone(c.RedirectURIs)
 		s.static[c.ID] = c
 		s.serviceClients = s.serviceClients || c.ServiceAccount != ""
 	}
@@ -150,6 +158,31 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("oauth: client-credentials clients need a service token minter")
 	}
 	return s, nil
+}
+
+// checkGoogleEndpoints requires overridden Google and vault endpoints to
+// be https (http only on loopback, for tests): the ID token is trusted
+// for coming straight from Google's token endpoint over TLS, and the
+// vault hands out users' Google tokens.
+func checkGoogleEndpoints(cfg Config) error {
+	endpoints := [][2]string{
+		{"Google.AuthURL", cfg.Google.AuthURL},
+		{"Google.TokenURL", cfg.Google.TokenURL},
+		{"Google.TokenInfoURL", cfg.Google.TokenInfoURL},
+	}
+	if v, ok := cfg.Custody.(*VaultCustody); ok && v != nil {
+		endpoints = append(endpoints, [2]string{"VaultCustody.Endpoint", v.Endpoint})
+	}
+	for _, e := range endpoints {
+		if e[1] == "" {
+			continue // Google's default
+		}
+		u, err := url.Parse(e[1])
+		if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname()))) {
+			return fmt.Errorf("oauth: %s %q must be an https URL (or http on loopback, for testing)", e[0], e[1])
+		}
+	}
+	return nil
 }
 
 // Resource is the MCP endpoint URL tokens are bound to.
