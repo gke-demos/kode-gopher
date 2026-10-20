@@ -228,3 +228,21 @@ func TestServiceClientConfig(t *testing.T) {
 		t.Error("LoadStaticClients accepted a client-credentials client without a secret")
 	}
 }
+
+// Rotating a client's secret revokes the tokens minted with the old one.
+func TestClientCredentialsRevokedBySecretRotation(t *testing.T) {
+	e, _ := newServiceEnv(t)
+	r := e.token(ccForm(nil), "ci", "ci-secret")
+	verify := e.as.Verifier()
+	if _, err := verify(context.Background(), r.Access, nil); err != nil {
+		t.Fatalf("fresh token: %v", err)
+	}
+	e.as.static["ci"] = StaticClient{ID: "ci", Secret: "ci-secret-2", Name: "CI", ServiceAccount: runnerSA}
+	if _, err := verify(context.Background(), r.Access, nil); err == nil {
+		t.Error("token still valid after the client's secret was rotated")
+	}
+	r = e.token(ccForm(nil), "ci", "ci-secret-2")
+	if _, err := verify(context.Background(), r.Access, nil); err != nil {
+		t.Errorf("token minted with the new secret: %v", err)
+	}
+}

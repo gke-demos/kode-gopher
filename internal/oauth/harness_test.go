@@ -152,7 +152,8 @@ func (g *fakeGoogle) token(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		scope := scopeOpenID + " " + scopeEmail + " " + scopeCloudPlatform
-		writeJSON(w, http.StatusOK, map[string]any{"access_token": g.mint(u, scope, 3600), "expires_in": 3599, "scope": scope})
+		writeJSON(w, http.StatusOK, map[string]any{"access_token": g.mint(u, scope, 3600), "expires_in": 3599, "scope": scope,
+			"id_token": idToken(u, testGoogleID)})
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported_grant_type"})
 	}

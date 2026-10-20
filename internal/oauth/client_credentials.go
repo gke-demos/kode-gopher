@@ -18,6 +18,9 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"log"
 	"net/http"
 	"strings"
@@ -64,7 +67,7 @@ func (s *Server) clientCredentials(r *http.Request, c *client) (map[string]any, 
 	now := time.Now()
 	at, exp, terr := s.sealAccess(accessPayload{
 		Sub: serviceSubject(c.ID), Email: c.ServiceAccount, ClientID: c.ID, Aud: s.resource, Scope: scope,
-		Token: tok.AccessToken, TokenExp: tok.Expiry.Unix(), Mode: modeService,
+		Token: tok.AccessToken, TokenExp: tok.Expiry.Unix(), Mode: modeService, SH: secretTag(c.Secret),
 	}, now)
 	if terr != nil {
 		return nil, terr
@@ -82,10 +85,19 @@ func (s *Server) clientCredentials(r *http.Request, c *client) (map[string]any, 
 // from Google subs, which are numeric.
 func serviceSubject(clientID string) string { return "client:" + clientID }
 
+// secretTag is a short digest of a client secret, sealed into a
+// client-credentials token (inside the envelope, so the client never
+// sees it).
+func secretTag(secret string) string {
+	sum := sha256.Sum256([]byte("kode-gopher-client-secret/" + secret))
+	return base64.RawURLEncoding.EncodeToString(sum[:9])
+}
+
 // serviceClientCurrent reports whether a client-credentials token still
-// matches the configuration: removing the client, or changing its
-// service account, revokes its tokens at once.
+// matches the configuration: removing the client, rotating its secret,
+// or changing its service account revokes its tokens at once.
 func (s *Server) serviceClientCurrent(p *accessPayload) bool {
 	c, ok := s.static[p.ClientID]
-	return ok && c.ServiceAccount != "" && c.ServiceAccount == p.Email && p.Sub == serviceSubject(c.ID)
+	return ok && c.ServiceAccount != "" && c.ServiceAccount == p.Email && p.Sub == serviceSubject(c.ID) &&
+		subtle.ConstantTimeCompare([]byte(secretTag(c.Secret)), []byte(p.SH)) == 1
 }
