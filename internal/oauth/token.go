@@ -278,6 +278,8 @@ func (s *Server) renewGrant(ctx context.Context, u User, secret string) (*Grant,
 	}
 	g, err := s.cfg.Custody.refresh(ctx, s.google, u, secret, s.continueURI())
 	if errors.Is(err, errReauth) {
+		// The client signs the user out: say why in the log too.
+		log.Printf("oauth: %s refresh for %s needs a new sign-in: %v", s.cfg.Custody.Name(), u.Email, err)
 		return nil, invalidGrant(err.Error())
 	}
 	if err != nil {

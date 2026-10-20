@@ -246,6 +246,12 @@ type tokenInfo struct {
 	Expiry time.Time
 }
 
+// errGoogleToken is Google's tokeninfo refusing an access token (400
+// with error invalid_token, its only verdict): expired, revoked or never
+// valid. Any other non-200 answer, a 400 without that body included, is
+// Google, or something in front of it (an egress proxy), failing.
+var errGoogleToken = errors.New("google tokeninfo: the access token is invalid")
+
 // tokenInfo asks Google whose an access token is and when it really
 // expires (the vault's expireTime can be wrong).
 func (g *GoogleClient) tokenInfo(ctx context.Context, hc *http.Client, accessToken string) (*tokenInfo, error) {
@@ -260,7 +266,17 @@ func (g *GoogleClient) tokenInfo(ctx context.Context, hc *http.Client, accessTok
 		return nil, fmt.Errorf("google tokeninfo: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusBadRequest:
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&e) == nil && e.Error == "invalid_token" {
+			return nil, errGoogleToken
+		}
+		return nil, fmt.Errorf("google tokeninfo: HTTP %d", resp.StatusCode)
+	default:
 		return nil, fmt.Errorf("google tokeninfo: HTTP %d", resp.StatusCode)
 	}
 	var r struct {

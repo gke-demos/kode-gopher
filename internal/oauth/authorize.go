@@ -248,8 +248,11 @@ const grantFailed = "couldn't get a Google Cloud grant for this account (the ser
 
 // custodyError is the OAuth error for a custody failure: access_denied
 // for a grant only the user can repair (errReauth: declined consent,
-// another account's grant, a scope not granted), server_error for Google
-// or the vault failing (no answer, 429, 5xx), which a retry may fix.
+// another account's grant, a scope not granted, a vault token Google
+// refuses before and after a forced refresh), server_error for Google or
+// the vault failing (no answer, any vault HTTP error, the vault pending
+// or answering nothing usable, a tokeninfo answer other than 200 or 400
+// invalid_token), which a retry may fix.
 // Google failing isn't Google refusing.
 func custodyError(err error) string {
 	if errors.Is(err, errReauth) {
