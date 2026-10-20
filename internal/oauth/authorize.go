@@ -126,7 +126,9 @@ func (s *Server) validateAuthRequest(q url.Values, c *client, redirectURI string
 	if resource == "" {
 		resource = s.resource
 	}
-	if resource != s.resource {
+	// RFC 8707 lets a request name several resources; a kode-gopher
+	// token is for one, so a second would be checked by no one.
+	if resource != s.resource || len(q["resource"]) > 1 {
 		return nil, &authError{"invalid_target", "resource must be " + s.resource}
 	}
 	// One scope exists. Others are dropped rather than refused, as RFC
@@ -189,7 +191,10 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, r, req.RedirectURI, req.State, s.cfg.Issuer, &authError{code, desc})
 	}
 	if e := q.Get("error"); e != "" {
-		fail("access_denied", "Google sign-in: "+e)
+		// Google's value arrives in the query, so anyone can write it:
+		// it goes to the log, and the client hears a fixed text.
+		log.Printf("oauth: Google sign-in returned error %q", e) //nolint:gosec // %q escapes it to one line
+		fail("access_denied", "Google sign-in was cancelled or refused")
 		return
 	}
 	ctx := r.Context()
@@ -208,7 +213,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err := s.cfg.Allow.admit(ctx, u); err != nil {
 		log.Printf("oauth: refused %s: %v", u.Email, err)
 		if errors.Is(err, errNotAllowed) {
-			fail("access_denied", u.Email+" isn't allowed to use this server")
+			// The log names the account; the redirect, which the client
+			// and its logs see, doesn't.
+			fail("access_denied", "this account isn't allowed to use this server")
 		} else {
 			fail("server_error", "couldn't check the allow-list")
 		}
@@ -217,7 +224,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	grant, consent, err := s.cfg.Custody.begin(ctx, s.google, u, t, s.continueURI())
 	if err != nil {
 		log.Printf("oauth: %s custody for %s: %v", s.cfg.Custody.Name(), u.Email, err)
-		fail("access_denied", grantFailed)
+		fail(custodyError(err), grantFailed)
 		return
 	}
 	if consent != nil {
@@ -230,6 +237,18 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 // grantFailed is what the client hears when custody fails; the reason
 // (which may quote Google's response) goes only to the log.
 const grantFailed = "couldn't get a Google Cloud grant for this account (the server log has details)"
+
+// custodyError is the OAuth error for a custody failure: access_denied
+// for a grant only the user can repair (errReauth: declined consent,
+// another account's grant, a scope not granted), server_error for Google
+// or the vault failing (no answer, 429, 5xx), which a retry may fix.
+// Google failing isn't Google refusing.
+func custodyError(err error) string {
+	if errors.Is(err, errReauth) {
+		return "access_denied"
+	}
+	return "server_error"
+}
 
 // toConsent parks the flow in a cookie and sends the browser to the
 // vault's consent leg, which returns to /consent/continue.
@@ -264,7 +283,7 @@ func (s *Server) handleConsentContinue(w http.ResponseWriter, r *http.Request) {
 	grant, err := s.cfg.Custody.finish(r.Context(), s.google, p.User, p.Consent, r.URL.Query(), s.continueURI())
 	if err != nil {
 		log.Printf("oauth: %s consent for %s: %v", s.cfg.Custody.Name(), p.User.Email, err)
-		redirectError(w, r, p.Req.RedirectURI, p.Req.State, s.cfg.Issuer, &authError{"access_denied", grantFailed})
+		redirectError(w, r, p.Req.RedirectURI, p.Req.State, s.cfg.Issuer, &authError{custodyError(err), grantFailed})
 		return
 	}
 	s.finishAuthorize(w, r, &p.Req, p.User, grant)
@@ -390,11 +409,27 @@ func (s *Server) clearCookie(w http.ResponseWriter, name string) {
 }
 
 func redirectError(w http.ResponseWriter, r *http.Request, redirectURI, state, issuer string, e *authError) {
-	v := url.Values{"error": {e.code}, "error_description": {e.desc}, "iss": {issuer}}
+	v := url.Values{"error": {e.code}, "error_description": {cleanDesc(e.desc)}, "iss": {issuer}}
 	if state != "" {
 		v.Set("state", state)
 	}
 	redirectTo(w, r, redirectURI, v)
+}
+
+// cleanDesc keeps an error_description within RFC 6749's character set
+// (%x20-21 / %x23-5B / %x5D-7E), whatever text it quotes: a double
+// quote becomes a single one, anything else outside it a '?'.
+func cleanDesc(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		switch {
+		case c == '"':
+			b[i] = '\''
+		case c < 0x20 || c > 0x7e || c == '\\':
+			b[i] = '?'
+		}
+	}
+	return string(b)
 }
 
 func redirectTo(w http.ResponseWriter, r *http.Request, base string, params url.Values) {
