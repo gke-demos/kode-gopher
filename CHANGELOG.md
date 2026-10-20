@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Security
+
+- **Go 1.26.9 and `golang.org/x/net` v0.60.0.** The server, the sandbox image and the prewarmed modules move off go1.26.8 and `x/net` v0.59.0 (v0.58.0 in the sandbox image), which have known `net/http` and HTTP/2 vulnerabilities (GO-2026-6603, GO-2026-6610 to GO-2026-6613, GO-2026-6617). Redeploy to pick up the new server and sandbox images.
+
 ### Added
 
 - **Group allow lists work on GKE.** `serve --oauth-groups-service-account` (`GROUPS_SERVICE_ACCOUNT` for the deploy script) checks `--oauth-allow-groups` as a service account that kode-gopher impersonates for that call. That service account holds the Groups Reader admin role. kode-gopher's own Workload Identity principal has no email, so it can't be assigned an admin role. On Workspace editions without Cloud Identity's transitive membership check (Business Starter, Standard), kode-gopher walks nested groups with the membership list instead. ([#36](https://github.com/gke-demos/kode-gopher/issues/36))
