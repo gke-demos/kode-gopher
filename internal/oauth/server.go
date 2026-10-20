@@ -28,6 +28,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -107,8 +109,8 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	cfg.Issuer = strings.TrimRight(cfg.Issuer, "/")
 	switch {
-	case !strings.HasPrefix(cfg.Issuer, "https://") && !strings.HasPrefix(cfg.Issuer, "http://localhost") && !strings.HasPrefix(cfg.Issuer, "http://127.0.0.1"):
-		return nil, fmt.Errorf("oauth: issuer %q must be https (or http on loopback, for testing)", cfg.Issuer)
+	case !validIssuer(cfg.Issuer):
+		return nil, fmt.Errorf("oauth: issuer %q must be a lowercase https URL with no query or fragment (or http on loopback, for testing)", cfg.Issuer)
 	case cfg.Google.ClientID == "" || cfg.Google.ClientSecret == "":
 		return nil, errors.New("oauth: Google client ID and secret are required")
 	case cfg.Custody == nil:
@@ -119,6 +121,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("oauth: group allow-list needs a group checker")
 	case cfg.Keys == nil:
 		return nil, errors.New("oauth: a sealing keyring is required")
+	}
+	if err := checkGoogleEndpoints(cfg); err != nil {
+		return nil, err
 	}
 	for i, d := range cfg.Allow.Domains {
 		cfg.Allow.Domains[i] = strings.ToLower(d)
@@ -143,6 +148,9 @@ func New(cfg Config) (*Server, error) {
 		if err := c.validate(); err != nil {
 			return nil, fmt.Errorf("oauth: %w", err)
 		}
+		// A copy, so changing the caller's slice can't change a client
+		// after New.
+		c.RedirectURIs = slices.Clone(c.RedirectURIs)
 		s.static[c.ID] = c
 		s.serviceClients = s.serviceClients || c.ServiceAccount != ""
 	}
@@ -150,6 +158,47 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("oauth: client-credentials clients need a service token minter")
 	}
 	return s, nil
+}
+
+// checkGoogleEndpoints requires overridden Google and vault endpoints to
+// be https (http only on loopback, for tests): the ID token is trusted
+// for coming straight from Google's token endpoint over TLS, and the
+// vault hands out users' Google tokens.
+func checkGoogleEndpoints(cfg Config) error {
+	endpoints := [][2]string{
+		{"Google.AuthURL", cfg.Google.AuthURL},
+		{"Google.TokenURL", cfg.Google.TokenURL},
+		{"Google.TokenInfoURL", cfg.Google.TokenInfoURL},
+	}
+	if v, ok := cfg.Custody.(*VaultCustody); ok && v != nil {
+		endpoints = append(endpoints, [2]string{"VaultCustody.Endpoint", v.Endpoint})
+	}
+	for _, e := range endpoints {
+		if e[1] != "" && !httpsOrLoopback(e[1]) { // empty: Google's default
+			return fmt.Errorf("oauth: %s %q must be an https URL (or http on loopback, for testing)", e[0], e[1])
+		}
+	}
+	return nil
+}
+
+// validIssuer reports whether raw can be the issuer: httpsOrLoopback, the
+// scheme written in lowercase (url.Parse lowercases it, but secureCookies
+// and every URL built from the issuer use the raw string), and no query or
+// fragment, which would break every endpoint appended to it.
+func validIssuer(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && httpsOrLoopback(raw) && strings.HasPrefix(raw, u.Scheme+"://") &&
+		u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
+}
+
+// httpsOrLoopback reports whether raw is an absolute https URL, or http
+// on a loopback host (for tests), with no userinfo.
+func httpsOrLoopback(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	return u.Scheme == "https" || (u.Scheme == "http" && isLoopbackHost(u.Hostname()))
 }
 
 // Resource is the MCP endpoint URL tokens are bound to.

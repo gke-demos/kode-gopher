@@ -85,8 +85,16 @@ type authError struct {
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	c, err := s.resolveClient(r.Context(), q.Get("client_id"))
+	if clientUnavailable(err) {
+		log.Printf("oauth: authorize: couldn't resolve client: %v", err)
+		authPage(w, http.StatusServiceUnavailable, "Try again", "Sign-in isn't available right now: the client's metadata couldn't be fetched. Try again in a moment.")
+		return
+	}
 	if err != nil {
-		authPage(w, http.StatusBadRequest, "Unknown client", "This sign-in link names a client this server doesn't recognize: "+err.Error())
+		// The reason may quote a client-supplied metadata document or a
+		// dial error naming an internal address: log it, show none of it.
+		log.Printf("oauth: authorize: unknown client: %v", err)
+		authPage(w, http.StatusBadRequest, "Unknown client", "This sign-in link names a client this server doesn't recognize.")
 		return
 	}
 	redirectURI := q.Get("redirect_uri")

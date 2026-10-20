@@ -18,6 +18,10 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +37,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // client is an OAuth client resolved from its client_id.
@@ -91,6 +96,11 @@ func (c StaticClient) validate() error {
 	case c.ServiceAccount != "" && !strings.Contains(c.ServiceAccount, "@"):
 		return fmt.Errorf("client %q: service_account %q isn't an email", c.ID, c.ServiceAccount)
 	}
+	for _, r := range c.RedirectURIs {
+		if !validRedirectURI(r) {
+			return fmt.Errorf("client %q: redirect URI %q isn't allowed (https, loopback http, or a private-use scheme)", c.ID, r)
+		}
+	}
 	return nil
 }
 
@@ -103,6 +113,22 @@ type dcrClient struct {
 }
 
 var errUnknownClient = errors.New("unknown client")
+
+// errCIMDUnavailable is a client's metadata document that couldn't be
+// fetched right now (no answer, 5xx, 429): the client's host failing,
+// not the client being unknown.
+var errCIMDUnavailable = errors.New("client metadata document unavailable")
+
+// clientUnavailable reports whether a resolveClient error is the
+// client's metadata host failing, rather than an unknown client.
+func clientUnavailable(err error) bool { return errors.Is(err, errCIMDUnavailable) }
+
+// secretMatches compares digests in constant time, so neither the
+// content nor the length of the secret leaks through timing.
+func secretMatches(got, want string) bool {
+	g, w := sha256.Sum256([]byte(got)), sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(g[:], w[:]) == 1
+}
 
 // resolveClient finds the client a client_id names: pre-registered, a
 // sealed DCR registration, or a CIMD URL.
@@ -196,6 +222,7 @@ const (
 	cimdMaxBytes   = 64 << 10
 	cimdDefaultTTL = 5 * time.Minute
 	cimdMaxTTL     = time.Hour
+	cimdMaxCached  = 1024
 )
 
 func newCIMDFetcher(hc *http.Client) *cimdFetcher {
@@ -223,15 +250,21 @@ func (f *cimdFetcher) fetch(ctx context.Context, id string) (*client, error) {
 	req.Header.Set("Accept", "application/json")
 	resp, err := f.hc.Do(req) //nolint:gosec // client-supplied URL, fetched with SSRFSafeClient
 	if err != nil {
-		return nil, fmt.Errorf("fetch client metadata: %w", err)
+		if permanentFetchError(err) {
+			return nil, fmt.Errorf("fetch client metadata: %w", err)
+		}
+		return nil, fmt.Errorf("%w: %w", errCIMDUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= http.StatusInternalServerError || resp.StatusCode == http.StatusTooManyRequests {
+		return nil, fmt.Errorf("%w: HTTP %d", errCIMDUnavailable, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch client metadata: HTTP %d", resp.StatusCode)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, cimdMaxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("fetch client metadata: %w", err)
+		return nil, fmt.Errorf("%w: %w", errCIMDUnavailable, err)
 	}
 	if len(b) > cimdMaxBytes {
 		return nil, errors.New("client metadata document is too large")
@@ -258,13 +291,62 @@ func (f *cimdFetcher) fetch(ctx context.Context, id string) (*client, error) {
 			return nil, fmt.Errorf("client metadata redirect URI %q isn't allowed", r)
 		}
 	}
-	c := &client{ID: id, Name: doc.ClientName, RedirectURIs: doc.RedirectURIs}
+	c := &client{ID: id, Name: truncate(doc.ClientName, maxClientName), RedirectURIs: doc.RedirectURIs}
 	if ttl := cacheTTL(resp.Header.Get("Cache-Control")); ttl > 0 {
-		f.mu.Lock()
-		f.cache[id] = cimdEntry{c: c, expires: time.Now().Add(ttl)}
-		f.mu.Unlock()
+		f.store(id, c, ttl)
 	}
 	return c, nil
+}
+
+// store caches c for ttl. The cache is bounded: when it's full, expired
+// entries go first, and if none have expired, everything does (the next
+// fetch of each client refills it).
+func (f *cimdFetcher) store(id string, c *client, ttl time.Duration) {
+	now := time.Now()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.cache) >= cimdMaxCached {
+		for k, e := range f.cache {
+			if !now.Before(e.expires) {
+				delete(f.cache, k)
+			}
+		}
+		if len(f.cache) >= cimdMaxCached {
+			clear(f.cache)
+		}
+	}
+	f.cache[id] = cimdEntry{c: c, expires: now.Add(ttl)}
+}
+
+// maxClientName bounds a client name shown on the consent page, sealed
+// into the flow and logged.
+const maxClientName = 100
+
+// truncate cuts s to at most n bytes, on a character boundary.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// permanentFetchError reports whether a metadata fetch failed for a
+// reason a retry won't fix: an address SSRFSafeClient refuses, a
+// redirect, a name that doesn't resolve, or a certificate that doesn't
+// verify. Those make
+// the client unknown; anything else (timeouts, refused or reset
+// connections) is its host being unavailable.
+func permanentFetchError(err error) bool {
+	var dns *net.DNSError
+	var cert *tls.CertificateVerificationError
+	var unknownCA x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.Is(err, errNonPublic) || errors.Is(err, errRedirect) || (errors.As(err, &dns) && dns.IsNotFound) ||
+		errors.As(err, &cert) || errors.As(err, &unknownCA) || errors.As(err, &hostname) || errors.As(err, &invalid)
 }
 
 // cacheTTL reads max-age from Cache-Control, capped; no-store and
@@ -300,7 +382,7 @@ func SSRFSafeClient(timeout time.Duration) *http.Client {
 			}
 			ip, err := netip.ParseAddr(host)
 			if err != nil || !isPublic(ip) {
-				return fmt.Errorf("refusing to dial non-public address %s", host)
+				return fmt.Errorf("%w %s", errNonPublic, host)
 			}
 			return nil
 		},
@@ -313,14 +395,62 @@ func SSRFSafeClient(timeout time.Duration) *http.Client {
 			TLSHandshakeTimeout: timeout,
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errors.New("redirects aren't followed")
+			return errRedirect
 		},
 	}
 }
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+// errNonPublic is SSRFSafeClient refusing an address.
+var errNonPublic = errors.New("refusing to dial non-public address")
+
+// errRedirect is SSRFSafeClient refusing to follow a redirect.
+var errRedirect = errors.New("redirects aren't followed")
+
+// nonPublic are special-purpose ranges that IsGlobalUnicast admits but a
+// client-supplied URL mustn't reach: "this network", shared address
+// space (CGNAT), IETF protocol assignments, benchmarking, the 6to4 relay
+// anycast, reserved space, documentation, deprecated site-local IPv6,
+// IPv6 discard-only and SRv6 SIDs, and the IPv6 prefixes that embed an IPv4 address (IPv4-compatible,
+// SIIT, NAT64, Teredo and the rest of the IETF block, 6to4): NAT64's
+// 64:ff9b::a9fe:a9fe reaches 169.254.169.254.
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/96"),
+	netip.MustParsePrefix("::ffff:0:0:0/96"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
+	netip.MustParsePrefix("fec0::/10"),
+}
 
 func isPublic(ip netip.Addr) bool {
+	// A zone only means something on link-local addresses, never public
+	// ones, and Prefix.Contains is false for any zoned address, so a zone
+	// would slip past every range below.
+	if ip.Zone() != "" {
+		return false
+	}
 	ip = ip.Unmap()
-	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !cgnat.Contains(ip)
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+	for _, p := range nonPublic {
+		if p.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
