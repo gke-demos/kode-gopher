@@ -90,8 +90,9 @@ Deploy with `ALLOW_GROUPS=<group emails>` and `GROUPS_SERVICE_ACCOUNT=kode-gophe
 **Workspace editions.** Cloud Identity's one-call transitive membership check is only available on Google Workspace Enterprise and Cloud Identity Premium. On other editions (Business Starter, Standard and Plus) it answers 403, and kode-gopher walks the group and its nested groups with the membership list instead, which every edition has:
 - It checks each group's direct members before its nested groups, and a match anywhere admits.
 - Users and service accounts match by email. Devices, shared drives and organization-wide entries ("everyone in the organization") aren't expanded.
-- If a nested group can't be read (no Groups Reader in its Workspace, deleted, or from an external identity source), or nesting goes past 10 levels or 100 groups, members found elsewhere still get in. Only accounts not found anywhere get `server_error` instead of a refusal, since they might be in the group that couldn't be read.
+- If a nested group can't be read (no Groups Reader in its Workspace, deleted, more than 100 pages of direct members (up to 20,000), or from an external identity source), or nesting goes past 10 levels or 100 groups, members found elsewhere still get in. Only accounts not found anywhere get `server_error` instead of a refusal, since they might be in the group that couldn't be read. An allow-listed group with more than 100 pages of direct members can't be walked at all: every check against it gets `server_error`.
 - Membership lists are cached for 5 minutes, so one walk serves every user checked against the same groups.
+- On every edition, an address with a quote or backslash is checked by the walk, against the member list, never by the transitive check.
 
 :::note
 Groups in another Workspace than the user's, such as a group in a second domain you administer, should work if the service account holds Groups Reader in the group's Workspace and that group allows external members. This hasn't been verified yet.

@@ -284,7 +284,7 @@ func TestCloudIdentityGroups(t *testing.T) {
 	defer srv.Close()
 	c := &CloudIdentityGroups{Client: srv.Client(), Endpoint: srv.URL + "/"}
 	ctx := context.Background()
-	for member, want := range map[string]bool{"bob@other.org": true, "mallory@gmail.com": false, "ghost@nowhere.org": false} {
+	for member, want := range map[string]bool{"bob@other.org": true, "mallory@gmail.com": false} {
 		got, err := c.IsMember(ctx, "g@example.com", member)
 		if err != nil || got != want {
 			t.Errorf("IsMember(%s) = %v, %v; want %v", member, got, err, want)
@@ -292,6 +292,13 @@ func TestCloudIdentityGroups(t *testing.T) {
 	}
 	if lookups != 1 {
 		t.Errorf("group looked up %d times, want 1", lookups)
+	}
+	// A 404 on a cached name looks the group up once more, then is a "no".
+	if got, err := c.IsMember(ctx, "g@example.com", "ghost@nowhere.org"); err != nil || got {
+		t.Errorf("IsMember(ghost@nowhere.org) = %v, %v; want false", got, err)
+	}
+	if lookups != 2 {
+		t.Errorf("group looked up %d times, want 2", lookups)
 	}
 	if _, err := c.IsMember(ctx, "denied@example.com", "bob@other.org"); err == nil {
 		t.Error("a failed group lookup reported a decision")

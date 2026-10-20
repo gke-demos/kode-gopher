@@ -111,6 +111,9 @@ type GroupChecker interface {
 // edition has, and skips the transitive call for that group for an
 // hour. Membership lists are cached for allowCacheTTL, so one walk
 // serves every user checked against the same groups.
+//
+// A member whose address has a quote or backslash is always matched by
+// the walk, never by the transitive call's quoted query.
 type CloudIdentityGroups struct {
 	// Client is authenticated with the
 	// cloud-identity.groups.readonly scope.
@@ -140,13 +143,51 @@ const (
 	// transitiveRetry is how long a group's 403 from
 	// checkTransitiveMembership is remembered before trying it again.
 	transitiveRetry = time.Hour
+	// walkMaxPages bounds the pages of one group's memberships.list (200
+	// members each); past it the walk is incomplete.
+	walkMaxPages = 100
 )
+
+// errNotFound is checkTransitiveMembership's 404: the directory knows no
+// such member in the group or, if the group's name came from the cache,
+// perhaps no such group any more.
+var errNotFound = errors.New("cloud identity: not found")
 
 // IsMember implements GroupChecker.
 func (c *CloudIdentityGroups) IsMember(ctx context.Context, group, member string) (bool, error) {
-	name, err := c.groupName(ctx, group)
-	if err != nil {
-		return false, err
+	for retried := false; ; retried = true {
+		name, fresh, err := c.groupName(ctx, group)
+		if err != nil {
+			return false, err
+		}
+		in, err := c.check(ctx, group, name, member)
+		if !errors.Is(err, errNotFound) {
+			return in, err
+		}
+		if fresh || retried {
+			// The group was just looked up, so the 404 is about the
+			// member: a member key the directory doesn't know isn't a
+			// member.
+			return false, nil
+		}
+		// The name came from the cache and may be stale (the group was
+		// deleted and recreated). Look the group up again and ask once
+		// more, rather than refuse its members until the name expires.
+		c.mu.Lock()
+		delete(c.names, group)
+		c.mu.Unlock()
+	}
+}
+
+// check asks whether member is in the group named name: with the
+// transitive call where the edition has it, else with the walk.
+func (c *CloudIdentityGroups) check(ctx context.Context, group, name, member string) (bool, error) {
+	if strings.ContainsAny(member, `'\`) {
+		// The transitive call takes the member inside a quoted query
+		// string. Rather than trust an escaping rule (stripping the quote
+		// turned o'brien into obrien), a member that would need one is
+		// matched exactly by the walk.
+		return c.walk(ctx, name, member)
 	}
 	c.mu.Lock()
 	at, walk := c.noTransitive[name]
@@ -172,15 +213,14 @@ func (c *CloudIdentityGroups) IsMember(ctx context.Context, group, member string
 }
 
 func (c *CloudIdentityGroups) transitive(ctx context.Context, name, member string) (bool, error) {
-	q := url.Values{"query": {fmt.Sprintf("member_key_id == '%s'", strings.ReplaceAll(member, "'", ""))}}
+	q := url.Values{"query": {fmt.Sprintf("member_key_id == '%s'", member)}}
 	var r struct {
 		HasMembership bool `json:"hasMembership"`
 	}
 	err := c.get(ctx, name+"/memberships:checkTransitiveMembership?"+q.Encode(), &r)
 	var se *statusError
 	if errors.As(err, &se) && se.code == http.StatusNotFound {
-		// A member key the directory doesn't know isn't a member.
-		return false, nil
+		return false, errNotFound
 	}
 	if err != nil {
 		return false, err
@@ -264,7 +304,7 @@ func (c *CloudIdentityGroups) nestedGroups(ctx context.Context, members []member
 			skipped = fmt.Errorf("nested group %s is from an external identity source (namespace %s)", id, m.PreferredMemberKey.Namespace)
 			continue
 		}
-		child, err := c.groupName(ctx, id)
+		child, _, err := c.groupName(ctx, id)
 		if err != nil {
 			skipped = fmt.Errorf("nested group %s: %w", id, err)
 			continue
@@ -290,8 +330,8 @@ type membership struct {
 	Type string `json:"type"`
 }
 
-// members lists a group's direct memberships, all pages, cached for
-// allowCacheTTL.
+// members lists a group's direct memberships, all pages up to
+// walkMaxPages, cached for allowCacheTTL.
 func (c *CloudIdentityGroups) members(ctx context.Context, name string) ([]membership, error) {
 	c.mu.Lock()
 	e, ok := c.lists[name]
@@ -301,7 +341,10 @@ func (c *CloudIdentityGroups) members(ctx context.Context, name string) ([]membe
 	}
 	var all []membership
 	token := ""
-	for {
+	for page := 0; ; page++ {
+		if page >= walkMaxPages {
+			return nil, fmt.Errorf("%s has more than %d pages of members", name, walkMaxPages)
+		}
 		q := url.Values{"view": {"FULL"}, "pageSize": {"200"}}
 		if token != "" {
 			q.Set("pageToken", token)
@@ -328,21 +371,23 @@ func (c *CloudIdentityGroups) members(ctx context.Context, name string) ([]membe
 	return all, nil
 }
 
-func (c *CloudIdentityGroups) groupName(ctx context.Context, group string) (string, error) {
+// groupName resolves a group email to its resource name, groups/<id>.
+// fresh reports that it was looked up just now rather than cached.
+func (c *CloudIdentityGroups) groupName(ctx context.Context, group string) (name string, fresh bool, err error) {
 	c.mu.Lock()
 	e, ok := c.names[group]
 	c.mu.Unlock()
 	if ok && time.Since(e.at) < groupNameTTL {
-		return e.v, nil
+		return e.v, false, nil
 	}
 	var r struct {
 		Name string `json:"name"`
 	}
 	if err := c.get(ctx, "groups:lookup?"+url.Values{"groupKey.id": {group}}.Encode(), &r); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if r.Name == "" {
-		return "", errors.New("group lookup returned no name")
+		return "", false, errors.New("group lookup returned no name")
 	}
 	c.mu.Lock()
 	if c.names == nil {
@@ -350,7 +395,7 @@ func (c *CloudIdentityGroups) groupName(ctx context.Context, group string) (stri
 	}
 	c.names[group] = cached[string]{v: r.Name, at: time.Now()}
 	c.mu.Unlock()
-	return r.Name, nil
+	return r.Name, true, nil
 }
 
 func (c *CloudIdentityGroups) get(ctx context.Context, path string, out any) error {
