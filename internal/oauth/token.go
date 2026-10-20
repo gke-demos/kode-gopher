@@ -245,7 +245,7 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 	// forgotten while its newest token is still good.
 	next := refreshChain{family: p.Family, gen: p.Gen + 1, exp: time.Now().Add(refreshTTL)}
 	if !s.used.rotate(p.Family, p.Gen, time.Unix(next.exp.Unix()+1, 0)) {
-		log.Printf("oauth: reused refresh token for %s (client %s); its family is revoked", p.User.Email, p.ClientID)
+		log.Printf("oauth: reused refresh token for %s (client %q); its family is revoked", p.User.Email, p.ClientID)
 		return nil, invalidGrant("refresh token already used")
 	}
 	// The family is rotated above, so two concurrent refreshes can't both
@@ -384,7 +384,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": code, "error_description": cleanDesc(desc)})
 		return
 	}
-	m.ClientName = truncate(m.ClientName, maxClientName)
+	m.ClientName = clientName(m.ClientName)
 	now := time.Now()
 	id, err := s.keys.seal(purposeClient, dcrClient{RedirectURIs: m.RedirectURIs, Name: m.ClientName, IssuedAt: now.Unix()})
 	if err != nil {

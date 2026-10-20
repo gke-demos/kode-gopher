@@ -37,6 +37,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -57,7 +58,10 @@ type StaticClient struct {
 	ID string `json:"client_id"`
 	// Secret makes the client confidential: it must authenticate at
 	// /token (client_secret_basic or client_secret_post).
-	Secret       string   `json:"client_secret,omitempty"`
+	Secret string `json:"client_secret,omitempty"`
+	// Name is shown in logs, cleaned like any client's name: control
+	// and format characters dropped, whitespace collapsed, at most 100
+	// bytes.
 	Name         string   `json:"client_name,omitempty"`
 	RedirectURIs []string `json:"redirect_uris,omitempty"`
 	// ServiceAccount makes this a client-credentials client (RFC 6749
@@ -134,7 +138,7 @@ func secretMatches(got, want string) bool {
 // sealed DCR registration, or a CIMD URL.
 func (s *Server) resolveClient(ctx context.Context, id string) (*client, error) {
 	if c, ok := s.static[id]; ok {
-		return &client{ID: c.ID, Name: c.Name, RedirectURIs: c.RedirectURIs, Secret: c.Secret, ServiceAccount: c.ServiceAccount}, nil
+		return &client{ID: c.ID, Name: clientName(c.Name), RedirectURIs: c.RedirectURIs, Secret: c.Secret, ServiceAccount: c.ServiceAccount}, nil
 	}
 	if !s.cfg.OpenRegistration {
 		return nil, errUnknownClient
@@ -144,7 +148,9 @@ func (s *Server) resolveClient(ctx context.Context, id string) (*client, error) 
 		if s.keys.open(purposeClient, id, &d) != nil {
 			return nil, errUnknownClient
 		}
-		return &client{ID: id, Name: d.Name, RedirectURIs: d.RedirectURIs}, nil
+		// Cleaned again here: a registration sealed before clientName
+		// existed carries its name as the client sent it.
+		return &client{ID: id, Name: clientName(d.Name), RedirectURIs: d.RedirectURIs}, nil
 	}
 	if strings.HasPrefix(id, "https://") {
 		return s.cimd.fetch(ctx, id)
@@ -291,7 +297,7 @@ func (f *cimdFetcher) fetch(ctx context.Context, id string) (*client, error) {
 			return nil, fmt.Errorf("client metadata redirect URI %q isn't allowed", r)
 		}
 	}
-	c := &client{ID: id, Name: truncate(doc.ClientName, maxClientName), RedirectURIs: doc.RedirectURIs}
+	c := &client{ID: id, Name: clientName(doc.ClientName), RedirectURIs: doc.RedirectURIs}
 	if ttl := cacheTTL(resp.Header.Get("Cache-Control")); ttl > 0 {
 		f.store(id, c, ttl)
 	}
@@ -321,6 +327,63 @@ func (f *cimdFetcher) store(id string, c *client, ttl time.Duration) {
 // maxClientName bounds a client name shown on the consent page, sealed
 // into the flow and logged.
 const maxClientName = 100
+
+// maxMarks bounds the non-spacing and enclosing marks kept on one
+// character, so a name can't stack marks over the lines around it on
+// the consent page.
+const maxMarks = 4
+
+// clientName cleans a client's name, which the client chose, for the
+// consent page and the log. It keeps visible characters only: control
+// and format characters (bidi overrides, embeddings and isolates,
+// zero-width joiners, tag characters), other default-ignorable code
+// points (Hangul fillers, variation selectors), and private-use and
+// unassigned code points are dropped, so a name can't reorder or hide
+// what the page shows beside it. Runs of whitespace (newlines and the
+// line and paragraph separators included) become one space; runs of
+// non-spacing and enclosing marks are capped at maxMarks; the result is
+// cut to maxClientName bytes on a character boundary. clientName is
+// idempotent, so it's safe at every use.
+//
+// Blank but visible characters (U+2800 BRAILLE PATTERN BLANK, say) are
+// kept: they can pad a name, but not reorder or hide anything around it.
+func clientName(s string) string {
+	var b strings.Builder
+	space, marks := false, 0
+	for _, r := range s {
+		if b.Len() > maxClientName {
+			break
+		}
+		if unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		if !visibleRune(r) {
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space, marks = false, 0
+		}
+		if unicode.In(r, unicode.Mn, unicode.Me) {
+			if marks >= maxMarks {
+				continue
+			}
+			marks++
+		} else {
+			marks = 0
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(truncate(b.String(), maxClientName))
+}
+
+// visibleRune reports whether r draws something: a letter, mark,
+// number, punctuation or symbol (unicode.IsGraphic, whose spaces the
+// caller has already taken) that isn't default-ignorable.
+func visibleRune(r rune) bool {
+	return unicode.IsGraphic(r) && !unicode.In(r, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector)
+}
 
 // truncate cuts s to at most n bytes, on a character boundary.
 func truncate(s string, n int) string {

@@ -320,7 +320,9 @@ func clientLabel(req *authRequest) string {
 	if isSealed(req.ClientID) {
 		return "dynamically registered"
 	}
-	return req.ClientID
+	// A nameless CIMD client's ID is the client's own URL: escape it to
+	// printable ASCII, as the consent page does, before it reaches a log.
+	return displayURL(req.ClientID)
 }
 
 // bindBrowser returns the hash of the browser's binding cookie, which
@@ -474,9 +476,11 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
 .box{border:1px solid #ccc;border-radius:8px;padding:1em 1.5em}button{font-size:1em;padding:.5em 1.2em;margin-right:.5em}
 code{background:#f3f3f3;padding:0 .3em}</style></head>
 <body><div class="box"><h2>{{.Title}}</h2>
-{{if .Form}}<p><b>{{.ClientName}}</b> wants to sign you in to kode-gopher.</p>
-<p>It will be able to <b>run Go code in a sandbox as you</b>, with your Google Cloud access.</p>
-<p>After sign-in you'll be sent back to <code>{{.RedirectHost}}</code>.</p>
+{{if .Form}}<p>{{if .ClientName}}An MCP client calling itself <b><bdi>{{.ClientName}}</bdi></b>{{else}}An unnamed MCP client{{end}} wants to sign you in to kode-gopher.</p>
+{{if .ClientID}}<p>Its client ID is <code dir="ltr">{{.ClientID}}</code>.</p>
+{{else if .Registered}}<p>It registered itself with kode-gopher, so nothing vouches for its name.</p>
+{{end}}<p>It will be able to <b>run Go code in a sandbox as you</b>, with your Google Cloud access.</p>
+<p>After sign-in you'll be sent back to <code dir="ltr">{{.RedirectHost}}</code>.</p>
 <p>Only continue if you started this from your own MCP client.</p>
 <form method="post" action="authorize"><input type="hidden" name="request" value="{{.Form}}">
 <button name="action" value="approve">Continue with Google</button><button name="action" value="deny">Cancel</button></form>
@@ -488,18 +492,50 @@ func authPage(w http.ResponseWriter, code int, title, msg string) {
 	_ = pageTmpl.Execute(w, map[string]string{"Title": title, "Message": msg})
 }
 
+// consentPage asks the user to approve a client. The client chose its
+// name, its client ID (CIMD) and its redirect URIs, so none of them may
+// pass for another: the name, cleaned again here whatever the client's
+// origin (clientName is idempotent), sits in a bidi-isolated element of
+// its own, and the client ID and redirect host sit in theirs, as
+// printable ASCII, where no name can reorder them. A DCR client, whose
+// client ID is a sealed blob, gets a line saying nothing vouches for its
+// name instead, so a name carrying a fake "(https://...)" still reads as
+// the client's own claim.
 func consentPage(w http.ResponseWriter, c *client, redirectURI, form string) {
-	name := c.Name
-	if name == "" {
-		name = "An unnamed MCP client"
-	}
-	if strings.HasPrefix(c.ID, "https://") {
-		name += " (" + c.ID + ")"
+	var id, registered string
+	switch {
+	case strings.HasPrefix(c.ID, "https://"):
+		id = displayURL(c.ID)
+	case isSealed(c.ID):
+		registered = "yes"
 	}
 	host := redirectURI
 	if u, err := url.Parse(redirectURI); err == nil && u.Host != "" {
 		host = u.Scheme + "://" + u.Host
 	}
 	pageHeaders(w, http.StatusOK)
-	_ = pageTmpl.Execute(w, map[string]string{"Title": "Sign in", "Form": form, "ClientName": name, "RedirectHost": host})
+	_ = pageTmpl.Execute(w, map[string]string{
+		"Title": "Sign in", "Form": form,
+		"ClientName": clientName(c.Name), "ClientID": id, "Registered": registered, "RedirectHost": displayURL(host),
+	})
+}
+
+// displayURL is a client-supplied URL as the consent page shows it:
+// printable ASCII, every other byte percent-encoded, so nothing in it
+// can reorder, hide or imitate the text around it. url.Parse decodes a
+// host's percent-escapes and keeps non-ASCII as it is, bidi controls
+// included.
+func displayURL(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c > ' ' && c < 0x7f {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0xf])
+		}
+	}
+	return b.String()
 }
