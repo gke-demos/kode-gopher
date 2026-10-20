@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -226,5 +228,145 @@ func TestGroupsWalkDepthLimit(t *testing.T) {
 	_, err := c.IsMember(context.Background(), "g0@d.example", "deep@d.example")
 	if err == nil || !strings.Contains(err.Error(), "deeper than") {
 		t.Errorf("IsMember past the depth limit: err = %v, want a depth error", err)
+	}
+}
+
+// fakeEnterpriseDirectory is Cloud Identity for an edition with
+// checkTransitiveMembership. It answers that call honestly from the
+// query, reading the quoted member key as a string literal would
+// (a backslash escapes the next character), and lists members on one
+// page. It counts transitive calls.
+func fakeEnterpriseDirectory(t *testing.T, members []string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var transitiveCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/groups:lookup":
+			writeJSON(w, http.StatusOK, map[string]string{"name": "groups/g"})
+		case strings.HasSuffix(r.URL.Path, ":checkTransitiveMembership"):
+			transitiveCalls.Add(1)
+			q, ok := strings.CutPrefix(r.URL.Query().Get("query"), "member_key_id == '")
+			q, ok2 := strings.CutSuffix(q, "'")
+			if !ok || !ok2 {
+				http.Error(w, "bad query", http.StatusBadRequest)
+				return
+			}
+			var id strings.Builder
+			for i := 0; i < len(q); i++ {
+				if q[i] == '\\' && i+1 < len(q) {
+					i++
+				}
+				id.WriteByte(q[i])
+			}
+			writeJSON(w, http.StatusOK, map[string]bool{"hasMembership": slices.Contains(members, id.String())})
+		default:
+			var ms []map[string]any
+			for _, m := range members {
+				ms = append(ms, map[string]any{"preferredMemberKey": map[string]string{"id": m}, "type": "USER"})
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"memberships": ms})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &transitiveCalls
+}
+
+// The transitive call quotes the member in its query, so a member with a
+// quote or backslash is matched exactly by the walk instead: o'brien is
+// not obrien, and back\slash is not backslash.
+func TestGroupsQuotedMemberWalks(t *testing.T) {
+	srv, transitive := fakeEnterpriseDirectory(t, []string{"obrien@d.example", "backslash@d.example", `list\ed@d.example`})
+	c := &CloudIdentityGroups{Client: srv.Client(), Endpoint: srv.URL + "/"}
+	ctx := context.Background()
+	for member, want := range map[string]bool{
+		"o'brien@d.example":    false,
+		`back\slash@d.example`: false,
+		`list\ed@d.example`:    true,
+	} {
+		if got, err := c.IsMember(ctx, "g@d.example", member); err != nil || got != want {
+			t.Errorf("IsMember(%s) = %v, %v; want %v", member, got, err, want)
+		}
+	}
+	if n := transitive.Load(); n != 0 {
+		t.Errorf("checkTransitiveMembership asked %d times about quoted members, want 0", n)
+	}
+	// An ordinary address still takes the transitive call.
+	if got, err := c.IsMember(ctx, "g@d.example", "obrien@d.example"); err != nil || !got || transitive.Load() != 1 {
+		t.Errorf("IsMember(obrien) = %v, %v after %d transitive calls; want true after 1", got, err, transitive.Load())
+	}
+}
+
+// A cached group name may be stale: a 404 from the transitive call on a
+// cached name looks the group up again before it means "not a member".
+func TestGroupsStaleNameRelookup(t *testing.T) {
+	var mu sync.Mutex
+	current := "groups/old"
+	var lookups atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		cur := current
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/groups:lookup":
+			lookups.Add(1)
+			writeJSON(w, http.StatusOK, map[string]string{"name": cur})
+		case "/" + cur + "/memberships:checkTransitiveMembership":
+			if strings.Contains(r.URL.Query().Get("query"), "in@d.example") {
+				writeJSON(w, http.StatusOK, map[string]bool{"hasMembership": true})
+				return
+			}
+			http.Error(w, "no such member", http.StatusNotFound)
+		default:
+			http.Error(w, "no such group", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := &CloudIdentityGroups{Client: srv.Client(), Endpoint: srv.URL + "/"}
+	ctx := context.Background()
+	if ok, err := c.IsMember(ctx, "g@d.example", "in@d.example"); err != nil || !ok {
+		t.Fatalf("first check = %v, %v; want true", ok, err)
+	}
+	// The group is deleted and recreated under a new name.
+	mu.Lock()
+	current = "groups/new"
+	mu.Unlock()
+	if ok, err := c.IsMember(ctx, "g@d.example", "in@d.example"); err != nil || !ok {
+		t.Errorf("member after the group was recreated = %v, %v; want true via a fresh lookup", ok, err)
+	}
+	// A 404 with a cached name costs one lookup, then the 404 on the
+	// fresh name is about the member: not a member, and no loop.
+	before := lookups.Load()
+	if ok, err := c.IsMember(ctx, "g@d.example", "ghost@d.example"); err != nil || ok {
+		t.Errorf("unknown member = %v, %v; want false", ok, err)
+	}
+	if n := lookups.Load() - before; n != 1 {
+		t.Errorf("unknown member cost %d group lookups, want 1", n)
+	}
+}
+
+// A group whose pages never end is an incomplete walk, not an endless
+// loop. The fake stops after ten times the limit so code without one
+// returns (with a "no") instead of hanging.
+func TestGroupsWalkPageLimit(t *testing.T) {
+	var pages atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/groups:lookup":
+			writeJSON(w, http.StatusOK, map[string]string{"name": "groups/g"})
+		case strings.HasSuffix(r.URL.Path, ":checkTransitiveMembership"):
+			http.Error(w, "edition", http.StatusForbidden)
+		default:
+			if pages.Add(1) >= 10*walkMaxPages {
+				writeJSON(w, http.StatusOK, map[string]any{"memberships": []any{}})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"memberships": []any{}, "nextPageToken": "again"})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := &CloudIdentityGroups{Client: srv.Client(), Endpoint: srv.URL + "/"}
+	ok, err := c.IsMember(context.Background(), "g@d.example", "in@d.example")
+	if err == nil || ok || !strings.Contains(err.Error(), "pages") || pages.Load() != walkMaxPages {
+		t.Errorf("endless pages = %v, %v after %d pages; want a page-limit error after %d", ok, err, pages.Load(), walkMaxPages)
 	}
 }
