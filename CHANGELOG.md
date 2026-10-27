@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-27
+
+Google group allow lists on GKE across every Workspace edition, OAuth 2.1 and credential vault hardening ported from go-steer/steward's security review, configurable static IP and certificate names for multiple deployments in one project, and Go 1.26.10 with `golang.org/x/net` v0.60.0. Documentation: https://gke-demos.github.io/kode-gopher/.
+
 ### Security
 
 - **Go 1.26.10 and `golang.org/x/net` v0.60.0.** The server, the sandbox image and the prewarmed modules move off go1.26.8 and `x/net` v0.59.0 (v0.58.0 in the sandbox image), which have known `net/http` and HTTP/2 vulnerabilities (GO-2026-6603, GO-2026-6610 to GO-2026-6613, GO-2026-6617). Go 1.26.10 also distrusts compromised intermediate certificates in `crypto/x509` (GO-2026-6809). Redeploy to pick up the new server and sandbox images.
@@ -12,6 +16,7 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 ### Added
 
 - **Group allow lists work on GKE.** `serve --oauth-groups-service-account` (`GROUPS_SERVICE_ACCOUNT` for the deploy script) checks `--oauth-allow-groups` as a service account that kode-gopher impersonates for that call. That service account holds the Groups Reader admin role. kode-gopher's own Workload Identity principal has no email, so it can't be assigned an admin role. On Workspace editions without Cloud Identity's transitive membership check (Business Starter, Standard), kode-gopher walks nested groups with the membership list instead. ([#36](https://github.com/gke-demos/kode-gopher/issues/36))
+- **Multiple deployments in one GCP project.** `scripts/deploy-gke-server.sh` (and `scripts/smoketest-http.sh`) now take `ADDRESS_NAME` and `CERT_NAME` environment variables, defaulting to `kode-gopher-ip` and `kode-gopher-cert`, and patch the Gateway accordingly so two clusters in the same project don't share the same global static IP or certificate name.
 
 ### Fixed
 

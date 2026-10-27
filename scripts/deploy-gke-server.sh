@@ -43,6 +43,8 @@
 #   PROJECT               project for the IP and certificate
 #                         (gcloud config get-value project)
 #   IMAGE                 server image (ghcr.io/gke-demos/kode-gopher/server:main)
+#   ADDRESS_NAME          global static IP name (kode-gopher-ip)
+#   CERT_NAME             Google-managed SSL certificate name (kode-gopher-cert)
 #   KG_HOST               public hostname (<ip with dashes>.sslip.io)
 #   EGRESS_ALLOW          extra hosts sandboxes may reach on 443, comma-
 #                         separated ("api.example.com,*.example.org"); always
@@ -79,13 +81,15 @@ while [[ $# -gt 0 ]]; do
     --auth)    AUTH="$2"; shift 2;;
     --auth=*)  AUTH="${1#--auth=}"; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '17,71p' "$0"; exit 0;;
+    -h|--help) sed -n '17,73p' "$0"; exit 0;;
     *)         echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
 
 NS=codemode
 IMAGE="${IMAGE:-ghcr.io/gke-demos/kode-gopher/server:main}"
+ADDRESS_NAME="${ADDRESS_NAME:-kode-gopher-ip}"
+CERT_NAME="${CERT_NAME:-kode-gopher-cert}"
 CUSTODY="${CUSTODY:-vault}"
 OPEN_REGISTRATION="${OPEN_REGISTRATION:-true}"
 
@@ -125,26 +129,26 @@ REGION="$(k get nodes -o jsonpath='{.items[0].metadata.labels.topology\.kubernet
 [[ -n "$REGION" ]] || die "couldn't read the cluster's region from its nodes"
 echo "project=$PROJECT  auth=$AUTH  image=$IMAGE"
 
-step "static IP kode-gopher-ip"
-IP="$(gcloud compute addresses describe kode-gopher-ip --global --project "$PROJECT" --format='value(address)' 2>/dev/null || true)"
+step "static IP $ADDRESS_NAME"
+IP="$(gcloud compute addresses describe "$ADDRESS_NAME" --global --project "$PROJECT" --format='value(address)' 2>/dev/null || true)"
 if [[ -z "$IP" ]]; then
-  [[ $DRY_RUN -eq 0 ]] || die "kode-gopher-ip doesn't exist; run without --dry-run to create it"
-  gcloud compute addresses create kode-gopher-ip --global --project "$PROJECT"
-  IP="$(gcloud compute addresses describe kode-gopher-ip --global --project "$PROJECT" --format='value(address)')"
+  [[ $DRY_RUN -eq 0 ]] || die "$ADDRESS_NAME doesn't exist; run without --dry-run to create it"
+  gcloud compute addresses create "$ADDRESS_NAME" --global --project "$PROJECT"
+  IP="$(gcloud compute addresses describe "$ADDRESS_NAME" --global --project "$PROJECT" --format='value(address)')"
 fi
 KG_HOST="${KG_HOST:-${IP//./-}.sslip.io}"
 ISSUER="https://$KG_HOST"
 echo "ip=$IP  host=$KG_HOST"
 
-step "certificate kode-gopher-cert"
-DOMAINS="$(gcloud compute ssl-certificates describe kode-gopher-cert --global --project "$PROJECT" --format='value(managed.domains)' 2>/dev/null || true)"
+step "certificate $CERT_NAME"
+DOMAINS="$(gcloud compute ssl-certificates describe "$CERT_NAME" --global --project "$PROJECT" --format='value(managed.domains)' 2>/dev/null || true)"
 if [[ -z "$DOMAINS" ]]; then
-  [[ $DRY_RUN -eq 0 ]] || die "kode-gopher-cert doesn't exist; run without --dry-run to create it"
-  gcloud compute ssl-certificates create kode-gopher-cert --global --project "$PROJECT" --domains "$KG_HOST"
+  [[ $DRY_RUN -eq 0 ]] || die "$CERT_NAME doesn't exist; run without --dry-run to create it"
+  gcloud compute ssl-certificates create "$CERT_NAME" --global --project "$PROJECT" --domains "$KG_HOST"
 elif [[ "$DOMAINS" != "$KG_HOST" ]]; then
-  die "kode-gopher-cert is for $DOMAINS, not $KG_HOST; delete it or set KG_HOST"
+  die "$CERT_NAME is for $DOMAINS, not $KG_HOST; delete it or set KG_HOST"
 fi
-gcloud compute ssl-certificates describe kode-gopher-cert --global --project "$PROJECT" \
+gcloud compute ssl-certificates describe "$CERT_NAME" --global --project "$PROJECT" \
   --format='value(managed.status,managed.domainStatus)'
 
 step "Kubernetes API server address (for the egress policy)"
@@ -210,16 +214,20 @@ CONFIG_HASH="$(k -n "$NS" get secret "$secret" -o jsonpath='{.data}' 2>/dev/null
 step "render"
 work="$(mktemp -d)"
 trap 'rm -rf "$work" "${tmp:-}"' EXIT
-python3 - "$work" "$OVERLAY" "$IMAGE" "$AUTH" "$ISSUER" "$PROJECT" "$APISERVER" "$REGION" "$CONFIG_HASH" <<'PY'
+python3 - "$work" "$OVERLAY" "$IMAGE" "$AUTH" "$ISSUER" "$PROJECT" "$APISERVER" "$REGION" "$CONFIG_HASH" "$ADDRESS_NAME" "$CERT_NAME" <<'PY'
 import json, os, re, sys
 
-work, overlay, image, auth, issuer, project, apiserver, region, config_hash = sys.argv[1:10]
+work, overlay, image, auth, issuer, project, apiserver, region, config_hash, address_name, cert_name = sys.argv[1:12]
 env = os.environ.get
 
 ops = [{"op": "test", "path": "/spec/egress/2/to/0/ipBlock/cidr", "value": "192.0.2.1/32"},
        {"op": "replace", "path": "/spec/egress/2/to",
         "value": [{"ipBlock": {"cidr": ip + ("/128" if ":" in ip else "/32")}} for ip in apiserver.split()]}]
 patches = [{"target": {"kind": "NetworkPolicy", "name": "kode-gopher"}, "patch": json.dumps(ops)}]
+
+ops = [{"op": "replace", "path": "/spec/addresses/0/value", "value": address_name},
+       {"op": "replace", "path": "/spec/listeners/0/tls/options/networking.gke.io~1pre-shared-certs", "value": cert_name}]
+patches.append({"target": {"kind": "Gateway", "name": "kode-gopher"}, "patch": json.dumps(ops)})
 
 # Sandbox egress allowlist: the region's GKE control-plane DNS
 # endpoints, so snippets reach clusters as docs/design.md describes,
@@ -274,7 +282,7 @@ NS="$NS" CONTEXT="${CONTEXT:-}" "$REPO_ROOT/scripts/refresh-warm-pool.sh"
 
 step "done"
 echo "MCP endpoint: $ISSUER/mcp"
-echo "certificate:  $(gcloud compute ssl-certificates describe kode-gopher-cert --global --project "$PROJECT" --format='value(managed.status)')"
+echo "certificate:  $(gcloud compute ssl-certificates describe "$CERT_NAME" --global --project "$PROJECT" --format='value(managed.status)')"
 echo "  (PROVISIONING until $KG_HOST resolves to $IP and the load balancer is up; up to an hour)"
 echo "test:         scripts/smoketest-http.sh            (through the load balancer)"
 echo "              scripts/smoketest-http.sh --port-forward"

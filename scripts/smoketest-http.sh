@@ -50,11 +50,12 @@
 #                    oauth: JSON {"client_id", "client_secret"} of a
 #                    pre-registered client-credentials client
 #
-# Env: KUBECONFIG, CONTEXT (passed as --context), PROJECT.
+# Env: KUBECONFIG, CONTEXT (passed as --context), PROJECT, ADDRESS_NAME.
 
 set -euo pipefail
 
 NS=codemode
+ADDRESS_NAME="${ADDRESS_NAME:-kode-gopher-ip}"
 PORT_FORWARD=0
 BASE=""
 FILE=""
@@ -113,7 +114,7 @@ if [[ $PORT_FORWARD -eq 1 ]]; then
 elif [[ -z "$BASE" ]]; then
   command -v gcloud >/dev/null 2>&1 || die "missing prerequisite: gcloud (or pass --url)"
   PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
-  ip="$(gcloud compute addresses describe kode-gopher-ip --global --project "$PROJECT" --format='value(address)')"
+  ip="$(gcloud compute addresses describe "$ADDRESS_NAME" --global --project "$PROJECT" --format='value(address)')"
   BASE="https://${ip//./-}.sslip.io"
 fi
 echo "base=$BASE  auth=$AUTH"

@@ -19,6 +19,8 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 | `KUBECONFIG`, `CONTEXT` | current context | The cluster to deploy to. `CONTEXT` is passed as `--context`, so your current context is unchanged. |
 | `PROJECT` | `gcloud config get-value project` | Project for the static IP and the certificate. |
 | `IMAGE` | `ghcr.io/gke-demos/kode-gopher/server:main` | The server image. Pin a `main-<short-sha>` or version tag for a stable deployment. |
+| `ADDRESS_NAME` | `kode-gopher-ip` | Name of the global static IP address in the project. Set a distinct name when running more than one deployment in the same project. |
+| `CERT_NAME` | `kode-gopher-cert` | Name of the Google-managed SSL certificate in the project. Set a distinct name when running more than one deployment in the same project. |
 | `EGRESS_ALLOW` | none | Extra hosts sandboxes may reach on port 443, comma-separated: `api.example.com,*.example.org`. A `*.` pattern matches one label. Always allowed: `*.googleapis.com`, `proxy.golang.org`, `sum.golang.org` and `*.<cluster-region>.gke.goog`. |
 | `KG_HOST` | `<ip-with-dashes>.sslip.io` | Public hostname. For your own domain, point a DNS A record at the IP; see [Operations](/deploy/operations/#your-own-domain). |
 
