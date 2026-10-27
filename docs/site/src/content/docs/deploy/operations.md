@@ -5,11 +5,13 @@ sidebar:
   order: 4
 ---
 
-## Your own domain
+## Your own domain and multiple deployments
 
-Set `KG_HOST=kode-gopher.example.com`, and create a DNS A record pointing it at the `kode-gopher-ip` address.
+Set `KG_HOST=kode-gopher.example.com`, and create a DNS `A` record pointing it at the `ADDRESS_NAME` (default `kode-gopher-ip`) address.
 
-Do this before the first deploy, because the certificate is issued for whatever hostname the script sees first. To change the hostname later, delete `kode-gopher-cert`, then redeploy. Under Google sign-in the issuer URL changes with the hostname, so update the OAuth client's redirect URI as well.
+Do this before the first deploy, because the certificate (`CERT_NAME`, default `kode-gopher-cert`) is issued for whatever hostname the script sees first. To change the hostname on an existing deployment, delete its certificate (`gcloud compute ssl-certificates delete kode-gopher-cert --global`), then redeploy with `KG_HOST`. Under Google sign-in the issuer URL and vault continue URI change with the hostname, so update the OAuth client's redirect URI and the vault auth provider's `--three-legged-oauth-default-continue-uri` as well.
+
+To run more than one kode-gopher deployment in the same GCP project (for example a staging cluster and a production cluster), pass distinct `ADDRESS_NAME`, `CERT_NAME` and (under Google sign-in) `VAULT_AUTH_PROVIDER` values for each deployment.
 
 ## Test a deployment
 

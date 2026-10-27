@@ -12,20 +12,23 @@ With `--auth=oauth`, kode-gopher becomes an OAuth 2.1 authorization server for M
 
 Snippets run as the user, with a Google access token that kode-gopher keeps fresh.
 
-## 1. Create a Google OAuth client
+## 1. Choose a hostname and create a Google OAuth client
 
-kode-gopher's host name goes into the client's redirect URIs. To know it before the first deploy, create the IP yourself; the script reuses it:
+kode-gopher's public hostname goes into the OAuth client's redirect URIs, the managed TLS certificate, and the vault's continue URI, so reserve the global static IP before the first deploy:
 
 ```bash
 gcloud compute addresses create kode-gopher-ip --global
 gcloud compute addresses describe kode-gopher-ip --global --format='value(address)'
-# 203.0.113.7 means the host is 203-0-113-7.sslip.io
 ```
+
+Then pick the hostname (`<host>`) that resolves to that IP:
+- **Your own domain (recommended for production):** create a DNS `A` record (for example `kode-gopher.example.com`) pointing to the IP address above, and pass `KG_HOST=kode-gopher.example.com` when running the deploy script.
+- **`sslip.io` (quick setup, no DNS needed):** leave `KG_HOST` unset. An IP of `203.0.113.7` gives the hostname `203-0-113-7.sslip.io`.
 
 Then, in the Cloud console under **Google Auth Platform**:
 
 1. **Audience:** use an **Internal** consent screen in your Workspace organization. That way the `cloud-platform` scope needs no app verification.
-2. **Clients:** create a **Web application** client. If the console asks, mark it as used by an AI-powered agent. Add these **Authorized redirect URIs**:
+2. **Clients:** create a **Web application** client (or reuse an existing one in the project). If the console asks, mark it as used by an AI-powered agent. Add these **Authorized redirect URIs**:
    - `https://<host>/callback`
    - with vault custody (next step), also the auth provider's callback:
      `https://agentidentitycredentials.googleapis.com/v1/projects/<PROJECT_ID>/locations/<LOCATION>/authProviders/<NAME>/oauthcallback`
@@ -101,13 +104,23 @@ Groups in another Workspace than the user's, such as a group in a second domain 
 ## 4. Deploy
 
 ```bash
+KG_HOST=<host> \
+IMAGE=ghcr.io/gke-demos/kode-gopher/server:<version> \
 GOOGLE_CLIENT_FILE=./client_secret_....json \
 ALLOW_DOMAINS=example.com \
 VAULT_AUTH_PROVIDER=projects/<PROJECT_ID>/locations/<LOCATION>/authProviders/kode-gopher \
 scripts/deploy-gke-server.sh --auth=oauth
 ```
 
+(Omit `KG_HOST` if using the default `sslip.io` hostname, or `IMAGE` to track `:main`. If this project already hosts another kode-gopher deployment, also set distinct `ADDRESS_NAME` and `CERT_NAME` values.)
+
 The script stores the client file, a new token-sealing keyring, and any `CLIENTS_FILE` in the Secret `kode-gopher-oauth`. On later deploys `GOOGLE_CLIENT_FILE` is optional. The keyring is always kept, because replacing it would invalidate every token kode-gopher has issued.
+
+Once the Google-managed certificate turns `ACTIVE`, verify the public HTTPS and OAuth endpoints before signing in:
+
+```bash
+scripts/smoketest-http.sh --url https://<host>
+```
 
 By default any MCP client can register itself. To limit which clients can connect, or to add CI clients, see [Clients](/deploy/clients/).
 
