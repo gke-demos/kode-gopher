@@ -24,11 +24,19 @@ Either way, the sandbox never holds a long-lived credential. Each run gets a sho
 
 ## Prerequisites
 
-- **A GKE Autopilot cluster with the agent-sandbox addon,** and the `codemode` namespace:
+- **A GKE Autopilot cluster with the agent-sandbox addon and FQDN network policy,** and the `codemode` namespace. To create a new cluster:
   ```bash
   gcloud container clusters create-auto kode-gopher \
     --location=us-central1 --release-channel=rapid --enable-agent-sandbox
   gcloud container clusters update kode-gopher \
+    --location=us-central1 --enable-fqdn-network-policy
+  kubectl create namespace codemode
+  ```
+  Or to enable both features on an existing Autopilot cluster (kode-gopher lives in `codemode` and can share the cluster with other workloads):
+  ```bash
+  gcloud container clusters update <CLUSTER> \
+    --location=us-central1 --enable-agent-sandbox
+  gcloud container clusters update <CLUSTER> \
     --location=us-central1 --enable-fqdn-network-policy
   kubectl create namespace codemode
   ```
@@ -46,23 +54,27 @@ principal://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/worklo
 
 Get the project number with `gcloud projects describe <PROJECT_ID> --format='value(projectNumber)'`.
 
+### Accessing multiple Google Cloud projects
+
+A deployment is not limited to the project its cluster runs in. The access token handed to each snippet carries the `cloud-platform` scope, so a snippet can call APIs in **any** Google Cloud project that the signed-in user (or configured service account) has IAM permissions on. `PROJECT` (defaulting to `gcloud config get-value project`) and `QUOTA_PROJECT` only set the default `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_QUOTA_PROJECT` reported inside the sandbox when a snippet doesn't pass a project ID explicitly.
+
 ## The deploy script
 
 `scripts/deploy-gke-server.sh` is safe to rerun. Every option is an environment variable; see [Deployment settings](/reference/deploy-settings/). It never prints secrets. Each run:
 
-1. creates the global static IP `kode-gopher-ip` if it's missing. The public hostname defaults to `<ip-with-dashes>.sslip.io`, a wildcard DNS name that resolves to that IP;
-2. creates the Google-managed certificate `kode-gopher-cert` for that hostname if it's missing;
+1. creates the global static IP `ADDRESS_NAME` (default `kode-gopher-ip`) if it's missing. The public hostname is `KG_HOST` if set, or `<ip-with-dashes>.sslip.io`, a wildcard DNS name that resolves to that IP;
+2. creates the Google-managed certificate `CERT_NAME` (default `kode-gopher-cert`) for that hostname if it's missing;
 3. creates the Secret the auth mode needs, keeping an existing one;
 4. applies the manifests:
    - the kode-gopher Deployment (one replica), Service, Role and network policy;
    - the Gateway and HTTPRoute;
    - the sandbox template, warm pool and router.
 
-The certificate turns ACTIVE once the hostname resolves to the IP and the load balancer is up, usually within an hour of being created.
+The certificate turns ACTIVE once the hostname resolves to the IP and the load balancer is up, usually within 15 to 60 minutes of being created. If you run more than one kode-gopher deployment in the same GCP project, set distinct `ADDRESS_NAME` and `CERT_NAME` values for each so they don't share the same IP or certificate.
 
 Use `CONTEXT=<kubectl context>` to target a cluster other than the current context, and `--dry-run` to print the manifests without applying anything.
 
-**The server image.** By default the script deploys `ghcr.io/gke-demos/kode-gopher/server:main`. CI rebuilds it on every merge, for amd64 and arm64, and signs it with cosign. For a deployment that doesn't change under you, set `IMAGE` to a fixed tag: `main-<short-sha>` for now, or a version tag once releases are cut.
+**The server image.** By default the script deploys `ghcr.io/gke-demos/kode-gopher/server:main`. CI rebuilds it on every merge, for amd64 and arm64, and signs it with cosign. For a production deployment that doesn't change under you, pin `IMAGE` to a release tag (`ghcr.io/gke-demos/kode-gopher/server:<version>`) or a commit tag (`main-<short-sha>`).
 
 ## Next
 
