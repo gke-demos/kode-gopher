@@ -102,7 +102,7 @@ type Server struct {
 	// serviceClients: some client may use the client_credentials grant.
 	serviceClients bool
 	cimd           *cimdFetcher
-	used           *replayCache
+	used           replayStore
 }
 
 // New validates cfg and builds a Server.
@@ -288,6 +288,16 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// replayStore is the replay cache as the token endpoint uses it. The
+// in-memory replayCache is the only implementation; tests wrap it to
+// stand in for a shared cache that delivers a call twice.
+type replayStore interface {
+	use(id string, exp time.Time) bool
+	release(id string)
+	rotate(fam string, gen uint64, exp time.Time, rot string) bool
+	unrotate(fam string, gen uint64, rot string)
+}
+
 // replayCache remembers single-use IDs (authorization codes) until
 // they'd have expired anyway, and tracks refresh-token families. It's in
 // memory: v1 runs one replica, and a restart forgets it
@@ -301,6 +311,19 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // the whole family is revoked and the user signs in again (OAuth 2.1
 // §4.3.1). Memory grows with families (one per sign-in per client that
 // has refreshed), not with refreshes.
+//
+// Each rotation carries an ID, unpredictable, unique per refresh and
+// never derived from the request (a predictable one would let a replay
+// pass as a redelivery), and a refresh that fails for a transient reason
+// gives back only the rotation with its own ID. A give-back by
+// generation alone could undo another refresh's rotation, and the
+// client's retry would then rotate the family again: a rotated token
+// would yield tokens, and two refresh tokens of the next generation
+// would be live. In memory, that takes a give-back delivered twice,
+// which can't happen today (a refresh gives back only a rotation it saw
+// applied, and nothing else can move the family to that generation
+// while it stands); a shared cache, which multiple replicas need, can
+// deliver a call twice or lose its reply, and the IDs are its contract.
 type replayCache struct {
 	mu       sync.Mutex
 	seen     map[string]time.Time
@@ -311,6 +334,9 @@ type family struct {
 	gen     uint64
 	exp     time.Time
 	revoked bool
+	// rot is the ID of the rotation that moved the family to gen, empty
+	// once given back: only unrotate with rot undoes it.
+	rot string
 }
 
 // use records id, valid until exp, and reports whether it was fresh.
@@ -340,12 +366,15 @@ func (c *replayCache) release(id string) {
 	delete(c.seen, id)
 }
 
-// rotate moves family fam from generation gen to gen+1, until exp, and
-// reports whether it could. It reports false, and revokes the family, if
-// the family is already past gen; false also for a revoked family. An
-// unknown or expired family (one never refreshed, or forgotten by a
-// restart) starts at gen+1.
-func (c *replayCache) rotate(fam string, gen uint64, exp time.Time) bool {
+// rotate moves family fam from generation gen to gen+1, until exp,
+// records rot as the rotation's ID, and reports whether it could. It
+// reports false, and revokes the family, if the family is already past
+// gen; false also for a revoked family. An unknown or expired family
+// (one never refreshed, or forgotten by a restart) starts at gen+1. It is
+// idempotent: the same rotation delivered again (the family at gen+1 by
+// the rotation with ID rot) reports true and changes nothing, rather
+// than taking it for a replay.
+func (c *replayCache) rotate(fam string, gen uint64, exp time.Time, rot string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
@@ -363,24 +392,30 @@ func (c *replayCache) rotate(fam string, gen uint64, exp time.Time) bool {
 		if f.revoked {
 			return false
 		}
+		if rot != "" && gen+1 == f.gen && f.rot == rot {
+			return true
+		}
 		if gen < f.gen {
 			f.revoked = true
 			c.families[fam] = f
 			return false
 		}
 	}
-	c.families[fam] = family{gen: gen + 1, exp: exp}
+	c.families[fam] = family{gen: gen + 1, exp: exp, rot: rot}
 	return true
 }
 
 // unrotate moves family fam back from gen+1 to gen, for a refresh that
 // failed for a transient reason, so the client's retry isn't taken for a
-// replay. A family that has moved on or been revoked is left alone.
-func (c *replayCache) unrotate(fam string, gen uint64) {
+// replay. It does so only if the rotation with ID rot moved the family
+// there, and forgets the ID: a family that another rotation (or none)
+// moved there, that has moved on or been revoked is left alone, so an
+// empty rot, or a give-back delivered twice, does nothing.
+func (c *replayCache) unrotate(fam string, gen uint64, rot string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if f, ok := c.families[fam]; ok && !f.revoked && f.gen == gen+1 {
-		f.gen = gen
+	if f, ok := c.families[fam]; ok && !f.revoked && f.gen == gen+1 && rot != "" && f.rot == rot {
+		f.gen, f.rot = gen, ""
 		c.families[fam] = f
 	}
 }

@@ -410,29 +410,29 @@ func TestRefreshTokenWithoutFamily(t *testing.T) {
 func TestReplayCacheFamilies(t *testing.T) {
 	c := &replayCache{seen: map[string]time.Time{}}
 	exp := time.Now().Add(time.Hour)
-	if !c.rotate("f", 0, exp) || !c.rotate("f", 1, exp) {
+	if !c.rotate("f", 0, exp, "r1") || !c.rotate("f", 1, exp, "r2") {
 		t.Fatal("rotating a fresh family refused")
 	}
-	c.unrotate("f", 1) // gives back the last rotation
-	if !c.rotate("f", 1, exp) {
+	c.unrotate("f", 1, "r2") // gives back the last rotation
+	if !c.rotate("f", 1, exp, "r3") {
 		t.Error("rotation after unrotate refused")
 	}
-	c.unrotate("f", 0) // not the last rotation: no effect
-	if c.rotate("f", 1, exp) {
+	c.unrotate("f", 0, "r1") // not the last rotation: no effect
+	if c.rotate("f", 1, exp, "r4") {
 		t.Error("a replayed generation accepted")
 	}
-	if c.rotate("f", 2, exp) {
+	if c.rotate("f", 2, exp, "r5") {
 		t.Error("the current generation accepted after the family was revoked")
 	}
-	c.unrotate("f", 1) // a revoked family stays revoked
-	if c.rotate("f", 2, exp) {
+	c.unrotate("f", 1, "r3") // a revoked family stays revoked
+	if c.rotate("f", 2, exp, "r6") {
 		t.Error("unrotate revived a revoked family")
 	}
-	if !c.rotate("g", 7, exp) {
+	if !c.rotate("g", 7, exp, "g1") {
 		t.Error("an unknown family (forgotten by a restart) refused")
 	}
 	c.families["f"] = family{gen: 2, exp: time.Now().Add(-time.Second), revoked: true}
-	if !c.rotate("f", 0, exp) {
+	if !c.rotate("f", 0, exp, "r7") {
 		t.Error("an expired family still refused")
 	}
 }

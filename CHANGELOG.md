@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refresh that fails for a transient reason gives back only its own rotation.** A refresh moves its sign-in's refresh-token family on a generation first, and moves it back if it then fails with `server_error`, so the client's retry isn't taken for a reuse. The move back checked only the generation, so if it ever undid another refresh's rotation, the client's retry would rotate the family again and two refresh tokens of the next generation would both work. Each rotation now carries a random ID, and the move back undoes only the rotation with its own ID; a rotation delivered twice counts once. The in-memory replay cache of a single replica can't reach the bad case today, so nothing changes for a deployment now: this is internal hardening, and the contract a shared cache for multiple replicas will need. Ported from [go-steer/steward#22](https://github.com/go-steer/steward/pull/22).
+
 ## [0.4.0] - 2026-10-27
 
 Google group allow lists on GKE across every Workspace edition, OAuth 2.1 and credential vault hardening ported from go-steer/steward's security review, configurable static IP and certificate names for multiple deployments in one project, and Go 1.26.10 with `golang.org/x/net` v0.60.0. Documentation: https://gke-demos.github.io/kode-gopher/.
