@@ -244,7 +244,10 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 	// until the end of its expiry's second, so the family is never
 	// forgotten while its newest token is still good.
 	next := refreshChain{family: p.Family, gen: p.Gen + 1, exp: time.Now().Add(refreshTTL)}
-	if !s.used.rotate(p.Family, p.Gen, time.Unix(next.exp.Unix()+1, 0)) {
+	// The rotation's ID, so a give-back below undoes this refresh's
+	// rotation and never another's (see replayCache).
+	rot := rand.Text()
+	if !s.used.rotate(p.Family, p.Gen, time.Unix(next.exp.Unix()+1, 0), rot) {
 		log.Printf("oauth: reused refresh token for %s (client %q); its family is revoked", p.User.Email, p.ClientID)
 		return nil, invalidGrant("refresh token already used")
 	}
@@ -261,7 +264,7 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 		}
 	}
 	if terr.Code == "server_error" {
-		s.used.unrotate(p.Family, p.Gen)
+		s.used.unrotate(p.Family, p.Gen, rot)
 	}
 	return nil, terr
 }
