@@ -538,16 +538,23 @@ func TestVaultRefreshesShortToken(t *testing.T) {
 	id := e.register()
 	v := rand.Text() + rand.Text()
 	e.code(id, v) // consent stores the grant
+	e.vault.mu.Lock()
 	e.vault.shortLife = true
+	e.vault.mu.Unlock()
 	r := e.token(exchangeForm(id, e.code(id, v), v), "", "")
 	if r.status != http.StatusOK {
 		t.Fatalf("exchange: %+v", r)
 	}
-	if e.vault.forced != 1 {
-		t.Errorf("vault force-refreshes = %d, want 1 for a nearly spent token", e.vault.forced)
+	// Waited out (a minute and expirySkew), never force-refreshed: the
+	// vault asks for consent to force a token that's still valid.
+	e.vault.mu.Lock()
+	forced, waits := e.vault.forced, e.vault.waits
+	e.vault.mu.Unlock()
+	if forced != 0 || len(waits) != 1 || waits[0] > time.Minute+expirySkew {
+		t.Errorf("vault force-refreshes = %d, waits %v; want none forced and one wait for a nearly spent token", forced, waits)
 	}
 	if r.Expires < int64((accessTTL - time.Minute).Seconds()) {
-		t.Errorf("expires_in = %d after force refresh", r.Expires)
+		t.Errorf("expires_in = %d after the token was waited out", r.Expires)
 	}
 }
 

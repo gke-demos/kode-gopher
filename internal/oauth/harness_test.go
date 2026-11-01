@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -197,7 +198,8 @@ type fakeVault struct {
 	grants    map[string]User   // userId -> account whose grant is stored
 	shortLife bool              // retrieve hands out nearly spent tokens
 	forced    int
-	script    []string // canned bodies for the next retrieve calls, before the grants are consulted ("!400 <message>": a refused call)
+	script    []string        // canned bodies for the next retrieve calls, before the grants are consulted ("!400 <message>": a refused call; "-": consult the grants)
+	waits     []time.Duration // nearly spent tokens VaultCustody waited out
 }
 
 func newFakeVault(t *testing.T, g *fakeGoogle) *fakeVault {
@@ -211,7 +213,26 @@ func newFakeVault(t *testing.T, g *fakeGoogle) *fakeVault {
 }
 
 func (v *fakeVault) custody() *VaultCustody {
-	return &VaultCustody{AuthProvider: "projects/p/locations/l/authProviders/kg", Client: v.srv.Client(), Endpoint: v.srv.URL + "/v1/"}
+	return &VaultCustody{AuthProvider: "projects/p/locations/l/authProviders/kg", Client: v.srv.Client(), Endpoint: v.srv.URL + "/v1/", sleeper: &sleeper{v.sleep}}
+}
+
+// sleep stands in for VaultCustody waiting out a nearly spent token: it
+// records the wait, and when it's over every token minted with no more
+// life than that has expired (tokeninfo refuses it) and the vault renews
+// with full-life tokens.
+func (v *fakeVault) sleep(_ context.Context, d time.Duration) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.waits = append(v.waits, d)
+	v.shortLife = false
+	v.g.mu.Lock()
+	defer v.g.mu.Unlock()
+	for tok, ft := range v.g.tokens {
+		if time.Duration(ft.life)*time.Second <= d {
+			delete(v.g.tokens, tok)
+		}
+	}
+	return nil
 }
 
 func (v *fakeVault) api(w http.ResponseWriter, r *http.Request) {
@@ -232,7 +253,9 @@ func (v *fakeVault) api(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "scopes don't match the stored grant", http.StatusBadRequest)
 			return
 		}
-		if len(v.script) > 0 {
+		if len(v.script) > 0 && v.script[0] == "-" {
+			v.script = v.script[1:] // this one goes to the grants
+		} else if len(v.script) > 0 {
 			a := v.script[0]
 			v.script = v.script[1:]
 			w.Header().Set("Content-Type", "application/json")
@@ -244,13 +267,18 @@ func (v *fakeVault) api(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(a))
 			return
 		}
-		if u, ok := v.grants[body.UserID]; ok {
+		v.g.mu.Lock()
+		_, live := v.g.tokens[body.ForceRefreshToken]
+		v.g.mu.Unlock()
+		if body.ForceRefreshToken != "" {
+			v.forced++
+		}
+		// Like the real vault (the phase B spike), a forced refresh of a
+		// token that's still valid asks for consent.
+		if u, ok := v.grants[body.UserID]; ok && !live {
 			life := 3600
 			if v.shortLife && body.ForceRefreshToken == "" {
 				life = 60
-			}
-			if body.ForceRefreshToken != "" {
-				v.forced++
 			}
 			v.g.mu.Lock()
 			tok := v.g.mint(u, strings.Join(body.Scopes, " "), life)
@@ -318,12 +346,23 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T, sealed bool, mutate func(*Config)) *testEnv {
 	t.Helper()
+	return newTestEnvServer(t, sealed, mutate, nil)
+}
+
+// newTestEnvServer is newTestEnv with configure applied to the test
+// server before it starts (a WriteTimeout, say).
+func newTestEnvServer(t *testing.T, sealed bool, mutate func(*Config), configure func(*http.Server)) *testEnv {
+	t.Helper()
 	e := &testEnv{t: t, google: newFakeGoogle(t), groups: &fakeGroups{members: map[string]map[string]bool{
 		"kg-users@example.com": {"bob@other.org": true},
 	}}}
 	e.vault = newFakeVault(t, e.google)
 	mux := http.NewServeMux()
-	e.srv = httptest.NewServer(mux)
+	e.srv = httptest.NewUnstartedServer(mux)
+	if configure != nil {
+		configure(e.srv.Config)
+	}
+	e.srv.Start()
 	t.Cleanup(e.srv.Close)
 	keys, err := NewKeyring(KeyringKey{ID: "k1", Secret: []byte(strings.Repeat("k", 32))})
 	if err != nil {
