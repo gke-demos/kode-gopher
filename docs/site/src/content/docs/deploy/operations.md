@@ -43,6 +43,7 @@ The warm pool doesn't pick up a new sandbox image on its own: agent-sandbox keep
   - kode-gopher's own egress is limited to DNS, the sandboxes, the API server, the GKE metadata server and public HTTPS (it fetches clients' metadata documents from anywhere);
   - its ingress is limited to Google's load balancer ranges;
   - the sandbox router accepts no in-cluster traffic at all.
+- **Front-end timeout:** keep any proxy or load balancer in front of kode-gopher at a request timeout of at least 2 minutes. Under vault custody, a token refresh or sign-in can wait out a nearly spent Google token for up to about 93 seconds before answering, and a client that gets a 504 instead may start a new browser sign-in. The GKE Gateway the deploy script creates allows 900 seconds; a load balancer's default is often 30 or 60.
 - **Secret changes:** kode-gopher reads its Secret at startup. The deploy script restarts it whenever the Secret changes: a new token, `CLIENTS_FILE` or Google client file.
 
 ## Logs

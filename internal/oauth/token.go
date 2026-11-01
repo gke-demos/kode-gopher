@@ -100,6 +100,9 @@ func (e *tokenError) Error() string { return e.Code + ": " + e.Desc }
 func invalidGrant(desc string) *tokenError { return &tokenError{Code: "invalid_grant", Desc: desc} }
 
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
+	// Recorded first, as near the server's WriteTimeout deadline as the
+	// handler gets: a custody wait extends that deadline (withResponse).
+	ctx := withResponse(r.Context(), w)
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
@@ -125,7 +128,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	case "authorization_code":
 		resp, terr = s.exchangeCode(r, c)
 	case "refresh_token":
-		resp, terr = s.refreshTokens(r.Context(), r, c)
+		resp, terr = s.refreshTokens(ctx, r, c)
 	case "client_credentials":
 		resp, terr = s.clientCredentials(r, c)
 	default:
@@ -215,10 +218,65 @@ func pkceMatches(verifier, challenge string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(challenge)) == 1
 }
 
-// refreshTokens rotates a refresh token: its family moves on a
-// generation, the allow-list is checked again, and custody mints a fresh
-// Google token.
+// refreshTokens rotates a refresh token: custody prepares a fresh
+// Google token, the family moves on a generation, and the allow-list is
+// checked again.
 func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) (map[string]any, *tokenError) {
+	p, terr := s.openRefresh(r, c)
+	if terr != nil {
+		return nil, terr
+	}
+	// Custody work that can block for long runs before the family is
+	// rotated: the vault waits out a Google token too close to expiry to
+	// use (up to 78 seconds), and a family held rotated for that long
+	// turns a client's retry, a concurrent refresh from another of its
+	// processes, a lost response or a restart into a replay that signs
+	// the user out. Nothing is rotated yet, so a failure here, the client
+	// going away included, has nothing to give back. The grant prepared
+	// here, checked against p.User, is the one issued below. A refusal
+	// (errReauth) is answered after the rotation, so the token stays
+	// spent and a replayed one still revokes its family.
+	pre, preErr := s.cfg.Custody.prepare(ctx, s.google, p.User, p.Secret, s.continueURI())
+	if preErr != nil && !errors.Is(preErr, errReauth) {
+		log.Printf("oauth: %s refresh for %s: %v", s.cfg.Custody.Name(), p.User.Email, preErr)
+		return nil, &tokenError{Code: "server_error", Desc: "couldn't refresh the Google grant"}
+	}
+	// From the rotation on, the answer must reach the client: a lost one
+	// makes its retry a replay. A long custody wait may have used up the
+	// server's write deadline, so give the rest of the request its own.
+	extendWriteDeadline(ctx, postWaitBudget)
+	// The family outlives the token that will carry it, which is accepted
+	// until the end of its expiry's second, so the family is never
+	// forgotten while its newest token is still good.
+	next := refreshChain{family: p.Family, gen: p.Gen + 1, exp: time.Now().Add(refreshTTL)}
+	// The rotation's ID, so a give-back below undoes this refresh's
+	// rotation and never another's (see replayCache).
+	rot := rand.Text()
+	if !s.used.rotate(p.Family, p.Gen, time.Unix(next.exp.Unix()+1, 0), rot) {
+		log.Printf("oauth: reused refresh token for %s (client %q); its family is revoked", p.User.Email, p.ClientID)
+		return nil, invalidGrant("refresh token already used")
+	}
+	// The family is rotated above, so two concurrent refreshes can't both
+	// use the token. A transient failure below (server_error) rotates it
+	// back, or the client's retry would be refused as a replay and its
+	// user signed out; a final refusal (invalid_grant: not allowed, or a
+	// grant only the user can restore, errReauth) keeps it spent.
+	g, terr := s.renewGrant(ctx, p.User, p.Secret, pre, preErr)
+	if terr == nil {
+		var resp map[string]any
+		if resp, terr = s.issueTokens(p.User, c.ID, p.Aud, p.Scope, next, g); terr == nil {
+			return resp, nil
+		}
+	}
+	if terr.Code == "server_error" {
+		s.used.unrotate(p.Family, p.Gen, rot)
+	}
+	return nil, terr
+}
+
+// openRefresh opens the presented refresh token and checks it's c's, for
+// this server, and unexpired.
+func (s *Server) openRefresh(r *http.Request, c *client) (*refreshPayload, *tokenError) {
 	f := r.PostForm
 	var p refreshPayload
 	if s.keys.open(purposeRefresh, f.Get("refresh_token"), &p) != nil {
@@ -240,38 +298,13 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 	case p.Family == "":
 		return nil, invalidGrant("invalid refresh token")
 	}
-	// The family outlives the token that will carry it, which is accepted
-	// until the end of its expiry's second, so the family is never
-	// forgotten while its newest token is still good.
-	next := refreshChain{family: p.Family, gen: p.Gen + 1, exp: time.Now().Add(refreshTTL)}
-	// The rotation's ID, so a give-back below undoes this refresh's
-	// rotation and never another's (see replayCache).
-	rot := rand.Text()
-	if !s.used.rotate(p.Family, p.Gen, time.Unix(next.exp.Unix()+1, 0), rot) {
-		log.Printf("oauth: reused refresh token for %s (client %q); its family is revoked", p.User.Email, p.ClientID)
-		return nil, invalidGrant("refresh token already used")
-	}
-	// The family is rotated above, so two concurrent refreshes can't both
-	// use the token. A transient failure below (server_error) rotates it
-	// back, or the client's retry would be refused as a replay and its
-	// user signed out; a final refusal (invalid_grant: not allowed, or a
-	// grant only the user can restore, errReauth) keeps it spent.
-	g, terr := s.renewGrant(ctx, p.User, p.Secret)
-	if terr == nil {
-		var resp map[string]any
-		if resp, terr = s.issueTokens(p.User, c.ID, p.Aud, p.Scope, next, g); terr == nil {
-			return resp, nil
-		}
-	}
-	if terr.Code == "server_error" {
-		s.used.unrotate(p.Family, p.Gen, rot)
-	}
-	return nil, terr
+	return &p, nil
 }
 
-// renewGrant checks the allow-list again and has custody mint a fresh
-// Google token for u.
-func (s *Server) renewGrant(ctx context.Context, u User, secret string) (*Grant, *tokenError) {
+// renewGrant checks the allow-list again and returns the grant custody
+// prepared for u, or has custody mint one now. preErr is prepare's
+// refusal (errReauth), answered only after the allow-list check.
+func (s *Server) renewGrant(ctx context.Context, u User, secret string, pre *Grant, preErr error) (*Grant, *tokenError) {
 	if err := s.cfg.Allow.admit(ctx, u); err != nil {
 		log.Printf("oauth: refresh refused for %s: %v", u.Email, err)
 		if errors.Is(err, errNotAllowed) {
@@ -279,7 +312,10 @@ func (s *Server) renewGrant(ctx context.Context, u User, secret string) (*Grant,
 		}
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't check the allow-list"}
 	}
-	g, err := s.cfg.Custody.refresh(ctx, s.google, u, secret, s.continueURI())
+	g, err := pre, preErr
+	if g == nil && err == nil {
+		g, err = s.cfg.Custody.refresh(ctx, s.google, u, secret, s.continueURI())
+	}
 	if errors.Is(err, errReauth) {
 		// The client signs the user out: say why in the log too.
 		log.Printf("oauth: %s refresh for %s needs a new sign-in: %v", s.cfg.Custody.Name(), u.Email, err)

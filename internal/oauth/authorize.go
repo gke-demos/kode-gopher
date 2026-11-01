@@ -187,6 +187,9 @@ func (s *Server) toGoogle(w http.ResponseWriter, r *http.Request, req *authReque
 
 // handleCallback is Google's redirect after sign-in.
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
+	// Custody may wait out a nearly spent token: let it extend the
+	// server's write deadline (withResponse), recorded first thing.
+	ctx := withResponse(r.Context(), w)
 	q := r.URL.Query()
 	var b browserBound
 	if !s.openBound(w, r, purposeState, q.Get("state"), &b) {
@@ -205,7 +208,6 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		fail("access_denied", "Google sign-in was cancelled or refused")
 		return
 	}
-	ctx := r.Context()
 	t, err := s.cfg.Google.exchange(ctx, s.google.hc, q.Get("code"), s.callbackURI(), b.Verifier)
 	if err != nil {
 		log.Printf("oauth: Google code exchange: %v", err)
@@ -275,6 +277,7 @@ func (s *Server) toConsent(w http.ResponseWriter, r *http.Request, req *authRequ
 
 // handleConsentContinue is where the vault's consent leg returns.
 func (s *Server) handleConsentContinue(w http.ResponseWriter, r *http.Request) {
+	ctx := withResponse(r.Context(), w) // custody may wait out a nearly spent token
 	ck, err := r.Cookie(s.cookieName(cookieConsent))
 	var p pendingConsent
 	var why string
@@ -291,7 +294,7 @@ func (s *Server) handleConsentContinue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clearCookie(w, cookieConsent)
-	grant, err := s.cfg.Custody.finish(r.Context(), s.google, p.User, p.Consent, r.URL.Query(), s.continueURI())
+	grant, err := s.cfg.Custody.finish(ctx, s.google, p.User, p.Consent, r.URL.Query(), s.continueURI())
 	if err != nil {
 		log.Printf("oauth: %s consent for %s: %v", s.cfg.Custody.Name(), p.User.Email, err)
 		redirectError(w, r, p.Req.RedirectURI, p.Req.State, s.cfg.Issuer, &authError{custodyError(err), grantFailed})

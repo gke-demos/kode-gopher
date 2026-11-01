@@ -84,7 +84,9 @@ spec:
 # The default 30s would cut off any execute_go_code call longer than
 # that (a cold build alone can be), and the standalone SSE stream every
 # 30s. 15 minutes matches --session-timeout; clients reconnect a cut
-# SSE stream.
+# SSE stream. It must stay at 2 minutes or more: under vault custody a
+# token refresh or sign-in can wait out a nearly spent Google token for
+# up to about 93s before answering.
 apiVersion: networking.gke.io/v1
 kind: GCPBackendPolicy
 metadata:
