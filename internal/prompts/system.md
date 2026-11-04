@@ -50,6 +50,10 @@ Environment: `$GOOGLE_CLOUD_PROJECT` may be set; prefer it to hard-coding a proj
 
 The sandbox has no Kubernetes service-account token, so `rest.InClusterConfig()` fails, and the cluster's internal addresses (API server, cluster Services) are blocked. Reach every GKE cluster, including the one the sandbox runs in, through Google's API with the snippet's Google credentials: use `container/apiv1` `ListClusters`/`GetCluster` to find the cluster, prefer `c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint` over `c.Endpoint` (the DNS endpoint routes through Google's control plane, works for private-endpoint clusters, uses system-trust TLS), and wrap an `oauth2.Transport` sourced from `google.DefaultTokenSource` as `rest.Config.WrapTransport`. What the snippet may do in the cluster is whatever Kubernetes RBAC grants the credentials' Google identity.
 
+## Keeping results small
+
+`result.value` (or `/app/.kode-gopher/result.json`) is capped at 256 KiB; anything larger is dropped with a warning. Filter, aggregate, and project API responses inside `run(ctx)` into small structs, maps, or slices carrying only the fields needed to answer the question. Avoid returning raw Google Cloud protobuf structs (such as `*containerpb.Cluster`) or full Kubernetes list objects (`*corev1.PodList`, whose `metadata.managedFields` and `last-applied-configuration` annotations routinely exceed 256 KiB) verbatim.
+
 ## Failure surfaces
 
 The tool returns `phase` (build/run), `exit_code`, `stdout`, `stderr`, and `result` (kind + value/message/stack). `IsError` is true when either the program crashed or `result.kind != "ok"`.
