@@ -19,6 +19,7 @@ package creds
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -44,6 +45,9 @@ type OAuthUser struct {
 	// ServiceAccount marks a client-credentials token: Email is the
 	// service account, and Identity reports mode=service.
 	ServiceAccount bool
+	// ReadOnly marks a token issued with ReadOnlyScopes rather than
+	// cloud-platform.
+	ReadOnly bool
 }
 
 // Materialize implements Source: nothing goes into the sandbox as files
@@ -57,19 +61,38 @@ func (u *OAuthUser) AccessToken(_ context.Context) (AccessToken, error) {
 	if u.Token == "" || time.Until(u.Expiry) <= 0 {
 		return AccessToken{}, errors.New("the Google access token in this request's kode-gopher token has expired; the client should refresh its token")
 	}
+	var scopes []string
+	if u.ReadOnly {
+		scopes = slices.Clone(ReadOnlyScopes)
+	}
 	return AccessToken{
 		Token:        u.Token,
 		Expiry:       u.Expiry,
 		Email:        u.Email,
 		Project:      u.Project,
 		QuotaProject: u.QuotaProject,
+		Scopes:       scopes,
 	}, nil
+}
+
+// ReadOnlyAccessToken implements ReadOnlyTokenMinter. An OAuth bearer
+// token's Google scopes were fixed at consent; if the server wasn't
+// started with --read-only, fail closed rather than forwarding a
+// full-scope token.
+func (u *OAuthUser) ReadOnlyAccessToken(ctx context.Context) (AccessToken, error) {
+	if !u.ReadOnly {
+		if u.ServiceAccount {
+			return AccessToken{}, errors.New("read-only credentials cannot be derived from a full-scope OAuth client_credentials token; start kode-gopher serve with --read-only so the OAuth server issues read-only Google scopes")
+		}
+		return AccessToken{}, errors.New("read-only credentials cannot be derived from a full-scope OAuth token; start kode-gopher serve with --read-only so sign-in grants read-only Google scopes")
+	}
+	return u.AccessToken(ctx)
 }
 
 // Identity implements Source.
 func (u *OAuthUser) Identity(_ context.Context) (Identity, error) {
 	if u.ServiceAccount {
-		return Identity{Mode: "service", CredType: "service_account", Email: u.Email, ProjectID: u.Project}, nil
+		return Identity{Mode: "service", CredType: "service_account", Email: u.Email, ProjectID: u.Project, ReadOnly: u.ReadOnly}, nil
 	}
-	return Identity{Mode: "oauth", CredType: "authorized_user", Email: u.Email, ProjectID: u.Project}, nil
+	return Identity{Mode: "oauth", CredType: "authorized_user", Email: u.Email, ProjectID: u.Project, ReadOnly: u.ReadOnly}, nil
 }

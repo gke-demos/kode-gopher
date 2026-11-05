@@ -28,6 +28,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/gke-demos/kode-gopher/internal/creds"
 )
 
 // The vault renews a Google token only once it has expired or Google
@@ -97,6 +99,7 @@ type Consent struct {
 type Custody interface {
 	// Name is "vault" or "sealed".
 	Name() string
+	readOnly() bool
 	// signInScopes and signInOffline shape the Google sign-in request.
 	signInScopes() []string
 	signInOffline() bool
@@ -142,19 +145,63 @@ func (e reauthError) Is(target error) bool { return target == errReauth }
 
 // SealedCustody is the fallback: the Google refresh token travels inside
 // kode-gopher's own sealed refresh token, held by the MCP client.
-type SealedCustody struct{}
+type SealedCustody struct {
+	// ReadOnly requests creds.ReadOnlyScopes instead of cloud-platform.
+	ReadOnly bool
+}
 
 // Name implements Custody.
 func (SealedCustody) Name() string { return "sealed" }
 
-func (SealedCustody) signInScopes() []string {
+func (c SealedCustody) readOnly() bool { return c.ReadOnly }
+
+func (c SealedCustody) signInScopes() []string {
+	if c.ReadOnly {
+		return googleUserScopes(true)
+	}
+	return googleUserScopes(false)
+}
+
+func googleUserScopes(readOnly bool) []string {
+	if readOnly {
+		return append([]string{scopeOpenID, scopeEmail}, creds.ReadOnlyScopes...)
+	}
 	return []string{scopeOpenID, scopeEmail, scopeCloudPlatform}
+}
+
+func isAllowedReadOnlyGoogleScope(sc string) bool {
+	switch sc {
+	case scopeOpenID, scopeEmail, "email", "profile", "https://www.googleapis.com/auth/userinfo.profile":
+		return true
+	}
+	return slices.Contains(creds.ReadOnlyScopes, sc)
+}
+
+// checkReadOnlyGoogleScopes enforces an allowlist on Google scopes in
+// read-only mode so neither a tampered browser consent URL nor a
+// pre-existing service-specific write grant (e.g. compute, bigquery,
+// devstorage.full_control) can slip past a simple cloud-platform check.
+func checkReadOnlyGoogleScopes(scopes []string, where string) error {
+	if !slices.Contains(scopes, creds.CloudPlatformReadOnlyScope) {
+		return reauthError(where + ": the read-only Google Cloud scope wasn't granted")
+	}
+	for _, sc := range scopes {
+		if !isAllowedReadOnlyGoogleScope(sc) {
+			return reauthError(fmt.Sprintf("%s: scope %q isn't permitted on a read-only server", where, sc))
+		}
+	}
+	return nil
 }
 
 func (SealedCustody) signInOffline() bool { return true }
 
-func (SealedCustody) begin(_ context.Context, _ *google, _ User, t *googleTokens, _ string) (*Grant, *Consent, error) {
-	if !slices.Contains(strings.Fields(t.Scope), scopeCloudPlatform) {
+func (c SealedCustody) begin(_ context.Context, _ *google, _ User, t *googleTokens, _ string) (*Grant, *Consent, error) {
+	granted := strings.Fields(t.Scope)
+	if c.ReadOnly {
+		if err := checkReadOnlyGoogleScopes(granted, "consent"); err != nil {
+			return nil, nil, err
+		}
+	} else if !slices.Contains(granted, scopeCloudPlatform) {
 		return nil, nil, reauthError("the Google Cloud scope wasn't granted at consent")
 	}
 	if t.RefreshToken == "" {
@@ -175,7 +222,7 @@ func (SealedCustody) prepare(context.Context, *google, User, string, string) (*G
 	return nil, nil
 }
 
-func (SealedCustody) refresh(ctx context.Context, g *google, u User, secret, _ string) (*Grant, error) {
+func (c SealedCustody) refresh(ctx context.Context, g *google, u User, secret, _ string) (*Grant, error) {
 	if secret == "" {
 		return nil, errReauth
 	}
@@ -185,6 +232,11 @@ func (SealedCustody) refresh(ctx context.Context, g *google, u User, secret, _ s
 	}
 	if err != nil {
 		return nil, err
+	}
+	if c.ReadOnly && t.Scope != "" {
+		if err := checkReadOnlyGoogleScopes(strings.Fields(t.Scope), "refreshed Google token"); err != nil {
+			return nil, err
+		}
 	}
 	// Google includes a fresh ID token when it can. If the account's
 	// email or domain has changed since sign-in, the identity (and the
@@ -225,6 +277,8 @@ type VaultCustody struct {
 	Client *http.Client
 	// Endpoint defaults to https://agentidentitycredentials.googleapis.com/v1/.
 	Endpoint string
+	// ReadOnly requests creds.ReadOnlyScopes instead of cloud-platform.
+	ReadOnly bool
 
 	// sleeper replaces waiting out a nearly spent token (tests). A
 	// pointer, so VaultCustody stays comparable.
@@ -238,6 +292,8 @@ type sleeper struct {
 
 // Name implements Custody.
 func (*VaultCustody) Name() string { return "vault" }
+
+func (v *VaultCustody) readOnly() bool { return v.ReadOnly }
 
 // The vault runs its own consent leg for cloud-platform, so sign-in
 // only needs to identify the user.
@@ -414,7 +470,7 @@ func (v *VaultCustody) grant(ctx context.Context, g *google, u User, r *vaultRet
 		case err != nil:
 			return nil, nil, err
 		}
-		if err := checkVaultToken(ti, u); err != nil {
+		if err := checkVaultToken(ti, u, v.ReadOnly); err != nil {
 			return nil, nil, err
 		}
 		left := time.Until(ti.Expiry)
@@ -463,15 +519,20 @@ func (v *VaultCustody) recheck(ctx context.Context, g *google, u User, continueU
 }
 
 // checkVaultToken refuses a vault token that isn't u's to use.
-func checkVaultToken(ti *tokenInfo, u User) error {
-	switch {
-	case ti.Sub != u.Sub:
+func checkVaultToken(ti *tokenInfo, u User, readOnly bool) error {
+	if ti.Sub != u.Sub {
 		// Someone other than the signed-in user consented. The vault
 		// has no delete API, so this only refuses.
 		return reauthError("vault: the stored Google grant belongs to a different account than the one signed in")
-	case !slices.Contains(ti.Scopes, scopeCloudPlatform):
+	}
+	if readOnly {
+		if err := checkReadOnlyGoogleScopes(ti.Scopes, "vault"); err != nil {
+			return err
+		}
+	} else if !slices.Contains(ti.Scopes, scopeCloudPlatform) {
 		return reauthError("vault: token lacks the Google Cloud scope")
-	case ti.Email != "" && !strings.EqualFold(ti.Email, u.Email):
+	}
+	if ti.Email != "" && !strings.EqualFold(ti.Email, u.Email) {
 		// Same account, new address: the identity (and the allow-list
 		// decision) sealed at sign-in is stale. tokeninfo reports the
 		// email because retrieve always asks for userinfo.email.
@@ -561,7 +622,7 @@ type vaultRetrieveResponse struct {
 func (v *VaultCustody) retrieve(ctx context.Context, userID, continueURI, forceRefresh string) (*vaultRetrieveResponse, error) {
 	body := map[string]any{
 		"userId":      userID,
-		"scopes":      []string{scopeOpenID, scopeEmail, scopeCloudPlatform},
+		"scopes":      googleUserScopes(v.ReadOnly),
 		"continueUri": continueURI,
 	}
 	if forceRefresh != "" {

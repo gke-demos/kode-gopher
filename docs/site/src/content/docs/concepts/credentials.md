@@ -30,6 +30,17 @@ On a shared server, no credential file ever enters the sandbox. The sandbox's ow
 - **Service account:** kode-gopher calls `generateAccessToken` for the account. It needs `roles/iam.serviceAccountTokenCreator` on that account, and nothing project-wide.
 - **Google sign-in:** the user's token comes from their sign-in. With vault custody, Google's Agent Identity credential vault holds the grant and kode-gopher retrieves fresh tokens from it. kode-gopher checks that every token from the vault belongs to the signed-in user and carries `cloud-platform`. With sealed custody, kode-gopher refreshes the token from the user's Google refresh token, which is sealed inside kode-gopher's own refresh token.
 
+## Read-only OAuth downscoping
+
+Pass `--read-only` to `kode-gopher exec` or `kode-gopher serve` (or set `read_only: true` on an individual `execute_go_code` call) to restrict the per-run token handed to the sandbox's metadata emulator to Google's read-only OAuth scopes (`cloud-platform.read-only`, `devstorage.read_only`, `bigquery.readonly`, `logging.read`, `monitoring.read`, `trace.readonly`):
+
+- **`service` mode (`--credentials=service`):** supports both server-wide `--read-only` and per-call `read_only: true`, minting read-only tokens via `generateAccessToken`.
+- **`access-token` mode (`--credentials=access-token`):** supports `--read-only` and `read_only: true` when ADC is a `service_account`, `impersonated_service_account`, or `external_account` JSON configuration. Fails closed on GCE/GKE `metadata` or `authorized_user` ADC, which ignore requested OAuth scopes at refresh time.
+- **`oauth` mode (`--auth=oauth --read-only`):** requests the read-only scope allowlist during Google sign-in (both vault and sealed custody) and for OAuth `client_credentials` clients, refusing any stored grant that carries write scopes. Per-call `read_only: true` against a full-scope `--auth=oauth` server (interactive or `client_credentials`) fails closed because OAuth bearer tokens cannot be narrowed without re-issuance under `--read-only`.
+- **`forwarded` mode:** fails closed when local ADC is present because copying `adc.json` into the sandbox exposes full-scope credentials.
+
+Google Cloud APIs enforce OAuth scopes directly on the bearer token. Note that inside a GKE cluster's Kubernetes API server, authorization is governed by Kubernetes RBAC on the caller's Google identity rather than Google Cloud OAuth scopes.
+
 ## Reaching GKE clusters
 
 Sandboxes mount no Kubernetes service account token, so `rest.InClusterConfig()` fails, and cluster-internal addresses are blocked. A snippet reaches any GKE cluster, including the one it runs in, the same way it reaches any Google API:

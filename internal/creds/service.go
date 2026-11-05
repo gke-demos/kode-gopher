@@ -45,6 +45,7 @@ type Service struct {
 	project      string
 	quotaProject string
 	mint         *Impersonator
+	readOnly     bool
 }
 
 // NewService runs snippets as the service account email, minting with
@@ -58,6 +59,13 @@ func NewService(imp *Impersonator, email, project, quotaProject string) (*Servic
 		project = ServiceAccountProject(email)
 	}
 	return &Service{email: email, project: project, quotaProject: quotaProject, mint: imp}, nil
+}
+
+// WithReadOnly configures Service to mint ReadOnlyScopes tokens on every
+// AccessToken call and report ReadOnly=true from Identity.
+func (s *Service) WithReadOnly(readOnly bool) *Service {
+	s.readOnly = readOnly
+	return s
 }
 
 // ServiceAccountProject is the project in a user-managed service
@@ -79,6 +87,9 @@ func (s *Service) Materialize(_ context.Context) (map[string][]byte, map[string]
 
 // AccessToken implements TokenMinter.
 func (s *Service) AccessToken(ctx context.Context) (AccessToken, error) {
+	if s.readOnly {
+		return s.ReadOnlyAccessToken(ctx)
+	}
 	tok, err := s.mint.Token(ctx, s.email)
 	if err != nil {
 		return AccessToken{}, err
@@ -92,9 +103,32 @@ func (s *Service) AccessToken(ctx context.Context) (AccessToken, error) {
 	}, nil
 }
 
+// ReadOnlyAccessToken implements ReadOnlyTokenMinter: mints a short-lived
+// token restricted to ReadOnlyScopes via IAM Credentials generateAccessToken.
+func (s *Service) ReadOnlyAccessToken(_ context.Context) (AccessToken, error) {
+	tok, err := s.mint.TokenSource(s.email, ReadOnlyScopes...).Token()
+	if err != nil {
+		return AccessToken{}, err
+	}
+	return AccessToken{
+		Token:        tok.AccessToken,
+		Expiry:       tok.Expiry,
+		Email:        s.email,
+		Project:      s.project,
+		QuotaProject: s.quotaProject,
+		Scopes:       slices.Clone(ReadOnlyScopes),
+	}, nil
+}
+
 // Identity implements Source.
 func (s *Service) Identity(_ context.Context) (Identity, error) {
-	return Identity{Mode: "service", CredType: "service_account", Email: s.email, ProjectID: s.project}, nil
+	return Identity{
+		Mode:      "service",
+		CredType:  "service_account",
+		Email:     s.email,
+		ProjectID: s.project,
+		ReadOnly:  s.readOnly,
+	}, nil
 }
 
 // Impersonator mints access tokens for Google service accounts with the
@@ -127,6 +161,11 @@ func NewImpersonator(ctx context.Context) (*Impersonator, error) {
 // Token returns a cloud-platform token for the service account email.
 func (i *Impersonator) Token(_ context.Context, email string) (*oauth2.Token, error) {
 	return i.source(email, []string{cloudPlatformScope}).Token()
+}
+
+// ReadOnlyToken returns a ReadOnlyScopes token for the service account email.
+func (i *Impersonator) ReadOnlyToken(_ context.Context, email string) (*oauth2.Token, error) {
+	return i.source(email, slices.Clone(ReadOnlyScopes)).Token()
 }
 
 // TokenSource is a cached token source for email with the given scopes

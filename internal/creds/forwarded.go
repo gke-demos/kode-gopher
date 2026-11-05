@@ -93,6 +93,29 @@ func (f *Forwarded) Materialize(_ context.Context) (map[string][]byte, map[strin
 	return files, envs, nil
 }
 
+// materializeReadOnly handles ForRun(..., readOnly=true) for Forwarded:
+// when no ADC file exists on disk (Mode=none) there are no credentials to
+// expose; when an ADC file exists, forwarding it into /app would hand the
+// sandbox full-scope credentials, so it fails closed.
+func (f *Forwarded) materializeReadOnly() (map[string][]byte, map[string]string, *AccessToken, error) {
+	envs := map[string]string{}
+	for _, k := range f.EnvAllowList {
+		if v := os.Getenv(k); v != "" {
+			envs[k] = v
+		}
+	}
+	if f.ADCPath == "" {
+		return map[string][]byte{}, envs, nil, nil
+	}
+	if _, err := os.Stat(f.ADCPath); err != nil {
+		if os.IsNotExist(err) {
+			return map[string][]byte{}, envs, nil, nil
+		}
+		return nil, nil, nil, fmt.Errorf("stat ADC at %s: %w", f.ADCPath, err)
+	}
+	return nil, nil, nil, fmt.Errorf("read-only credentials cannot be enforced in forwarded mode because copying local ADC into the sandbox exposes full-scope credentials; use --in-cluster with --credentials=service (or --auth=oauth --read-only)")
+}
+
 // Identity implements Source. Cached after first call — subsequent
 // calls return the cached result without hitting disk or the network,
 // even if the ADC file changes underneath. This is the right tradeoff

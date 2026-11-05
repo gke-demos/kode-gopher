@@ -169,21 +169,23 @@ func run(path, namespace, kubeContext string, openTimeout, execTimeout time.Dura
 	if err != nil {
 		return 0, err
 	}
-	credFiles, envs, err := credSrc.Materialize(ctx)
+	credFiles, envs, tok, err := creds.ForRun(ctx, credSrc, *credCfg.readOnly)
 	if err != nil {
-		return 0, fmt.Errorf("materialize credentials: %w", err)
+		return 0, err
 	}
 	for k, v := range credFiles {
 		files[k] = v
 	}
 	var runCreds *sandbox.Credentials
-	if m, ok := credSrc.(creds.TokenMinter); ok {
-		tok, err := m.AccessToken(ctx)
-		if err != nil {
-			return 0, err
+	if tok != nil {
+		runCreds = &sandbox.Credentials{
+			AccessToken:  tok.Token,
+			Expiry:       tok.Expiry,
+			Email:        tok.Email,
+			Project:      tok.Project,
+			QuotaProject: tok.QuotaProject,
+			Scopes:       tok.Scopes,
 		}
-		runCreds = &sandbox.Credentials{AccessToken: tok.Token, Expiry: tok.Expiry,
-			Email: tok.Email, Project: tok.Project, QuotaProject: tok.QuotaProject}
 		log.Printf("run phase gets a minted access token (%s, expires %s)", tok.Email, tok.Expiry.Format(time.RFC3339))
 	} else if _, ok := credFiles[".kode-gopher/creds/adc.json"]; ok {
 		log.Printf("forwarding ADC from %s", localADCPath())
@@ -333,12 +335,27 @@ const (
 type credFlags struct {
 	mode           *string
 	serviceAccount *string
+	readOnly       *bool
 }
 
 func addCredFlags(fs *flag.FlagSet) *credFlags {
 	return &credFlags{
 		mode:           fs.String("credentials", credForwarded, "how the snippet gets Google credentials: forwarded (copy local ADC into the sandbox), access-token (mint a short-lived token from ADC and serve it to the run only), or service (the same, for --service-account, impersonated with ADC); access-token and service need --in-cluster"),
 		serviceAccount: fs.String("service-account", "", "--credentials=service: the Google service account snippets run as; kode-gopher's ADC needs roles/iam.serviceAccountTokenCreator on it"),
+		readOnly:       fs.Bool("read-only", false, "restrict Google credentials to read-only OAuth scopes; supported with --credentials=service, --credentials=access-token (service-account or WIF JSON ADC), and --auth=oauth"),
+	}
+}
+
+func (f *credFlags) validateMode() error {
+	mode := *f.mode
+	if *f.serviceAccount != "" && mode != credService {
+		return fmt.Errorf("--service-account needs --credentials=%s", credService)
+	}
+	switch mode {
+	case credForwarded, credAccessToken, credService:
+		return nil
+	default:
+		return fmt.Errorf("--credentials must be %q, %q or %q, got %q", credForwarded, credAccessToken, credService, mode)
 	}
 }
 
@@ -346,18 +363,25 @@ func addCredFlags(fs *flag.FlagSet) *credFlags {
 // in-cluster connectivity: the token travels with the run request
 // straight to the sandbox's Service.
 func (f *credFlags) source(ctx context.Context, inCluster bool) (creds.Source, error) {
-	mode := *f.mode
-	if *f.serviceAccount != "" && mode != credService {
-		return nil, fmt.Errorf("--service-account needs --credentials=%s", credService)
+	if err := f.validateMode(); err != nil {
+		return nil, err
 	}
+	mode := *f.mode
+	readOnly := *f.readOnly
 	switch mode {
 	case credForwarded:
+		if readOnly {
+			return nil, fmt.Errorf("--read-only cannot be used with --credentials=%s (copying local ADC into the sandbox cannot restrict OAuth scopes); use --in-cluster with --credentials=%s or --credentials=%s, or --auth=oauth --read-only", credForwarded, credService, credAccessToken)
+		}
 		return creds.NewForwarded(localADCPath(), forwardedEnv), nil
 	case credAccessToken, credService:
 		if !inCluster {
 			return nil, fmt.Errorf("--credentials=%s needs --in-cluster", mode)
 		}
 		if mode == credAccessToken {
+			if readOnly {
+				return creds.NewReadOnlyMinted(ctx)
+			}
 			return creds.NewMinted(ctx)
 		}
 		if *f.serviceAccount == "" {
@@ -367,7 +391,11 @@ func (f *credFlags) source(ctx context.Context, inCluster bool) (creds.Source, e
 		if err != nil {
 			return nil, err
 		}
-		return creds.NewService(imp, *f.serviceAccount, os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GOOGLE_CLOUD_QUOTA_PROJECT"))
+		svc, err := creds.NewService(imp, *f.serviceAccount, os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GOOGLE_CLOUD_QUOTA_PROJECT"))
+		if err != nil {
+			return nil, err
+		}
+		return svc.WithReadOnly(readOnly), nil
 	}
 	return nil, fmt.Errorf("--credentials must be %q, %q or %q, got %q", credForwarded, credAccessToken, credService, mode)
 }

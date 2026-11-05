@@ -34,6 +34,7 @@ type GCPAuthStatusOutput struct {
 	CredType  string `json:"credential_type,omitempty"  jsonschema:"For forwarded and access-token modes: 'authorized_user' or 'service_account' (access-token also 'metadata', when kode-gopher's own identity is Workload Identity). oauth: 'authorized_user'. service: 'service_account'."`
 	Email     string `json:"email,omitempty"            jsonschema:"Best-effort identity email. Empty means lookup failed or wasn't possible."`
 	ProjectID string `json:"project_id,omitempty"       jsonschema:"Google Cloud project for these credentials: the deployment's configured project, the ADC file's quota project, or the service account's own project. Snippets also see it as $GOOGLE_CLOUD_PROJECT when kode-gopher passes it on."`
+	ReadOnly  bool   `json:"read_only,omitempty"        jsonschema:"True when this server or credential source restricts every run to read-only Google Cloud OAuth scopes."`
 }
 
 func (s *Server) handleGCPAuthStatus(ctx context.Context, req *sdk.CallToolRequest, _ GCPAuthStatusArgs) (*sdk.CallToolResult, *GCPAuthStatusOutput, error) {
@@ -50,19 +51,24 @@ func (s *Server) handleGCPAuthStatus(ctx context.Context, req *sdk.CallToolReque
 		CredType:  id.CredType,
 		Email:     id.Email,
 		ProjectID: id.ProjectID,
+		ReadOnly:  id.ReadOnly || (s.cfg.ReadOnly && id.Mode != "none"),
+	}
+	suffix := ""
+	if out.ReadOnly {
+		suffix = " read_only=true"
 	}
 	if err != nil {
 		// Partial data with an IsError marker so the LLM can distinguish
 		// "auth definitively broken" from "auth uncertain — retry or ask".
-		text := fmt.Sprintf("identity lookup failed: %v\npartial: mode=%s credential_type=%s email=%s project_id=%s",
-			err, out.Mode, out.CredType, out.Email, out.ProjectID)
+		text := fmt.Sprintf("identity lookup failed: %v\npartial: mode=%s credential_type=%s email=%s project_id=%s%s",
+			err, out.Mode, out.CredType, out.Email, out.ProjectID, suffix)
 		return &sdk.CallToolResult{
 			Content: []sdk.Content{&sdk.TextContent{Text: text}},
 			IsError: true,
 		}, out, nil
 	}
-	text := fmt.Sprintf("mode=%s credential_type=%s email=%s project_id=%s",
-		out.Mode, out.CredType, out.Email, out.ProjectID)
+	text := fmt.Sprintf("mode=%s credential_type=%s email=%s project_id=%s%s",
+		out.Mode, out.CredType, out.Email, out.ProjectID, suffix)
 	return &sdk.CallToolResult{
 		Content: []sdk.Content{&sdk.TextContent{Text: text}},
 	}, out, nil

@@ -46,6 +46,7 @@ type codePayload struct {
 	Token    string      `json:"t"`
 	TokenExp int64       `json:"te"`
 	Secret   string      `json:"g,omitempty"`
+	ReadOnly bool        `json:"ro,omitempty"`
 	JTI      string      `json:"j"`
 	Exp      int64       `json:"e"`
 }
@@ -62,6 +63,8 @@ type accessPayload struct {
 	Exp      int64  `json:"e"`
 	// Mode is modeService for a client-credentials token, else empty.
 	Mode string `json:"m,omitempty"`
+	// ReadOnly marks a token carrying ReadOnlyScopes rather than cloud-platform.
+	ReadOnly bool `json:"ro,omitempty"`
 	// SH is a tag of a client-credentials client's secret, so rotating
 	// the secret revokes the tokens minted with the old one.
 	SH string `json:"sh,omitempty"`
@@ -76,6 +79,7 @@ type refreshPayload struct {
 	Aud      string `json:"aud"`
 	Scope    string `json:"s"`
 	Secret   string `json:"g,omitempty"`
+	ReadOnly bool   `json:"ro,omitempty"`
 	Family   string `json:"f,omitempty"`
 	Gen      uint64 `json:"n,omitempty"`
 	// JTI is unique per token. A token issued before families has no
@@ -191,6 +195,8 @@ func (s *Server) exchangeCode(r *http.Request, c *client) (map[string]any, *toke
 		return nil, invalidGrant("authorization code expired")
 	case p.Req.ClientID != c.ID:
 		return nil, invalidGrant("authorization code was issued to another client")
+	case p.ReadOnly != s.cfg.ReadOnly:
+		return nil, invalidGrant("authorization code scope mode doesn't match server")
 	case f.Get("redirect_uri") != "" && f.Get("redirect_uri") != p.Req.RedirectURI:
 		return nil, invalidGrant("redirect_uri doesn't match the authorization request")
 	case !pkceMatches(f.Get("code_verifier"), p.Req.Challenge):
@@ -295,6 +301,8 @@ func (s *Server) openRefresh(r *http.Request, c *client) (*refreshPayload, *toke
 	case p.Aud != s.resource:
 		// Sealed by a server with the same keys at another address.
 		return nil, invalidGrant("refresh token is for another resource")
+	case p.ReadOnly != s.cfg.ReadOnly:
+		return nil, invalidGrant("refresh token scope mode changed; sign in again")
 	case p.Family == "":
 		return nil, invalidGrant("invalid refresh token")
 	}
@@ -343,13 +351,13 @@ func (s *Server) issueTokens(u User, clientID, aud, scope string, chain refreshC
 	now := time.Now()
 	at, exp, terr := s.sealAccess(accessPayload{
 		Sub: u.Sub, Email: u.Email, ClientID: clientID, Aud: aud, Scope: scope,
-		Token: g.AccessToken, TokenExp: g.Expiry.Unix(),
+		Token: g.AccessToken, TokenExp: g.Expiry.Unix(), ReadOnly: s.cfg.ReadOnly,
 	}, now)
 	if terr != nil {
 		return nil, terr
 	}
 	rt, err := s.keys.seal(purposeRefresh, refreshPayload{
-		User: u, ClientID: clientID, Aud: aud, Scope: scope, Secret: g.Secret,
+		User: u, ClientID: clientID, Aud: aud, Scope: scope, Secret: g.Secret, ReadOnly: s.cfg.ReadOnly,
 		Family: chain.family, Gen: chain.gen, JTI: rand.Text(), Exp: chain.exp.Unix(),
 	})
 	if err != nil {
@@ -478,7 +486,7 @@ func (s *Server) Verifier() auth.TokenVerifier {
 			return nil, auth.ErrInvalidToken
 		}
 		exp := time.Unix(p.Exp, 0)
-		if time.Now().After(exp) || p.Aud != s.resource {
+		if time.Now().After(exp) || p.Aud != s.resource || p.ReadOnly != s.cfg.ReadOnly {
 			return nil, auth.ErrInvalidToken
 		}
 		service := p.Mode == modeService
@@ -500,6 +508,7 @@ func (s *Server) Verifier() auth.TokenVerifier {
 				Project:        project,
 				QuotaProject:   s.cfg.QuotaProject,
 				ServiceAccount: service,
+				ReadOnly:       p.ReadOnly,
 			}},
 		}, nil
 	}

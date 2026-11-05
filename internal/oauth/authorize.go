@@ -47,9 +47,10 @@ type authRequest struct {
 // browserBound is an envelope tied to the browser that started the flow
 // by a cookie, so a link or form from someone else's flow fails.
 type browserBound struct {
-	Req     authRequest `json:"q"`
-	Browser string      `json:"b"`
-	Exp     int64       `json:"e"`
+	Req      authRequest `json:"q"`
+	Browser  string      `json:"b"`
+	ReadOnly bool        `json:"ro,omitempty"`
+	Exp      int64       `json:"e"`
 	// Verifier is the PKCE verifier for Google sign-in (state only).
 	Verifier string `json:"v,omitempty"`
 }
@@ -57,10 +58,11 @@ type browserBound struct {
 // pendingConsent waits in a cookie while the browser is at the vault's
 // consent leg.
 type pendingConsent struct {
-	Req     authRequest `json:"q"`
-	User    User        `json:"u"`
-	Consent Consent     `json:"c"`
-	Exp     int64       `json:"e"`
+	Req      authRequest `json:"q"`
+	User     User        `json:"u"`
+	Consent  Consent     `json:"c"`
+	ReadOnly bool        `json:"ro,omitempty"`
+	Exp      int64       `json:"e"`
 }
 
 const (
@@ -115,7 +117,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.toGoogle(w, r, req, browser)
 		return
 	}
-	form, err := s.keys.seal(purposeConsent, browserBound{Req: *req, Browser: browser, Exp: time.Now().Add(authRequestTTL).Unix()})
+	form, err := s.keys.seal(purposeConsent, browserBound{Req: *req, Browser: browser, ReadOnly: s.cfg.ReadOnly, Exp: time.Now().Add(authRequestTTL).Unix()})
 	if err != nil {
 		authPage(w, http.StatusInternalServerError, "Error", "Couldn't start sign-in.")
 		return
@@ -175,7 +177,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 // sealed state.
 func (s *Server) toGoogle(w http.ResponseWriter, r *http.Request, req *authRequest, browser string) {
 	verifier := rand.Text() + rand.Text()
-	state, err := s.keys.seal(purposeState, browserBound{Req: *req, Browser: browser, Exp: time.Now().Add(authRequestTTL).Unix(), Verifier: verifier})
+	state, err := s.keys.seal(purposeState, browserBound{Req: *req, Browser: browser, ReadOnly: s.cfg.ReadOnly, Exp: time.Now().Add(authRequestTTL).Unix(), Verifier: verifier})
 	if err != nil {
 		authPage(w, http.StatusInternalServerError, "Error", "Couldn't start sign-in.")
 		return
@@ -266,7 +268,7 @@ func custodyError(err error) string {
 // toConsent parks the flow in a cookie and sends the browser to the
 // vault's consent leg, which returns to /consent/continue.
 func (s *Server) toConsent(w http.ResponseWriter, r *http.Request, req *authRequest, u User, c *Consent) {
-	p, err := s.keys.seal(purposePending, pendingConsent{Req: *req, User: u, Consent: *c, Exp: time.Now().Add(authRequestTTL).Unix()})
+	p, err := s.keys.seal(purposePending, pendingConsent{Req: *req, User: u, Consent: *c, ReadOnly: s.cfg.ReadOnly, Exp: time.Now().Add(authRequestTTL).Unix()})
 	if err != nil {
 		redirectError(w, r, req.RedirectURI, req.State, s.cfg.Issuer, &authError{"server_error", "couldn't start consent"})
 		return
@@ -288,6 +290,8 @@ func (s *Server) handleConsentContinue(w http.ResponseWriter, r *http.Request) {
 		why = whyUnreadable
 	case time.Now().Unix() > p.Exp:
 		why = whyExpired
+	case p.ReadOnly != s.cfg.ReadOnly:
+		why = whyPolicyChanged
 	}
 	if why != "" {
 		signInFailed(w, purposePending, why)
@@ -309,7 +313,8 @@ func (s *Server) finishAuthorize(w http.ResponseWriter, r *http.Request, req *au
 	code, err := s.keys.seal(purposeCode, codePayload{
 		Req: *req, User: u,
 		Token: g.AccessToken, TokenExp: g.Expiry.Unix(), Secret: g.Secret,
-		JTI: rand.Text(), Exp: time.Now().Add(codeTTL).Unix(),
+		ReadOnly: s.cfg.ReadOnly,
+		JTI:      rand.Text(), Exp: time.Now().Add(codeTTL).Unix(),
 	})
 	if err != nil {
 		redirectError(w, r, req.RedirectURI, req.State, s.cfg.Issuer, &authError{"server_error", "couldn't issue a code"})
@@ -351,10 +356,11 @@ var browserCookieRE = regexp.MustCompile(`^[A-Z2-7]{26}$`)
 // Why a flow can't continue in this browser. Each is shown to the user
 // and logged.
 const (
-	whyUnreadable = "The sign-in link is damaged, or was issued by a different kode-gopher server."
-	whyExpired    = "This sign-in was started more than 10 minutes ago."
-	whyNoCookie   = "This browser has no record of starting this sign-in. It was probably started in another browser or browser profile (signing in to a different Google account can move you to another Chrome profile), or this browser blocks cookies for this site."
-	whyOtherFlow  = "This browser started a different sign-in. This one was started in another browser or browser profile, or after this browser's sign-in record expired."
+	whyUnreadable    = "The sign-in link is damaged, or was issued by a different kode-gopher server."
+	whyExpired       = "This sign-in was started more than 10 minutes ago."
+	whyNoCookie      = "This browser has no record of starting this sign-in. It was probably started in another browser or browser profile (signing in to a different Google account can move you to another Chrome profile), or this browser blocks cookies for this site."
+	whyOtherFlow     = "This browser started a different sign-in. This one was started in another browser or browser profile, or after this browser's sign-in record expired."
+	whyPolicyChanged = "The server's credential scope policy changed while this sign-in was in progress."
 )
 
 // openBound opens a browser-bound envelope and checks it belongs to
@@ -367,6 +373,8 @@ func (s *Server) openBound(w http.ResponseWriter, r *http.Request, purpose, seal
 		why = whyUnreadable
 	case time.Now().Unix() > b.Exp:
 		why = whyExpired
+	case b.ReadOnly != s.cfg.ReadOnly:
+		why = whyPolicyChanged
 	case ckErr != nil:
 		why = whyNoCookie
 	case subtle.ConstantTimeCompare([]byte(hashCookie(ck.Value)), []byte(b.Browser)) != 1:

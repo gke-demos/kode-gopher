@@ -44,6 +44,7 @@ type ExecuteGoCodeArgs struct {
 	Code         string            `json:"code,omitempty" jsonschema:"Single-file Go source to ship into the sandbox. EITHER a snippet declaring 'func run(ctx context.Context) (any, error)' (the value run returns is JSON-marshaled and surfaced as result.value; the wrapper provides func main()), OR a complete 'package main' program (your code owns stdout/stderr; if you want a structured result write it to /app/.kode-gopher/result.json yourself). Mutually exclusive with 'files'."`
 	Files        map[string]string `json:"files,omitempty" jsonschema:"Multi-file Go source. Keys are paths relative to /app (e.g. 'main.go', 'util.go', 'helper/mypkg.go'). Root files (no '/' in key) must share a package name; wrapped mode requires exactly one root file with 'func run(ctx context.Context) (any, error)'. Subdirectory files pass through unchanged as separate packages. Paths under 'persist' and '.kode-gopher' are reserved (read/write /app/persist from Go code at runtime). If a key equals 'go.mod' the executor uses your version pins instead of the prewarm lockfile — you own version selection (and any recompile cost) in that case. Mutually exclusive with 'code'."`
 	ExtraImports []string          `json:"extra_imports,omitempty" jsonschema:"Optional list of import paths to add via a generated blank-import companion file. Use to nudge go mod tidy when you know your snippet needs a package the prewarmed image has cached but you haven't declared the import in source yet."`
+	ReadOnly     bool              `json:"read_only,omitempty" jsonschema:"Optional: restrict this run's Google Cloud credentials to read-only OAuth scopes (cloud-platform.read-only, devstorage.read_only, bigquery.readonly, logging.read, monitoring.read, trace.readonly). Supported for --credentials=service, service-account or workload-identity-federation --credentials=access-token, and --read-only OAuth deployments; fails closed rather than forwarding full-scope credentials when the configured credential mode cannot restrict scopes."`
 }
 
 // ExecuteGoCodeOutput is the structured response. Clients that can
@@ -148,26 +149,16 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 	for k, v := range norm.Files {
 		files[k] = v
 	}
-	envs := map[string]string{}
+	credFiles, envs, tok, cErr := creds.ForRun(ctx, s.credentialsFor(req), s.cfg.ReadOnly || args.ReadOnly)
+	if cErr != nil {
+		return toolError(fmt.Sprintf("credentials: %v", cErr)), nil, nil
+	}
+	for k, v := range credFiles {
+		files[k] = v
+	}
 	var runCreds *sandbox.Credentials
-	if src := s.credentialsFor(req); src != nil {
-		credFiles, credEnv, cErr := src.Materialize(ctx)
-		if cErr != nil {
-			return toolError(fmt.Sprintf("materialize credentials: %v", cErr)), nil, nil
-		}
-		for k, v := range credFiles {
-			files[k] = v
-		}
-		for k, v := range credEnv {
-			envs[k] = v
-		}
-		if m, ok := src.(creds.TokenMinter); ok {
-			tok, tErr := m.AccessToken(ctx)
-			if tErr != nil {
-				return toolError(fmt.Sprintf("credentials: %v", tErr)), nil, nil
-			}
-			runCreds = sandboxCredentials(tok)
-		}
+	if tok != nil {
+		runCreds = sandboxCredentials(*tok)
 	}
 
 	sl := s.slotFor(req)
@@ -335,5 +326,6 @@ func sandboxCredentials(t creds.AccessToken) *sandbox.Credentials {
 		Email:        t.Email,
 		Project:      t.Project,
 		QuotaProject: t.QuotaProject,
+		Scopes:       t.Scopes,
 	}
 }

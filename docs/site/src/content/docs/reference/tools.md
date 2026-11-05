@@ -58,6 +58,7 @@ Image attachments: write PNG, JPEG, or WebP files under /app/.kode-gopher/attach
 | `code` | string | Single-file Go source to ship into the sandbox. EITHER a snippet declaring 'func run(ctx context.Context) (any, error)' (the value run returns is JSON-marshaled and surfaced as result.value; the wrapper provides func main()), OR a complete 'package main' program (your code owns stdout/stderr; if you want a structured result write it to /app/.kode-gopher/result.json yourself). Mutually exclusive with 'files'. |
 | `extra_imports` | array of string | Optional list of import paths to add via a generated blank-import companion file. Use to nudge go mod tidy when you know your snippet needs a package the prewarmed image has cached but you haven't declared the import in source yet. |
 | `files` | object | Multi-file Go source. Keys are paths relative to /app (e.g. 'main.go', 'util.go', 'helper/mypkg.go'). Root files (no '/' in key) must share a package name; wrapped mode requires exactly one root file with 'func run(ctx context.Context) (any, error)'. Subdirectory files pass through unchanged as separate packages. Paths under 'persist' and '.kode-gopher' are reserved (read/write /app/persist from Go code at runtime). If a key equals 'go.mod' the executor uses your version pins instead of the prewarm lockfile — you own version selection (and any recompile cost) in that case. Mutually exclusive with 'code'. |
+| `read_only` | boolean | Optional: restrict this run's Google Cloud credentials to read-only OAuth scopes (cloud-platform.read-only, devstorage.read_only, bigquery.readonly, logging.read, monitoring.read, trace.readonly). Supported for --credentials=service, service-account or workload-identity-federation --credentials=access-token, and --read-only OAuth deployments; fails closed rather than forwarding full-scope credentials when the configured credential mode cannot restrict scopes. |
 
 **Output** (structured content)
 
@@ -103,6 +104,7 @@ None.
 | `email` | string | Best-effort identity email. Empty means lookup failed or wasn't possible. |
 | `mode` (required) | string | 'forwarded' (host ADC copied into sandbox), 'access-token' (a short-lived token minted by kode-gopher, served to each run by a metadata emulator in the sandbox), 'oauth' (the signed-in user's own short-lived Google token, served the same way), 'service' (a short-lived token for the service account this deployment or OAuth client runs snippets as, served the same way), or 'none' (no credentials configured). |
 | `project_id` | string | Google Cloud project for these credentials: the deployment's configured project, the ADC file's quota project, or the service account's own project. Snippets also see it as $GOOGLE_CLOUD_PROJECT when kode-gopher passes it on. |
+| `read_only` | boolean | True when this server or credential source restricts every run to read-only Google Cloud OAuth scopes. |
 
 ## `lookup_package_docs`
 
