@@ -50,16 +50,25 @@ type ExecuteGoCodeArgs struct {
 // consume MCP structured content get this typed; clients that only
 // read text get the human-readable rendering in CallToolResult.Content.
 type ExecuteGoCodeOutput struct {
-	Phase      string   `json:"phase" jsonschema:"Where execution stopped: 'build' (the build failed: compiler errors, a go mod tidy failure such as an unknown module, or the build was killed by a timeout or out of memory; stderr says which) or 'run' (it built and ran)."`
-	Mode       string   `json:"mode" jsonschema:"'wrapped' (a snippet with func run, wrapped by kode-gopher) or 'verbatim' (a full package main, run as is)."`
-	ExitCode   int      `json:"exit_code" jsonschema:"Exit code of the phase that ran last: the build step's for phase=build, the program's for phase=run."`
-	DurationMS int64    `json:"duration_ms" jsonschema:"Build plus run time in the sandbox, in milliseconds."`
-	BuildMS    int64    `json:"build_ms" jsonschema:"Build time alone, in milliseconds."`
-	Tidied     bool     `json:"tidied" jsonschema:"True when the build ran go mod tidy because the code imports a package outside the prewarmed lockfile (slower)."`
-	Warnings   []string `json:"warnings,omitempty" jsonschema:"Notes for the caller: go mod tidy moved modules off the prewarmed versions (slow recompiles), or why the result is missing (too large, not valid JSON, or it couldn't be fetched)."`
-	Stdout     string   `json:"stdout,omitempty" jsonschema:"Standard output of the phase that ran last. Long output keeps its first and last 8 KiB, with the middle elided."`
-	Stderr     string   `json:"stderr,omitempty" jsonschema:"Standard error of the phase that ran last. Long output keeps its first and last 8 KiB, with the middle elided."`
-	Result     *Result  `json:"result,omitempty" jsonschema:"The structured result, when the program wrote one: a snippet's wrapper writes it when run returns or panics; a full program only if it wrote /app/.kode-gopher/result.json. Absent if the process exited or was killed first (os.Exit, log.Fatal, a timeout), or if the result was dropped (see warnings)."`
+	Phase       string           `json:"phase" jsonschema:"Where execution stopped: 'build' (the build failed: compiler errors, a go mod tidy failure such as an unknown module, or the build was killed by a timeout or out of memory; stderr says which) or 'run' (it built and ran)."`
+	Mode        string           `json:"mode" jsonschema:"'wrapped' (a snippet with func run, wrapped by kode-gopher) or 'verbatim' (a full package main, run as is)."`
+	ExitCode    int              `json:"exit_code" jsonschema:"Exit code of the phase that ran last: the build step's for phase=build, the program's for phase=run."`
+	DurationMS  int64            `json:"duration_ms" jsonschema:"Build plus run time in the sandbox, in milliseconds."`
+	BuildMS     int64            `json:"build_ms" jsonschema:"Build time alone, in milliseconds."`
+	Tidied      bool             `json:"tidied" jsonschema:"True when the build ran go mod tidy because the code imports a package outside the prewarmed lockfile (slower)."`
+	Warnings    []string         `json:"warnings,omitempty" jsonschema:"Notes for the caller: go mod tidy moved modules off the prewarmed versions (slow recompiles), why the result is missing (too large, not valid JSON, or it couldn't be fetched), or why an entry in /app/.kode-gopher/attachments/ was skipped."`
+	Stdout      string           `json:"stdout,omitempty" jsonschema:"Standard output of the phase that ran last. Long output keeps its first and last 8 KiB, with the middle elided."`
+	Stderr      string           `json:"stderr,omitempty" jsonschema:"Standard error of the phase that ran last. Long output keeps its first and last 8 KiB, with the middle elided."`
+	Result      *Result          `json:"result,omitempty" jsonschema:"The structured result, when the program wrote one: a snippet's wrapper writes it when run returns or panics; a full program only if it wrote /app/.kode-gopher/result.json. Absent if the process exited or was killed first (os.Exit, log.Fatal, a timeout), or if the result was dropped (see warnings)."`
+	Attachments []AttachmentMeta `json:"attachments,omitempty" jsonschema:"Metadata for validated image files written under /app/.kode-gopher/attachments/ (PNG, JPEG, or WebP; up to 8 images and 2 MiB total). Raw image bytes are returned as MCP ImageContent blocks alongside this structured output."`
+}
+
+// AttachmentMeta describes an image attachment returned as an MCP
+// ImageContent block in CallToolResult.Content.
+type AttachmentMeta struct {
+	Name     string `json:"name" jsonschema:"File name under /app/.kode-gopher/attachments/."`
+	MIMEType string `json:"mime_type" jsonschema:"Verified image MIME type: image/png, image/jpeg, or image/webp."`
+	Bytes    int    `json:"bytes" jsonschema:"Raw image size in bytes."`
 }
 
 // Result is the wire-form discriminated payload sent on
@@ -212,30 +221,51 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 		return toolError(fmt.Sprintf("execute: %v", err)), nil, nil
 	}
 
-	out := &ExecuteGoCodeOutput{
-		Phase:      string(outcome.Phase),
-		Mode:       norm.Mode.String(),
-		ExitCode:   outcome.ExitCode,
-		DurationMS: outcome.Duration.Milliseconds(),
-		BuildMS:    outcome.BuildDuration.Milliseconds(),
-		Tidied:     outcome.Tidied,
-		Warnings:   outcome.Warnings,
-		Stdout:     outcome.Stdout,
-		Stderr:     outcome.Stderr,
-		Result:     toWireResult(outcome.Result),
+	res, out := outcomeToToolResult(outcome, norm.Mode.String())
+	log.Printf("execute_go_code: done phase=%s exit=%d tidied=%v attachments=%d duration=%s (handler total=%s)",
+		out.Phase, out.ExitCode, out.Tidied, len(out.Attachments), outcome.Duration.Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
+	return res, out, nil
+}
+
+func outcomeToToolResult(outcome *executor.Outcome, mode string) (*sdk.CallToolResult, *ExecuteGoCodeOutput) {
+	var metas []AttachmentMeta
+	if len(outcome.Attachments) > 0 {
+		metas = make([]AttachmentMeta, len(outcome.Attachments))
+		for i, a := range outcome.Attachments {
+			metas[i] = AttachmentMeta{Name: a.Name, MIMEType: a.MIMEType, Bytes: len(a.Data)}
+		}
 	}
-	log.Printf("execute_go_code: done phase=%s exit=%d tidied=%v duration=%s (handler total=%s)",
-		out.Phase, out.ExitCode, out.Tidied, outcome.Duration.Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
+	out := &ExecuteGoCodeOutput{
+		Phase:       string(outcome.Phase),
+		Mode:        mode,
+		ExitCode:    outcome.ExitCode,
+		DurationMS:  outcome.Duration.Milliseconds(),
+		BuildMS:     outcome.BuildDuration.Milliseconds(),
+		Tidied:      outcome.Tidied,
+		Warnings:    outcome.Warnings,
+		Stdout:      outcome.Stdout,
+		Stderr:      outcome.Stderr,
+		Result:      toWireResult(outcome.Result),
+		Attachments: metas,
+	}
 
 	// IsError if the program crashed (non-zero exit) or the wrapper
 	// reported a non-ok result. The LLM uses IsError to decide
 	// whether to react.
 	isErr := outcome.ExitCode != 0 || outcome.ResultError != "" || (outcome.Result != nil && outcome.Result.Kind != "ok")
 
+	content := make([]sdk.Content, 0, 1+len(outcome.Attachments))
+	content = append(content, &sdk.TextContent{Text: renderText(out)})
+	for _, a := range outcome.Attachments {
+		content = append(content, &sdk.ImageContent{
+			Data:     a.Data,
+			MIMEType: a.MIMEType,
+		})
+	}
 	return &sdk.CallToolResult{
-		Content: []sdk.Content{&sdk.TextContent{Text: renderText(out)}},
+		Content: content,
 		IsError: isErr,
-	}, out, nil
+	}, out
 }
 
 // renderText produces a compact human-readable rendering suitable for
@@ -259,6 +289,12 @@ func renderText(o *ExecuteGoCodeOutput) string {
 		enc := json.NewEncoder(&b)
 		enc.SetEscapeHTML(false)
 		_ = enc.Encode(o.Result)
+	}
+	if len(o.Attachments) > 0 {
+		b.WriteString("\n── attachments ──\n")
+		for _, a := range o.Attachments {
+			fmt.Fprintf(&b, "%s (%s, %d bytes)\n", a.Name, a.MIMEType, a.Bytes)
+		}
 	}
 	return b.String()
 }

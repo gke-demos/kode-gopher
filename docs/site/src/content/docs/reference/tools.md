@@ -47,6 +47,8 @@ Session scratch: before each call, /app is wiped EXCEPT /app/persist ('persist/'
 Google Cloud calls authenticate automatically with Application Default Credentials, so cloud.google.com/go/* clients need no credential options. The identity depends on the deployment (the local developer, the signed-in user, the server's Workload Identity, or a service account); call gcp_auth_status to see it and its project. GOOGLE_CLOUD_PROJECT may be set; if it's empty, use gcp_auth_status's project_id.
 
 Structured results are capped at 256 KiB (larger payloads are dropped with a warning). Filter, aggregate, and project API responses inside run(ctx) into small structs or slices rather than returning raw *pb structs or full Kubernetes objects (such as corev1.PodList with metadata.managedFields) verbatim.
+
+Image attachments: write PNG, JPEG, or WebP files under /app/.kode-gopher/attachments/ (up to 8 regular files, 2 MiB total) to return them as native MCP ImageContent blocks instead of base64-encoding images in JSON.
 ```
 
 **Input**
@@ -61,6 +63,10 @@ Structured results are capped at 256 KiB (larger payloads are dropped with a war
 
 | Field | Type | Description |
 |---|---|---|
+| `attachments` | array of object | Metadata for validated image files written under /app/.kode-gopher/attachments/ (PNG, JPEG, or WebP; up to 8 images and 2 MiB total). Raw image bytes are returned as MCP ImageContent blocks alongside this structured output. |
+| `attachments[].bytes` (required) | integer | Raw image size in bytes. |
+| `attachments[].mime_type` (required) | string | Verified image MIME type: image/png, image/jpeg, or image/webp. |
+| `attachments[].name` (required) | string | File name under /app/.kode-gopher/attachments/. |
 | `build_ms` (required) | integer | Build time alone, in milliseconds. |
 | `duration_ms` (required) | integer | Build plus run time in the sandbox, in milliseconds. |
 | `exit_code` (required) | integer | Exit code of the phase that ran last: the build step's for phase=build, the program's for phase=run. |
@@ -75,7 +81,7 @@ Structured results are capped at 256 KiB (larger payloads are dropped with a war
 | `stderr` | string | Standard error of the phase that ran last. Long output keeps its first and last 8 KiB, with the middle elided. |
 | `stdout` | string | Standard output of the phase that ran last. Long output keeps its first and last 8 KiB, with the middle elided. |
 | `tidied` (required) | boolean | True when the build ran go mod tidy because the code imports a package outside the prewarmed lockfile (slower). |
-| `warnings` | array of string | Notes for the caller: go mod tidy moved modules off the prewarmed versions (slow recompiles), or why the result is missing (too large, not valid JSON, or it couldn't be fetched). |
+| `warnings` | array of string | Notes for the caller: go mod tidy moved modules off the prewarmed versions (slow recompiles), why the result is missing (too large, not valid JSON, or it couldn't be fetched), or why an entry in /app/.kode-gopher/attachments/ was skipped. |
 
 ## `gcp_auth_status`
 

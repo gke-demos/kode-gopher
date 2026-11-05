@@ -259,7 +259,13 @@ func printOutcome(o *executor.Outcome) {
 		enc.SetEscapeHTML(false)
 		_ = enc.Encode(o.Result)
 	}
-	if o.Stdout == "" && o.Stderr == "" && o.Result == nil {
+	if len(o.Attachments) > 0 {
+		fmt.Print("\n── attachments ──\n")
+		for _, a := range o.Attachments {
+			fmt.Printf("%s (%s, %d bytes)\n", a.Name, a.MIMEType, len(a.Data))
+		}
+	}
+	if o.Stdout == "" && o.Stderr == "" && o.Result == nil && len(o.Attachments) == 0 {
 		fmt.Println("\n(no output)")
 	}
 }
