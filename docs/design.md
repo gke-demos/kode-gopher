@@ -45,7 +45,7 @@ Three MCP tools, one execution backend, one credential abstraction.
 ### Components
 
 - **`kode-gopher serve`** — an MCP server (stdio transport) built on `github.com/modelcontextprotocol/go-sdk`. Hosts the tool registrations.
-- **Executor** — owns one long-lived `*goruntime.Session` (from `github.com/gke-demos/go-runtime-sandbox/pkg/goruntime`) for the lifetime of the server process. Serializes calls with a mutex. Calls `Reset` between invocations to clear `/app` while preserving `$GOCACHE` and `$GOMODCACHE`.
+- **Executor** — owns one long-lived `*goruntime.Session` (from `github.com/gke-demos/go-runtime-sandbox/pkg/goruntime`) for the lifetime of the server process. Serializes calls with a mutex. Calls `Reset` between invocations to clear `/app` (preserving `/app/persist`, `$GOCACHE`, and `$GOMODCACHE`).
 - **Wrapper / normalizer** — accepts either a snippet (a `func run(ctx) (any, error)` body) or a full `package main`. If a snippet, wraps it in a template that handles the result-file write, panic recovery, and JSON marshaling. If a full main, uses it verbatim and trusts the program to write the result file itself.
 - **Credential source** — abstraction over two implementations: `forwarded` (host reads local ADC JSON, materializes it into the sandbox Files map under `/app/.kode-gopher/creds/adc.json`, sets `GOOGLE_APPLICATION_CREDENTIALS` for the run command) and `workload` (no-op materialize; rely on the pod's metadata server).
 - **Sandbox image** — extends the upstream `go-runtime-sandbox` image. A build-time `prewarm` program imports every curated GCP package once so `$GOCACHE` and `$GOMODCACHE` are populated before first user execution.
@@ -153,7 +153,7 @@ Splitting build from run separates compile errors from runtime errors at the pro
 One `*goruntime.Session` per MCP server process for its entire lifetime. Serialized by `sync.Mutex` — concurrent tool calls are processed one at a time. In stdio mode, an MCP server has exactly one client (the spawning process), so this also means "one session per client."
 
 - **Lazy open** — first tool call triggers `goruntime.Open`. Subsequent calls reuse the session.
-- **Reset between calls** — ephemeral default. `Session.Reset` clears `/app` but preserves `$GOCACHE` / `$GOMODCACHE`, so the second call against the same packages reuses cached build artifacts.
+- **Reset between calls** — ephemeral default. `Session.Reset` clears `/app` except `/app/persist` and preserves `$GOCACHE` / `$GOMODCACHE`, so subsequent calls reuse cached build artifacts and can opt into session-scoped scratch files in `/app/persist`.
 - **Recreate on death** — if `Execute` returns a session-fatal error, close and reopen.
 - **Reattach option** — `--claim-name` allows reattaching to a long-lived sandbox claim across server restarts. Useful for development; off by default in production.
 

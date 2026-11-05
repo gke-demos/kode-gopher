@@ -142,6 +142,7 @@ const (
 // every build (~60 s+ on GKE), so name that instead of a bare cp error.
 const buildCmd = `set -u
 mkdir -p ` + binDir + `
+if [ ! -L ` + sandbox.PersistDir + ` ] && [ ! -e ` + sandbox.PersistDir + ` ]; then mkdir -p ` + sandbox.PersistDir + `; fi
 bootstrapped=0
 if [ ! -f go.mod ]; then
   if [ ! -f ` + baseGoModPath + ` ]; then
@@ -161,6 +162,8 @@ if ! grep -qE '` + missingModuleRE + `' ` + buildErrPath + `; then
   exit 1
 fi
 echo "` + markerTidy + `"
+chmod u+w go.mod
+go mod edit -ignore=` + sandbox.PersistDir + ` || exit $?
 go mod tidy || exit $?
 if [ "$bootstrapped" = 1 ]; then
   awk -v m="` + markerMoved + `" '

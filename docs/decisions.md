@@ -943,3 +943,15 @@ So `automountServiceAccountToken: false` sits in the base, `testdata/list_k8s_ve
 | 45 s run through the router | | ✅ |
 
 The GKE builds above (3.7-3.9 s) were the first on a brand-new cluster. A recheck on 2026-09-30 found no regression. On a second fresh cluster, the scheduling events put every sandbox pod on the `kode-gopher-sandbox` C3 node (`c3-standard-4`). Repeated runs there built in 2.47-2.67 s (3.2-3.8 s end to end), within slice 7's 2.3-2.6 s. The first builds on a new node are probably slower because the image's build cache is read from disk rather than the node's page cache; this wasn't measured.
+
+---
+
+## Code Mode optimizations — `/app/persist` survives `Session.Reset` — 2026-11-04
+
+Slice 2 wiped all of `/app` on every `Session.Reset` so one snippet's `main.go`, `go.mod`, or `.kode-gopher/result.json` could never leak into the next. That forced multi-turn investigations to re-query Google Cloud APIs or pass intermediate datasets back through the LLM context window.
+
+### `/app/persist` is preserved within a session; everything else in `/app` still resets
+- `Session.Reset` now wipes every entry in `/app` except a real directory at `/app/persist` (repairing restrictive directory modes and unlinking any symlink or regular file placed at `/app/persist`), then ensures `/app/persist` exists and is writable.
+- `internal/normalize` reserves `persist` and `.kode-gopher` in the `files` map so shipped source files remain stateless across turns; snippets read and write `/app/persist` at runtime.
+- `internal/executor`'s `buildCmd` ensures `persist/` exists (covering `kode-gopher exec` without a prior `Reset`) and runs `go mod edit -ignore=persist` (Go 1.25+) before `go mod tidy` so scratch files (including non-building `.go` files) under `/app/persist` are ignored by module tidying while explicit `"kode_gopher_user/persist/..."` imports still build.
+- Multi-tenant and credential isolation are unchanged: each MCP session owns a dedicated sandbox pod (`SandboxClaim` deleted on session close), in-cluster tokens live only in `sandbox-server` memory, and forwarded `.kode-gopher/creds/adc.json` sits outside `/app/persist` and is wiped on every reset.

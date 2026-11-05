@@ -111,6 +111,7 @@ func runOffline(ctx context.Context, session *sdk.ClientSession, namespace strin
 	fmt.Println("  result.kind=panic, with message and stack")
 
 	checkLargeResults(ctx, session)
+	checkPersistDir(ctx, session)
 
 	fmt.Println("\n========== gcp_auth_status ==========")
 	auth := callAuthStatus(ctx, session)
@@ -248,6 +249,62 @@ func checkLargeResults(ctx context.Context, session *sdk.ClientSession) {
 		fatalf("[too-large-result] want no result and a size warning; got result=%v warnings=%q", out.Result != nil, out.Warnings)
 	}
 	fmt.Printf("  no result, warning: %s\n", out.Warnings[len(out.Warnings)-1])
+}
+
+// checkPersistDir verifies that files written under /app/persist
+// survive across execute_go_code calls in the same session, while
+// root-level files in /app are wiped by Session.Reset.
+func checkPersistDir(ctx context.Context, session *sdk.ClientSession) {
+	fmt.Println("\n========== /app/persist across calls ==========")
+	turn1 := `package snippet
+import (
+	"context"
+	"os"
+)
+func run(ctx context.Context) (any, error) {
+	if err := os.WriteFile("ephemeral.txt", []byte("gone"), 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile("persist/state.txt", []byte("kept-across-turns"), 0o644); err != nil {
+		return nil, err
+	}
+	return "wrote", nil
+}
+`
+	out1, err := callExecuteGoCodeSource(ctx, session, turn1)
+	if err != nil {
+		fatalf("[persist-turn1] call: %v", err)
+	}
+	if out1.ExitCode != 0 || out1.Result == nil || out1.Result.Kind != "ok" {
+		fatalf("[persist-turn1] want kind=ok, got exit=%d stderr=%s result=%+v", out1.ExitCode, out1.Stderr, out1.Result)
+	}
+
+	turn2 := `package snippet
+import (
+	"context"
+	"errors"
+	"os"
+)
+func run(ctx context.Context) (any, error) {
+	if _, err := os.Stat("ephemeral.txt"); !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("ephemeral.txt was not wiped by Reset")
+	}
+	b, err := os.ReadFile("persist/state.txt")
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
+}
+`
+	out2, err := callExecuteGoCodeSource(ctx, session, turn2)
+	if err != nil {
+		fatalf("[persist-turn2] call: %v", err)
+	}
+	var got string
+	if out2.ExitCode != 0 || out2.Result == nil || out2.Result.Kind != "ok" || json.Unmarshal(out2.Result.Value, &got) != nil || got != "kept-across-turns" {
+		fatalf("[persist-turn2] want 'kept-across-turns', got exit=%d stderr=%s result=%+v", out2.ExitCode, out2.Stderr, out2.Result)
+	}
+	fmt.Println("  persist/state.txt survived Reset; ephemeral.txt wiped")
 }
 
 // connectHTTP starts `kode-gopher serve --transport=http` on a free

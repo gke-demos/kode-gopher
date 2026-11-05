@@ -59,7 +59,7 @@ See [Snippets and results](/concepts/snippets-and-results/) for every field and 
 
 Each MCP session holds one sandbox for its whole life:
 - The first call claims a pod from the warm pool.
-- Later calls reuse it. Each call starts with a clean `/app`, but the module and build caches persist, so repeated imports stay fast.
+- Later calls reuse it. Each call starts with a clean `/app` except `/app/persist`, which keeps session scratch files across calls alongside the module and build caches, so repeated imports and multi-turn investigations stay fast.
 - Calls in a session run one at a time.
 - If the pod dies mid-call, kode-gopher claims a new one and retries once.
 

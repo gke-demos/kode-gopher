@@ -316,6 +316,39 @@ func TestNormalize_EmptyInputRejected(t *testing.T) {
 	}
 }
 
+func TestNormalize_ReservedPathsRejected(t *testing.T) {
+	mainSrc := []byte("package main\nfunc main() {}\n")
+	for _, reserved := range []string{
+		"persist",
+		"persist/helper.go",
+		"./persist/helper.go",
+		".kode-gopher",
+		".kode-gopher/result.json",
+	} {
+		files := map[string][]byte{
+			"main.go": mainSrc,
+			reserved:  []byte("package helper\n"),
+		}
+		_, err := normalize.Normalize(files, normalize.Options{})
+		if err == nil {
+			t.Fatalf("expected Normalize to reject reserved key %q, got nil", reserved)
+		}
+		if !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("expected error for %q to mention reserved, got: %v", reserved, err)
+		}
+	}
+
+	// Non-reserved lookalikes must still pass.
+	okFiles := map[string][]byte{
+		"main.go":           mainSrc,
+		"persistent.go":     []byte("package main\n"),
+		"helper/persist.go": []byte("package helper\n"),
+	}
+	if _, err := normalize.Normalize(okFiles, normalize.Options{}); err != nil {
+		t.Fatalf("expected lookalike paths to be accepted, got: %v", err)
+	}
+}
+
 func keys(m map[string][]byte) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

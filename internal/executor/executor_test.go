@@ -17,6 +17,10 @@ limitations under the License.
 package executor
 
 import (
+	"archive/zip"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -96,5 +100,99 @@ func TestParseResult(t *testing.T) {
 				t.Fatalf("got %+v, want kind %q", r, tc.wantKind)
 			}
 		})
+	}
+}
+
+func TestBuildCmdCreatesAndIgnoresPersistDir(t *testing.T) {
+	root := t.TempDir()
+	app := filepath.Join(root, "app")
+	proxyMod := filepath.Join(root, "proxy", "example.local", "dep", "@v")
+	if err := os.MkdirAll(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(proxyMod, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeProxyModule(t, proxyMod, "example.local/dep", "v0.1.0")
+
+	goMod := "module kode_gopher_user\n\ngo 1.26.10\n"
+	mainSrc := "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"ok\") }\n"
+	if err := os.WriteFile(filepath.Join(app, "main.go"), []byte(mainSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(app, "go.mod"), []byte(goMod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 1: persist/ does not exist yet; buildCmd creates it.
+	cmd1 := exec.Command("sh", "-c", buildCmd)
+	cmd1.Dir = app
+	if out, err := cmd1.CombinedOutput(); err != nil {
+		t.Fatalf("run 1 buildCmd failed: %v\n%s", err, out)
+	}
+	if info, err := os.Stat(filepath.Join(app, "persist")); err != nil || !info.IsDir() {
+		t.Fatalf("expected buildCmd to create persist/, got info=%v err=%v", info, err)
+	}
+
+	// Run 2: place a syntax-broken .go file in persist/ AND import an unrequired
+	// module served from a local file:// GOPROXY so buildCmd exercises
+	// `go mod edit -ignore=persist` + `go mod tidy` with zero network access.
+	if err := os.WriteFile(filepath.Join(app, "persist", "scratch.go"), []byte("package broken\nimport \"example.invalid/missing\"\nfunc {"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tidyMain := "package main\nimport _ \"example.local/dep\"\nfunc main() {}\n"
+	if err := os.WriteFile(filepath.Join(app, "main.go"), []byte(tidyMain), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd2 := exec.Command("sh", "-c", buildCmd)
+	cmd2.Dir = app
+	cmd2.Env = append(os.Environ(),
+		"GOPROXY=file://"+filepath.ToSlash(filepath.Join(root, "proxy")),
+		"GONOSUMDB=*",
+		"GOMODCACHE="+filepath.Join(root, "modcache"),
+		"GOFLAGS=-modcacherw",
+	)
+	out2, err := cmd2.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run 2 buildCmd (tidy path with broken persist/scratch.go) failed: %v\n%s", err, out2)
+	}
+	_, tidied, _ := parseBuildStdout(string(out2))
+	if !tidied {
+		t.Fatalf("expected tidy marker in stdout, got %q", string(out2))
+	}
+}
+
+func writeProxyModule(t *testing.T, vDir, modPath, ver string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(vDir, "list"), []byte(ver+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vDir, ver+".info"), []byte(`{"Version":"`+ver+`","Time":"2026-01-01T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vDir, ver+".mod"), []byte("module "+modPath+"\n\ngo 1.26.10\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	zf, err := os.Create(filepath.Join(vDir, ver+".zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(zf)
+	prefix := modPath + "@" + ver + "/"
+	w1, err := zw.Create(prefix + "go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w1.Write([]byte("module " + modPath + "\n\ngo 1.26.10\n"))
+	w2, err := zw.Create(prefix + "dep.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w2.Write([]byte("package dep\nconst V = 1\n"))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zf.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

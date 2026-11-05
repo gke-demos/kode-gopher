@@ -9,10 +9,10 @@ sidebar:
 
 - **Claim:** the first tool call in an MCP session claims a pod from the warm pool (`go-runtime-pool`). That takes a moment if a sandbox is ready, and longer if the pool is cold.
 - **Reuse:** every later call in the session reuses the pod.
-  - Before each `execute_go_code` call, `/app` is wiped. The Go module and build caches survive, so packages a session has already compiled stay fast.
+  - Before each `execute_go_code` call, `/app` is wiped except `/app/persist` (`persist/`). Files written to `/app/persist` survive across calls in the session, so multi-turn work can cache intermediate datasets on disk and return compact summaries instead of re-querying APIs. The Go module and build caches survive too, so packages a session has already compiled stay fast.
   - `lookup_package_docs` runs in the same pod, without wiping anything.
 - **One call at a time:** calls within a session run in order. Separate sessions run in parallel, each in its own pod.
-- **Recovery:** if the pod dies mid-call, for example on eviction, kode-gopher claims a new one and retries the call once.
+- **Recovery:** if the pod dies mid-call, for example on eviction, kode-gopher claims a new one and retries the call once. Because it is a fresh pod, `/app/persist` starts empty again.
 
 ## Local (stdio)
 

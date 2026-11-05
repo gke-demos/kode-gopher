@@ -48,6 +48,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"path"
 	"sort"
 	"strings"
 
@@ -122,6 +123,9 @@ const extraImportsFilename = "kg_extra_imports.go"
 func Normalize(files map[string][]byte, opts Options) (*Result, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no files provided")
+	}
+	if err := checkReservedPaths(files); err != nil {
+		return nil, err
 	}
 
 	root, subdir := partition(files)
@@ -217,6 +221,23 @@ func Normalize(files map[string][]byte, opts Options) (*Result, error) {
 	}
 
 	return &Result{Mode: mode, Files: out}, nil
+}
+
+// checkReservedPaths rejects user file keys that would collide with
+// cross-turn session scratch (/app/persist) or internal runtime files
+// (/app/.kode-gopher).
+func checkReservedPaths(files map[string][]byte) error {
+	for _, k := range sortedKeys(files) {
+		clean := path.Clean(strings.TrimLeft(k, "/"))
+		first, _, _ := strings.Cut(clean, "/")
+		switch first {
+		case "persist":
+			return fmt.Errorf("file path %q is reserved: /app/persist is cross-turn session scratch storage; read or write it from Go code at runtime instead of passing it in `files`", k)
+		case ".kode-gopher":
+			return fmt.Errorf("file path %q is reserved for kode-gopher runtime artifacts", k)
+		}
+	}
+	return nil
 }
 
 // partition splits files by whether the key contains a "/". Keys with

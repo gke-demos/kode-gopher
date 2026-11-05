@@ -35,6 +35,8 @@ Two input modes. Provide EXACTLY ONE:
 
 2) MULTI-FILE via 'files': map of path -> source. Root files (no '/' in key) share the entry-point package; subdirectory files are separate helper packages. The synthesized module name is 'kode_gopher_user' — a helper at 'helper/util.go' is imported as 'kode_gopher_user/helper'. If you include a 'go.mod' file the executor uses YOUR version pins instead of the prewarm lockfile; you take on any resulting recompile cost.
 
+Session scratch: before each call, /app is wiped EXCEPT /app/persist ('persist/'), which already exists and survives across execute_go_code calls in the same MCP session. Save large intermediate API/query results to /app/persist/... and return a compact summary from run() rather than exceeding the 256 KiB result cap or re-fetching on follow-up turns. Ephemeral: lost when the session ends or if an evicted pod is replaced, so handle os.ErrNotExist.
+
 Google Cloud calls authenticate automatically with Application Default Credentials, so cloud.google.com/go/* clients need no credential options. The identity depends on the deployment (the local developer, the signed-in user, the server's Workload Identity, or a service account); call gcp_auth_status to see it and its project. GOOGLE_CLOUD_PROJECT may be set; if it's empty, use gcp_auth_status's project_id.
 
 Structured results are capped at 256 KiB (larger payloads are dropped with a warning). Filter, aggregate, and project API responses inside run(ctx) into small structs or slices rather than returning raw *pb structs or full Kubernetes objects (such as corev1.PodList with metadata.managedFields) verbatim.`

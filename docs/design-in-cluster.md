@@ -41,7 +41,7 @@ When the replica restarts, clients get 404 for their session. Per the MCP spec, 
 
 ### 2. Session topology: one sandbox per MCP session
 
-This keeps today's stdio semantics: files persist between calls, and so does the `$GOCACHE` of the session's own builds. The session is bound to the authenticated user. A session presented with another user's token is rejected.
+This keeps today's stdio semantics: files in `/app/persist` persist between calls, and so does the `$GOCACHE` of the session's own builds. The session is bound to the authenticated user. A session presented with another user's token is rejected.
 
 Per-request claims would add 1-2 s of claim time to every call for no isolation benefit. A session is already one user.
 
