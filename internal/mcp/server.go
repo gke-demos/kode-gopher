@@ -101,6 +101,11 @@ func (c *Config) applyDefaults() {
 type Server struct {
 	cfg Config
 
+	// testExec, when set in unit tests, replaces sandbox.Open + Execute
+	// inside lookup_package_docs so the full MCP tool handler and output
+	// schema can be exercised over in-memory transports without a cluster.
+	testExec func(context.Context, sandbox.Request) (*sandbox.Result, error)
+
 	// mu guards slots and open.
 	mu    sync.Mutex
 	slots map[string]*slot // by MCP session ID; stdio's is ""

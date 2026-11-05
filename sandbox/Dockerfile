@@ -89,8 +89,13 @@ USER 1000
 # copies the whole file up out of the image layer: ~10 s on the first
 # GCS build locally, before a single byte compiles. A future mtime is
 # never "old" and is never trimmed.
+# `go list -m all` populates $GOMODCACHE/cache/download with the .mod
+# and .info files of the unpruned module graph too (~250 KiB), because
+# `go doc` internally invokes `go list -m all` and would otherwise try
+# to hit proxy.golang.org on first lookup_package_docs call.
 RUN cd /tmp/prewarm \
  && go build -o /dev/null ./... \
+ && go list -m all >/dev/null \
  && find "$GOCACHE" -type f -exec touch -m -d 2100-01-01 {} +
 
 # Preserve prewarm's tidied go.mod + go.sum at a well-known path so

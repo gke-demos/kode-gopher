@@ -157,6 +157,9 @@ func schemaTable(t *testing.T, schema any) string {
 			if prefix == "" && len(p.Properties) > 0 {
 				rows(n+".", p)
 			}
+			if prefix == "" && p.Items != nil && len(p.Items.Properties) > 0 {
+				rows(n+"[].", p.Items)
+			}
 		}
 	}
 	rows("", &s)

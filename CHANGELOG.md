@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **`lookup_package_docs` covers every module in the sandbox's prewarmed lockfile and accepts batched queries.** Lookups now work for transitive modules already cached in the sandbox image — including `k8s.io/api/*` (`core/v1`, `apps/v1`, `batch/v1`), `cloud.google.com/go/iam`, `cloud.google.com/go/civil`, `cloud.google.com/go/longrunning`, `google.golang.org/protobuf/types/known/*`, `google.golang.org/genproto/...`, and `google.golang.org/grpc/...` — while still rejecting uncached sibling `cloud.google.com/go/*` service modules upfront. Callers can also pass `queries` (up to 10 `{package, symbol?}` items) to inspect multiple types in one sandbox round-trip. `golang.org/x/oauth2/google`, `golang.org/x/sync/errgroup`, `google.golang.org/protobuf/types/known/timestamppb`, `k8s.io/api/apps/v1`, and `k8s.io/api/core/v1` are promoted to direct precompiled packages so snippets importing them never trigger `go mod tidy`. ([#66](https://github.com/gke-demos/kode-gopher/issues/66))
+
 ### Changed
 
 - **Compact MCP result text and result-projection guidance.** `execute_go_code` now encodes the `── result ──` block in `CallToolResult.Content` as compact single-line JSON instead of 2-space indented JSON (reducing text token overhead on nested slices and maps while keeping CLI `kode-gopher exec` output indented), and `internal/prompts/system.md` plus `execute_go_code`'s tool description explicitly guide snippets to project and summarize responses rather than returning raw `*pb` or Kubernetes `managedFields` structs that exceed the 256 KiB result cap. ([#69](https://github.com/gke-demos/kode-gopher/issues/69))

@@ -140,7 +140,49 @@ func runOffline(ctx context.Context, session *sdk.ClientSession, namespace strin
 	}
 	fmt.Println("  monitoringpb.ListTimeSeriesRequest: type ListTimeSeriesRequest struct {...}")
 
+	checkBatchPackageDocs(ctx, session)
+
 	fmt.Println("\n✅ MCP smoketest (offline) complete")
+}
+
+// checkBatchPackageDocs exercises batched lookup_package_docs across a
+// >20 KiB symbol (k8s.io/api/core/v1.PodSpec), a transitive module
+// package (cloud.google.com/go/civil.Date), and a missing symbol to
+// confirm per-entry truncation and error isolation against the sandbox.
+func checkBatchPackageDocs(ctx context.Context, session *sdk.ClientSession) {
+	fmt.Println("\n========== lookup_package_docs (batch + prewarm graph) ==========")
+	res, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "lookup_package_docs",
+		Arguments: map[string]any{
+			"queries": []map[string]any{
+				{"package": "k8s.io/api/core/v1", "symbol": "PodSpec"},
+				{"package": "cloud.google.com/go/civil", "symbol": "Date"},
+				{"package": "k8s.io/api/core/v1", "symbol": "NoSuchSymbol"},
+			},
+		},
+	})
+	if err != nil {
+		fatalf("[docs-batch] call: %v", err)
+	}
+	if res.IsError || res.StructuredContent == nil {
+		fatalf("[docs-batch] want IsError=false and structuredContent; got IsError=%v:\n%s", res.IsError, contentText(res.Content))
+	}
+	var out struct {
+		Results []struct {
+			Docs  string `json:"docs"`
+			Error string `json:"error"`
+		} `json:"results"`
+	}
+	if raw, e := json.Marshal(res.StructuredContent); e == nil {
+		_ = json.Unmarshal(raw, &out)
+	}
+	if len(out.Results) != 3 ||
+		!strings.Contains(out.Results[0].Docs, "type PodSpec struct") ||
+		!strings.Contains(out.Results[1].Docs, "type Date struct") ||
+		out.Results[2].Error == "" {
+		fatalf("[docs-batch] unexpected batch results: %+v", out.Results)
+	}
+	fmt.Println("  batch: PodSpec + civil.Date ok, missing symbol isolated")
 }
 
 // checkClaimLeases: while the session holds a sandbox, every claim in
