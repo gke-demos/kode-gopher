@@ -454,17 +454,36 @@ func (s *Session) materialize(ctx context.Context, files map[string][]byte) erro
 	return nil
 }
 
-// Reset wipes /app (the sandbox workdir) while preserving $GOCACHE
-// and $GOMODCACHE. Use between logical operations when you want a
-// clean filesystem without paying for a new sandbox.
-//
-// Note that the controller / pod / cache state survive; only /app's
-// content goes. Returns an error only if the underlying shell call
-// itself fails — a non-zero exit from `rm` (e.g. "no matches") is
-// treated as success.
+// PersistDir is the subdirectory of /app preserved across
+// Session.Reset calls within the same sandbox session. Snippets can
+// store session-scoped intermediate files at /app/persist (or relative
+// path "persist") without colliding with per-run source or build files.
+const PersistDir = "persist"
+
+// resetCmd wipes every entry in /app except a real directory at
+// PersistDir. It first restores u+rwx on /app and any subdirectories
+// outside PersistDir so a previous run's chmod cannot block rm -rf,
+// removes any symlink or regular file placed at PersistDir, and ensures
+// /app/persist exists and is writable before the next run starts.
+const resetCmd = `set -e
+chmod u+rwx .
+if [ -L ` + PersistDir + ` ] || [ ! -d ` + PersistDir + ` ]; then rm -rf -- ` + PersistDir + `; fi
+find . -mindepth 1 \( -path ./` + PersistDir + ` -prune \) -o -type d ! -perm -700 -exec chmod u+rwx {} \;
+find . -mindepth 1 -maxdepth 1 ! -name ` + PersistDir + ` -exec rm -rf -- {} +
+mkdir -p ` + PersistDir + ` && chmod u+rwx ` + PersistDir
+
+// Reset wipes /app (the sandbox workdir) except /app/persist while
+// preserving $GOCACHE and $GOMODCACHE. Use between logical operations
+// when you want a clean source/build tree without paying for a new
+// sandbox or losing cross-turn session scratch files in /app/persist.
 func (s *Session) Reset(ctx context.Context) error {
-	if _, err := s.box.Run(ctx, "rm -rf -- * .[!.]* 2>/dev/null; true"); err != nil {
+	res, err := s.box.Run(ctx, resetCmd, sb.WithTimeout(60*time.Second))
+	if err != nil {
 		return fmt.Errorf("sandbox: reset: %w", classifySessionErr(err))
+	}
+	if res.ExitCode != 0 {
+		stderr, _ := truncate(res.Stderr, s.truncate)
+		return fmt.Errorf("sandbox: reset failed (exit %d): %s", res.ExitCode, stderr)
 	}
 	return nil
 }

@@ -183,6 +183,12 @@ Use ` + "`lookup_package_docs`" + ` to check a function signature, method set or
 
 **Multi-file** (` + "`files`" + ` arg): pass a ` + "`map[string]string`" + ` keyed by path. Root files (no ` + "`/`" + `) form the entry-point package. Subdirectory files are separate helper packages. The synthesized module name is ` + "`kode_gopher_user`" + `, so a helper at ` + "`helper/util.go`" + ` is imported as ` + "`kode_gopher_user/helper`" + `.
 
+## Session scratch (` + "`/app/persist`" + `)
+
+Each MCP session reuses one sandbox pod. Before every ` + "`execute_go_code`" + ` call, ` + "`/app`" + ` is wiped **except ` + "`/app/persist`" + `** (relative path ` + "`persist`" + `), which already exists and survives across calls in the same session alongside ` + "`$GOCACHE`" + ` and ` + "`$GOMODCACHE`" + `.
+
+Use ` + "`/app/persist`" + ` in multi-turn investigations: save large intermediate datasets (JSON, CSV, filtered resource lists) to ` + "`/app/persist/...`" + ` and return a compact summary from ` + "`run`" + `, then read that file on follow-up turns instead of round-tripping large payloads through ` + "`result.value`" + ` (capped at 256 KiB) or re-querying APIs. Treat it as ephemeral cache — it goes away when the session ends or if a dead pod is replaced mid-session, so handle ` + "`os.ErrNotExist`" + ` cleanly, and never store credentials or tokens there.
+
 ## Credentials
 
 Google Cloud calls authenticate with Application Default Credentials, which the client libraries find on their own: ` + "`storage.NewClient(ctx)`" + ` and the like need no credential options. Who that is depends on how kode-gopher runs: the developer running it locally, the user signed in to a shared server, the server's own Workload Identity, or a service account. Call ` + "`gcp_auth_status`" + ` to confirm the identity and project before consequential API calls.
@@ -242,6 +248,8 @@ Two input modes. Provide EXACTLY ONE:
 1) SINGLE-FILE via 'code': a Go source blob. Either a snippet declaring 'func run(ctx context.Context) (any, error)' in any package other than 'main' (the wrapper provides func main(); your return value becomes result.value), OR a complete 'package main' program (you own stdout/stderr; write /app/.kode-gopher/result.json for structured output).
 
 2) MULTI-FILE via 'files': map of path -> source. Root files (no '/' in key) share the entry-point package; subdirectory files are separate helper packages. The synthesized module name is 'kode_gopher_user' — a helper at 'helper/util.go' is imported as 'kode_gopher_user/helper'. If you include a 'go.mod' file the executor uses YOUR version pins instead of the prewarm lockfile; you take on any resulting recompile cost.
+
+Session scratch: before each call, /app is wiped EXCEPT /app/persist ('persist/'), which already exists and survives across execute_go_code calls in the same MCP session. Save large intermediate API/query results to /app/persist/... and return a compact summary from run() rather than exceeding the 256 KiB result cap or re-fetching on follow-up turns. Ephemeral: lost when the session ends or if an evicted pod is replaced, so handle os.ErrNotExist.
 
 Google Cloud calls authenticate automatically with Application Default Credentials, so cloud.google.com/go/* clients need no credential options. The identity depends on the deployment (the local developer, the signed-in user, the server's Workload Identity, or a service account); call gcp_auth_status to see it and its project. GOOGLE_CLOUD_PROJECT may be set; if it's empty, use gcp_auth_status's project_id.
 
