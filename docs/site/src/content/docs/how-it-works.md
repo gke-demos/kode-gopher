@@ -6,10 +6,10 @@ description: What happens between the model writing a Go snippet and the result 
 kode-gopher is an [MCP](https://modelcontextprotocol.io) server. An MCP client, such as Claude Code, connects to it and offers its tools to the model. When the model calls `execute_go_code`, the snippet goes through four steps.
 
 ```
-MCP client ──► kode-gopher serve ──► sandbox pod (agent-sandbox)
-                1. normalize          2. go build
+MCP client ──► kode-gopher serve ──► sandbox pod (agent-sandbox, POST /run-go)
+                1. normalize          2. reset /app (keeping /app/persist) + go build
                                       3. run, with short-lived credentials
-                4. result ◄────────── result.json, stdout, stderr
+                4. result ◄────────── result.json, stdout, stderr (+ attachments)
 ```
 
 ## 1. Normalize
@@ -23,7 +23,7 @@ The model can also send several files, including helper packages.
 
 ## 2. Build
 
-The sandbox is a pod from a warm pool, already running with the Go toolchain. kode-gopher uploads the files, writes a `go.mod` from the image's lockfile, and runs `go build`.
+The sandbox is a pod from a warm pool, already running with the Go toolchain. In a single `POST /run-go` request, the sandbox server wipes `/app` (preserving `/app/persist`), writes the files atomically, bootstraps `go.mod` from the image's lockfile, and runs `go build` before any runtime credentials or environment variables are exposed.
 
 The image has the [precompiled packages](/reference/packages/) in its build cache, so a snippet that sticks to them compiles in about two seconds on GKE. Any other pure-Go import works too, at the cost of a `go mod tidy` and a slower first build.
 
@@ -31,15 +31,15 @@ If the build fails, the result says `phase: build` and carries the compiler's er
 
 ## 3. Run
 
-The binary runs in the same pod. How it gets Google credentials depends on how kode-gopher is set up:
-- **On your machine,** your own Application Default Credentials are copied in for the run.
-- **On a shared server,** a metadata server emulator inside the sandbox hands the program a short-lived access token. That's the signed-in user's token, a service account's, or kode-gopher's own, depending on configuration.
+The binary runs in the same pod immediately after a clean build. How it gets Google credentials depends on how kode-gopher is set up:
+- **On your machine,** your own Application Default Credentials are copied in for the run (or minted as a short-lived token with `--credentials=access-token` or `--credentials=service`).
+- **On a shared server,** a metadata server emulator inside the sandbox hands the program a short-lived access token for the duration of the run only. That's the signed-in user's token, a service account's, or kode-gopher's own, optionally restricted to read-only OAuth scopes with `--read-only` or per-call `read_only: true`.
 
 Either way, the Google Cloud libraries find the credentials on their own, and the snippet just calls `storage.NewClient(ctx)`. See [Credentials](/concepts/credentials/).
 
 ## 4. Return a result
 
-The program's return value, or its error or panic, comes back as a structured result, alongside stdout, stderr, the exit code and timings:
+The program's return value, or its error or panic, comes back in the same response as a structured result, alongside stdout, stderr, the exit code, timings, and any `image/png`, `image/jpeg`, or `image/webp` files written under `/app/.kode-gopher/attachments/` (returned as MCP `ImageContent` blocks):
 
 ```json
 {

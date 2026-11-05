@@ -46,16 +46,16 @@ This is Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) idea, b
 
 <CardGrid>
   <Card title="Real Google Cloud libraries" icon="seti:go">
-    Storage, Compute, GKE, BigQuery, Secret Manager and `client-go` come precompiled in the sandbox, so a typical snippet builds and runs in about four seconds.
+    Storage, Compute, GKE, BigQuery, Secret Manager, Logging, Monitoring, Trace and `client-go` come precompiled in the sandbox, so a typical snippet builds and runs in a single sandbox round-trip in about four seconds.
   </Card>
   <Card title="A sandbox per session" icon="approve-check">
-    Each MCP session gets its own pod: gVisor on GKE, no Kubernetes credentials, and network access only to public endpoints.
+    Each MCP session gets its own pod: gVisor on GKE, no Kubernetes credentials, `/app/persist` scratch space across turns, and an FQDN egress allowlist on shared servers.
   </Card>
   <Card title="Your identity, not a shared one" icon="seti:lock">
-    Snippets run as you. On a shared server, users sign in with Google and each runs as themselves, with short-lived tokens only.
+    Snippets run as you. On a shared server, users sign in with Google and each runs as themselves, with short-lived tokens and optional `--read-only` scope downscoping.
   </Card>
   <Card title="Answers the model can use" icon="list-format">
-    Results come back as JSON, with build errors, runtime errors and panics clearly told apart, so the agent knows what to fix.
+    Results come back as compact JSON (plus native `ImageContent` attachments for charts and media), with build errors, runtime errors and panics clearly told apart.
   </Card>
 </CardGrid>
 
@@ -68,4 +68,4 @@ This is Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) idea, b
   <LinkCard title="Reference" description="The MCP tools, the CLI, and the precompiled packages." href="/kode-gopher/reference/tools/" />
 </CardGrid>
 
-kode-gopher is pre-alpha and hasn't had a release yet. It's built on [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) and the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).
+kode-gopher is pre-alpha (`0.x`); signed binaries and container images are published on [GitHub Releases](https://github.com/gke-demos/kode-gopher/releases). It's built on [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) and the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).

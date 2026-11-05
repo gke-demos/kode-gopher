@@ -2,6 +2,8 @@
 
 **Reference:** Philipp Schmid, [*Why Agents Are Soon Only Going to Have 1 Tool*](https://www.philschmid.de/code-mode) (Nov 1, 2026)
 
+> **Status (`v0.5.0`, Nov 5, 2026):** All six optimizations in the [Priority Roadmap](#suggested-priority-roadmap) below ([#66](https://github.com/gke-demos/kode-gopher/issues/66)–[#71](https://github.com/gke-demos/kode-gopher/issues/71)) shipped in **`v0.5.0`** via PRs [#73](https://github.com/gke-demos/kode-gopher/pull/73)–[#78](https://github.com/gke-demos/kode-gopher/pull/78). The analysis below is preserved as the baseline comparison that motivated `v0.5.0`.
+
 ## Verdict: Same Trajectory — and Ahead on Two Hard Problems
 
 Your read is spot-on: **`kode-gopher` is already built on the exact architectural bet Schmid describes**, and in two places (`SDK fidelity` and `credential isolation`) it is meaningfully ahead of the generic JS/Python `exec(code)` proxy pattern in the post.
@@ -136,11 +138,11 @@ To truly realize *"1 tool for all of GCP"*, compare [`internal/curated/packages.
 
 ## Suggested Priority Roadmap
 
-| Priority | Issue | Optimization | Effort | Why First |
-|---|---|---|---|---|
-| **P0** | [#66](https://github.com/gke-demos/kode-gopher/issues/66) | Promote `x/oauth2/google`, `x/sync/errgroup`, `k8s.io/api/{core,apps}/v1`, `protobuf/types/known/*` to curated + widen `lookup_package_docs` to all prewarm `go.mod` modules | **Small** (~1 PR) | Fixes real friction today: GKE snippets stop triggering `go mod tidy`, and `lookup_package_docs` stops rejecting `k8s.io/api` & `protobuf` types. |
-| **P1** | [#67](https://github.com/gke-demos/kode-gopher/issues/67) | Cross-turn `/app/persist` (or state helpers) surviving `Session.Reset` | **Small** (~1 PR) | Unlocks stateful multi-turn data exploration with zero prompt-token cost; brings code in line with `design-in-cluster.md`. |
-| **P1** | [#68](https://github.com/gke-demos/kode-gopher/issues/68) | Single-hop `POST /run-go` on `cmd/sandbox-server` | **Medium** (~1–2 PRs) | Cuts 4–5 sequential HTTP calls + 3 shell spawns per run down to 1 hop. |
-| **P2** | [#70](https://github.com/gke-demos/kode-gopher/issues/70) | Read-only default / CAB token downscoping on `execute_go_code` | **Medium** | Gives `kode-gopher` an answer to Code Mode's "destructive action guardrail" without sacrificing direct Go SDK execution. |
-| **P2** | [#69](https://github.com/gke-demos/kode-gopher/issues/69) | Compact `renderText` JSON + prompt guidance on stripping `managedFields` / returning summaries | **Small** | Cuts 20–35% text token overhead and prevents 256 KiB result drops on `client-go` lists. |
-| **P3** | [#71](https://github.com/gke-demos/kode-gopher/issues/71) | Multimodal `ImageContent` attachments + SSE stdout streaming (Slice 5) | **Medium** | Enables chart rendering from Monitoring/BigQuery and live progress on 50-project fan-outs. |
+| Priority | Issue | Status | Optimization | Effort | Why First |
+|---|---|---|---|---|---|
+| **P0** | [#66](https://github.com/gke-demos/kode-gopher/issues/66) | Shipped ([#73](https://github.com/gke-demos/kode-gopher/pull/73), `v0.5.0`) | Promote `x/oauth2/google`, `x/sync/errgroup`, `k8s.io/api/{core,apps}/v1`, `protobuf/types/known/*` to curated + widen `lookup_package_docs` to all prewarm `go.mod` modules + batched `queries` | **Small** (~1 PR) | Fixes real friction: GKE snippets stop triggering `go mod tidy`, and `lookup_package_docs` covers `k8s.io/api` & `protobuf` types in one round-trip. |
+| **P1** | [#67](https://github.com/gke-demos/kode-gopher/issues/67) | Shipped ([#74](https://github.com/gke-demos/kode-gopher/pull/74), `v0.5.0`) | Cross-turn `/app/persist` surviving `Session.Reset` | **Small** (~1 PR) | Unlocks stateful multi-turn data exploration with zero prompt-token cost; brings code in line with `design-in-cluster.md`. |
+| **P1** | [#68](https://github.com/gke-demos/kode-gopher/issues/68) | Shipped ([#75](https://github.com/gke-demos/kode-gopher/pull/75), `v0.5.0`) | Single-hop `POST /run-go` on `cmd/sandbox-server` | **Medium** (~1–2 PRs) | Cuts 4–5 sequential HTTP calls + 3 shell spawns per run down to 1 hop. |
+| **P2** | [#70](https://github.com/gke-demos/kode-gopher/issues/70) | Shipped ([#77](https://github.com/gke-demos/kode-gopher/pull/77), `v0.5.0`) | Opt-in `--read-only` / `read_only` OAuth scope downscoping | **Medium** | Gives `kode-gopher` a least-privilege guardrail without sacrificing direct Go SDK execution. |
+| **P2** | [#69](https://github.com/gke-demos/kode-gopher/issues/69) | Shipped ([#76](https://github.com/gke-demos/kode-gopher/pull/76), `v0.5.0`) | Compact `renderText` JSON + prompt guidance on stripping `managedFields` / returning summaries | **Small** | Cuts 20–35% text token overhead and prevents 256 KiB result drops on `client-go` lists. |
+| **P3** | [#71](https://github.com/gke-demos/kode-gopher/issues/71) | Shipped ([#78](https://github.com/gke-demos/kode-gopher/pull/78), `v0.5.0`) | Multimodal `ImageContent` attachments from `/app/.kode-gopher/attachments/` | **Medium** | Enables chart rendering from Monitoring/BigQuery and media inspection from GCS. |
