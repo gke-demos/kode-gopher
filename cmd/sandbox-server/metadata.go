@@ -34,6 +34,20 @@ type credentials struct {
 	Email        string    `json:"email,omitempty"`
 	Project      string    `json:"project,omitempty"`
 	QuotaProject string    `json:"quota_project,omitempty"`
+	Scopes       []string  `json:"scopes,omitempty"`
+}
+
+func (c *credentials) effectiveScopes() []string {
+	var out []string
+	for _, s := range c.Scopes {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return []string{cloudPlatformScope}
 }
 
 func (c *credentials) validate(now time.Time) error {
@@ -48,8 +62,8 @@ func (c *credentials) validate(now time.Time) error {
 	return nil
 }
 
-// cloudPlatformScope is what the emulator reports for the token's scopes.
-// kode-gopher only forwards cloud-platform tokens.
+// cloudPlatformScope is the default scope the emulator reports when
+// credentials.Scopes is unset.
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 
 // metadataEmulator serves one command's credentials in the shape of the
@@ -141,12 +155,12 @@ func (e *metadataEmulator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"aliases": []string{"default"},
 			"email":   c.Email,
-			"scopes":  []string{cloudPlatformScope},
+			"scopes":  c.effectiveScopes(),
 		})
 	case "email":
 		e.text(w, r, c.Email)
 	case "scopes":
-		e.text(w, r, cloudPlatformScope+"\n")
+		e.text(w, r, strings.Join(c.effectiveScopes(), "\n")+"\n")
 	case "token":
 		// ?scopes= is ignored: the token's scopes were fixed at consent.
 		secs := int(time.Until(c.Expiry).Seconds())

@@ -48,6 +48,8 @@ usage: kode-gopher exec [flags] <file.go>
     	Kubernetes namespace for the sandbox claim (must already exist) (default "default")
   -open-timeout duration
     	max time spent opening the sandbox (default 5m0s)
+  -read-only
+    	restrict Google credentials to read-only OAuth scopes; supported with --credentials=service, --credentials=access-token (service-account or WIF JSON ADC), and --auth=oauth
   -service-account string
     	--credentials=service: the Google service account snippets run as; kode-gopher's ADC needs roles/iam.serviceAccountTokenCreator on it
 ```
@@ -113,6 +115,8 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
     	oauth: project reported to snippets as GOOGLE_CLOUD_PROJECT
   -quota-project string
     	oauth: quota project reported to snippets as GOOGLE_CLOUD_QUOTA_PROJECT
+  -read-only
+    	restrict Google credentials to read-only OAuth scopes; supported with --credentials=service, --credentials=access-token (service-account or WIF JSON ADC), and --auth=oauth
   -service-account string
     	--credentials=service: the Google service account snippets run as; kode-gopher's ADC needs roles/iam.serviceAccountTokenCreator on it
   -session-timeout duration

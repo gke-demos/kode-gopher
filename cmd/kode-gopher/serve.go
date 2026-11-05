@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/mcp"
 )
 
@@ -73,13 +74,13 @@ func runServe(args []string) int {
 		return 2
 	}
 	if *transport == "http" {
-		if err := httpAuth(ctx, &httpOpts, *authMode, *tokenFile, *authUser, *inCluster, oauthCfg); err != nil {
+		if err := httpAuth(ctx, &httpOpts, *authMode, *tokenFile, *authUser, *inCluster, *credCfg.readOnly, oauthCfg); err != nil {
 			log.Printf("mcp serve: %v", err)
 			return 2
 		}
 	}
 
-	credSrc, err := credCfg.source(ctx, *inCluster)
+	credSrc, err := serveCreds(ctx, *transport, *authMode, *inCluster, credCfg)
 	if err != nil {
 		log.Printf("mcp serve: %v", err)
 		return 2
@@ -95,6 +96,7 @@ func runServe(args []string) int {
 		Credentials: credSrc,
 		InCluster:   *inCluster,
 		Lease:       *lease,
+		ReadOnly:    *credCfg.readOnly,
 
 		MaxSandboxesPerUser: *maxPerUser,
 	})
@@ -131,10 +133,19 @@ func transportFlags(fs *flag.FlagSet, transport string, claim, persistent bool, 
 	}
 }
 
+// serveCreds resolves the server-wide credential source, or nil when
+// --transport=http --auth=oauth overrides --credentials per request.
+func serveCreds(ctx context.Context, transport, authMode string, inCluster bool, credCfg *credFlags) (creds.Source, error) {
+	if transport == "http" && authMode == "oauth" {
+		return nil, credCfg.validateMode()
+	}
+	return credCfg.source(ctx, inCluster)
+}
+
 // httpAuth fills in how HTTP requests are authenticated. Under OAuth
 // each request carries the user's own credentials, which override
 // --credentials.
-func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user string, inCluster bool, of *oauthFlags) error {
+func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user string, inCluster, readOnly bool, of *oauthFlags) error {
 	switch mode {
 	case "static":
 		token, err := readToken(tokenFile)
@@ -148,7 +159,7 @@ func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user 
 			// metadata emulator, reached by its in-cluster Service.
 			return fmt.Errorf("--auth=oauth needs --in-cluster")
 		}
-		as, err := of.server(ctx)
+		as, err := of.server(ctx, readOnly)
 		if err != nil {
 			return err
 		}

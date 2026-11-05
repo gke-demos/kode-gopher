@@ -83,6 +83,10 @@ type Config struct {
 	// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_QUOTA_PROJECT.
 	Project      string
 	QuotaProject string
+	// ReadOnly restricts issued Google tokens to creds.ReadOnlyScopes.
+	// Custody (and ServiceTokens, when client_credentials is enabled)
+	// must be configured for read-only as well.
+	ReadOnly bool
 	// HTTPClient calls Google's token and tokeninfo endpoints. Default:
 	// a client with a 30 s timeout.
 	HTTPClient *http.Client
@@ -115,6 +119,8 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("oauth: Google client ID and secret are required")
 	case cfg.Custody == nil:
 		return nil, errors.New("oauth: a custody backend is required")
+	case cfg.ReadOnly != cfg.Custody.readOnly():
+		return nil, fmt.Errorf("oauth: Config.ReadOnly (%v) must match Custody (%v)", cfg.ReadOnly, cfg.Custody.readOnly())
 	case cfg.Allow == nil || len(cfg.Allow.Domains)+len(cfg.Allow.Groups) == 0:
 		return nil, errors.New("oauth: the allow-list is empty, so no one could sign in")
 	case len(cfg.Allow.Groups) > 0 && cfg.Allow.GroupChecker == nil:
@@ -156,6 +162,11 @@ func New(cfg Config) (*Server, error) {
 	}
 	if s.serviceClients && cfg.ServiceTokens == nil {
 		return nil, errors.New("oauth: client-credentials clients need a service token minter")
+	}
+	if s.serviceClients && cfg.ReadOnly {
+		if _, ok := cfg.ServiceTokens.(ReadOnlyServiceTokens); !ok {
+			return nil, errors.New("oauth: read-only client-credentials clients need a ReadOnlyServiceTokens minter")
+		}
 	}
 	return s, nil
 }

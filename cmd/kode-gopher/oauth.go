@@ -72,7 +72,7 @@ var authProviderRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authPro
 // server builds the authorization server. Calls to the vault, Cloud
 // Identity and (for client-credentials clients) the IAM Credentials API
 // use kode-gopher's own ADC (Workload Identity in a pod).
-func (f *oauthFlags) server(ctx context.Context) (*oauth.Server, error) {
+func (f *oauthFlags) server(ctx context.Context, readOnly bool) (*oauth.Server, error) {
 	if *f.issuer == "" || *f.googleClient == "" || *f.keyring == "" {
 		return nil, fmt.Errorf("--auth=oauth needs --oauth-issuer, --oauth-google-client-file and --oauth-keyring-file")
 	}
@@ -94,9 +94,9 @@ func (f *oauthFlags) server(ctx context.Context) (*oauth.Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("vault client: %w", err)
 		}
-		custody = &oauth.VaultCustody{AuthProvider: *f.authProvider, Client: hc}
+		custody = &oauth.VaultCustody{AuthProvider: *f.authProvider, Client: hc, ReadOnly: readOnly}
 	case "sealed":
-		custody = oauth.SealedCustody{}
+		custody = oauth.SealedCustody{ReadOnly: readOnly}
 	default:
 		return nil, fmt.Errorf("--oauth-custody must be vault or sealed, got %q", *f.custody)
 	}
@@ -134,6 +134,7 @@ func (f *oauthFlags) server(ctx context.Context) (*oauth.Server, error) {
 		OpenRegistration: *f.openReg,
 		Project:          *f.project,
 		QuotaProject:     *f.quotaProject,
+		ReadOnly:         readOnly,
 	})
 }
 

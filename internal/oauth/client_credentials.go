@@ -35,6 +35,13 @@ type ServiceTokens interface {
 	Token(ctx context.Context, serviceAccount string) (*oauth2.Token, error)
 }
 
+// ReadOnlyServiceTokens extends ServiceTokens with ReadOnlyScopes minting
+// for deployments started with Config.ReadOnly=true.
+type ReadOnlyServiceTokens interface {
+	ServiceTokens
+	ReadOnlyToken(ctx context.Context, serviceAccount string) (*oauth2.Token, error)
+}
+
 // modeService marks an access token from the client-credentials grant.
 const modeService = "service"
 
@@ -59,7 +66,13 @@ func (s *Server) clientCredentials(r *http.Request, c *client) (map[string]any, 
 	if res := f.Get("resource"); res != "" && res != s.resource {
 		return nil, &tokenError{Code: "invalid_target", Desc: "resource must be " + s.resource}
 	}
-	tok, err := s.cfg.ServiceTokens.Token(r.Context(), c.ServiceAccount)
+	var tok *oauth2.Token
+	var err error
+	if s.cfg.ReadOnly {
+		tok, err = s.cfg.ServiceTokens.(ReadOnlyServiceTokens).ReadOnlyToken(r.Context(), c.ServiceAccount)
+	} else {
+		tok, err = s.cfg.ServiceTokens.Token(r.Context(), c.ServiceAccount)
+	}
 	if err != nil {
 		log.Printf("oauth: client %s: mint token for %s: %v", c.ID, c.ServiceAccount, err) //nolint:gosec // c is an authenticated pre-registered client
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't mint a token for the client's service account"}
@@ -67,7 +80,7 @@ func (s *Server) clientCredentials(r *http.Request, c *client) (map[string]any, 
 	now := time.Now()
 	at, exp, terr := s.sealAccess(accessPayload{
 		Sub: serviceSubject(c.ID), Email: c.ServiceAccount, ClientID: c.ID, Aud: s.resource, Scope: scope,
-		Token: tok.AccessToken, TokenExp: tok.Expiry.Unix(), Mode: modeService, SH: secretTag(c.Secret),
+		Token: tok.AccessToken, TokenExp: tok.Expiry.Unix(), Mode: modeService, ReadOnly: s.cfg.ReadOnly, SH: secretTag(c.Secret),
 	}, now)
 	if terr != nil {
 		return nil, terr

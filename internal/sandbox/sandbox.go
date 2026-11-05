@@ -118,6 +118,7 @@ type Credentials struct {
 	Email        string    `json:"email,omitempty"`
 	Project      string    `json:"project,omitempty"`
 	QuotaProject string    `json:"quota_project,omitempty"`
+	Scopes       []string  `json:"scopes,omitempty"`
 }
 
 // Request is a single Execute call: ship Files under /app and run

@@ -71,6 +71,10 @@ type Identity struct {
 	// (ADC's quota_project_id, or $GOOGLE_CLOUD_PROJECT, or the
 	// metadata server's project). May be empty if none is discoverable.
 	ProjectID string `json:"project_id,omitempty"`
+
+	// ReadOnly reports whether this source is restricted to read-only
+	// Google OAuth scopes (ReadOnlyScopes) for every run.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // Source is what mcp.Config holds. Concurrent-safe: implementations
@@ -101,6 +105,10 @@ type AccessToken struct {
 	Email        string
 	Project      string
 	QuotaProject string
+	// Scopes, if non-empty, are the OAuth 2.0 scopes the sandbox's
+	// metadata emulator reports for this token. Empty defaults to
+	// cloud-platform.
+	Scopes []string
 }
 
 // TokenMinter is a Source that hands each run an access token rather

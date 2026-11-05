@@ -80,6 +80,10 @@ type Config struct {
 	// MaxSandboxesPerUser caps the open sandboxes (one per MCP session)
 	// per authenticated user. Zero: no cap.
 	MaxSandboxesPerUser int
+	// ReadOnly restricts every execute_go_code call on this server to
+	// read-only Google Cloud OAuth scopes, failing closed if the active
+	// credential source cannot restrict scopes.
+	ReadOnly bool
 }
 
 func (c *Config) applyDefaults() {
