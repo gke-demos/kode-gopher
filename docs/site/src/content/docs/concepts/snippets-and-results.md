@@ -80,6 +80,7 @@ Every call returns:
 | `build_ms`, `duration_ms` | Build time, and build plus run time. |
 | `tidied` | Whether the build needed `go mod tidy`. |
 | `result` | The structured result, below. |
+| `attachments` | Metadata (`name`, `mime_type`, `bytes`) for any images written under `/app/.kode-gopher/attachments/`, returned alongside `ImageContent` blocks. |
 
 The `result.kind` is one of:
 
@@ -93,5 +94,9 @@ The `result.kind` is one of:
 A result can be up to 256 KiB of JSON. A larger one is dropped, and so is a `result.json` that isn't valid JSON. In both cases `warnings` says why, so return less data: filter, summarize, or page through it in the program, project responses into small structs or slices rather than returning raw `*pb` structs or full Kubernetes list objects (whose `metadata.managedFields` and `last-applied-configuration` annotations quickly fill 256 KiB), or stash raw datasets under `/app/persist` for follow-up calls in the same [session](/concepts/sessions/). stdout and stderr are different: each is cut to its first and last 8 KiB, so the model sees the start and the end of long output.
 
 The MCP response is flagged as an error (`isError`) when the build failed, the program exited non-zero, the result kind isn't `ok`, or the result was dropped. The model can tell what to fix from `phase` and `kind`: compile errors mean changing the code, and `error` results usually mean a permission or API problem.
+
+## Image attachments
+
+When a snippet renders a chart or downloads an image from Cloud Storage, write regular `image/png`, `image/jpeg`, or `image/webp` files under `/app/.kode-gopher/attachments/` instead of base64-encoding bytes into `result.value`. Each run accepts up to 8 images and 2 MiB of combined raw image bytes, verified by file header signature rather than file extension. `execute_go_code` appends each image to the MCP tool result as a native `ImageContent` block and lists its metadata in `attachments`; symlinks, subdirectories, unsupported formats, or oversized files are skipped and reported in `warnings`.
 
 The full schema is on the [MCP tools](/reference/tools/) page.

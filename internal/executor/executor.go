@@ -27,6 +27,7 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -75,6 +76,9 @@ type Outcome struct {
 	// Warnings are notes for the caller (and the model) about how the
 	// build went, e.g. tidy moving lockfile-pinned versions.
 	Warnings []string
+	// Attachments are validated image files written under
+	// /app/.kode-gopher/attachments/ during the run.
+	Attachments []Attachment
 	// BuildDuration is the build phase alone (including any tidy).
 	BuildDuration time.Duration
 }
@@ -235,33 +239,42 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 		return nil, fmt.Errorf("execute (run): %w", err)
 	}
 
-	// Phase 3: fetch the structured result, if any. Cheap: cat one
-	// file, untruncated (Raw), since it's parsed rather than read.
+	// Phase 3: fetch the structured result and any bounded image
+	// attachments in one round-trip, untruncated (Raw), with a fresh
+	// nonce generated after Phase 2 exited so user output cannot forge
+	// framing markers.
+	nonce := rand.Text()
 	fetch, fetchErr := sess.Execute(ctx, sandbox.Request{
-		Command: "cat " + resultPath + " 2>/dev/null || true",
+		Command: fetchCmd(nonce),
 		Timeout: 30 * time.Second,
 		Raw:     true,
 	})
 	var result *Result
 	var resultErr string
+	var attachments []Attachment
 	if fetchErr != nil {
 		resultErr = fmt.Sprintf("couldn't fetch the result: %v", fetchErr)
+	} else if fetch.ExitCode != 0 {
+		resultErr = fmt.Sprintf("couldn't fetch the result: exit %d", fetch.ExitCode)
 	} else {
-		result, resultErr = parseResult(fetch.Stdout)
+		var attWarnings []string
+		result, resultErr, attachments, attWarnings = parseFetchStdout(fetch.Stdout, nonce)
+		warnings = append(warnings, attWarnings...)
 	}
 	if resultErr != "" {
 		warnings = append(warnings, resultErr)
 	}
 
 	return &Outcome{
-		Phase:    PhaseRun,
-		ExitCode: run.ExitCode,
-		Stdout:   run.Stdout,
-		Stderr:   run.Stderr,
-		Duration: build.Duration + run.Duration,
-		Result:   result,
-		Tidied:   tidied,
-		Warnings: warnings,
+		Phase:       PhaseRun,
+		ExitCode:    run.ExitCode,
+		Stdout:      run.Stdout,
+		Stderr:      run.Stderr,
+		Duration:    build.Duration + run.Duration,
+		Result:      result,
+		Tidied:      tidied,
+		Warnings:    warnings,
+		Attachments: attachments,
 
 		ResultError:   resultErr,
 		BuildDuration: build.Duration,

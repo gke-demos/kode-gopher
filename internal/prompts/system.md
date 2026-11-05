@@ -65,6 +65,8 @@ The sandbox has no Kubernetes service-account token, so `rest.InClusterConfig()`
 
 `result.value` (or `/app/.kode-gopher/result.json`) is capped at 256 KiB; anything larger is dropped with a warning. Filter, aggregate, and project API responses inside `run(ctx)` into small structs, maps, or slices carrying only the fields needed to answer the question. Avoid returning raw Google Cloud protobuf structs (such as `*containerpb.Cluster`) or full Kubernetes list objects (`*corev1.PodList`, whose `metadata.managedFields` and `last-applied-configuration` annotations routinely exceed 256 KiB) verbatim.
 
-## Failure surfaces
+## Failure surfaces and image attachments
 
 The tool returns `phase` (build/run), `exit_code`, `stdout`, `stderr`, and `result` (kind + value/message/stack). `IsError` is true when either the program crashed or `result.kind != "ok"`.
+
+To return rendered charts or downloaded images without base64-bloating JSON, create `/app/.kode-gopher/attachments/` and write regular PNG, JPEG, or WebP files there (up to 8 images and 2 MiB total); `execute_go_code` surfaces them as native MCP `ImageContent` blocks alongside `attachments` metadata.

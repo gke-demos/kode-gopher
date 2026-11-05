@@ -39,4 +39,6 @@ Session scratch: before each call, /app is wiped EXCEPT /app/persist ('persist/'
 
 Google Cloud calls authenticate automatically with Application Default Credentials, so cloud.google.com/go/* clients need no credential options. The identity depends on the deployment (the local developer, the signed-in user, the server's Workload Identity, or a service account); call gcp_auth_status to see it and its project. GOOGLE_CLOUD_PROJECT may be set; if it's empty, use gcp_auth_status's project_id.
 
-Structured results are capped at 256 KiB (larger payloads are dropped with a warning). Filter, aggregate, and project API responses inside run(ctx) into small structs or slices rather than returning raw *pb structs or full Kubernetes objects (such as corev1.PodList with metadata.managedFields) verbatim.`
+Structured results are capped at 256 KiB (larger payloads are dropped with a warning). Filter, aggregate, and project API responses inside run(ctx) into small structs or slices rather than returning raw *pb structs or full Kubernetes objects (such as corev1.PodList with metadata.managedFields) verbatim.
+
+Image attachments: write PNG, JPEG, or WebP files under /app/.kode-gopher/attachments/ (up to 8 regular files, 2 MiB total) to return them as native MCP ImageContent blocks instead of base64-encoding images in JSON.`
