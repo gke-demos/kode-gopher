@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-05
+
+Single-hop sandbox execution (`POST /run-go`), batched `lookup_package_docs` across the full prewarmed module graph, cross-call session scratch storage in `/app/persist`, multimodal MCP `ImageContent` attachments, opt-in read-only Google Cloud scope downscoping (`--read-only` / `read_only`), and compact result output. Redeploy to pick up the new server and sandbox images; the deploy script refreshes the warm pool automatically. Documentation: https://gke-demos.github.io/kode-gopher/.
+
 ### Added
 
 - **`lookup_package_docs` covers every module in the sandbox's prewarmed lockfile and accepts batched queries.** Lookups now work for transitive modules already cached in the sandbox image — including `k8s.io/api/*` (`core/v1`, `apps/v1`, `batch/v1`), `cloud.google.com/go/iam`, `cloud.google.com/go/civil`, `cloud.google.com/go/longrunning`, `google.golang.org/protobuf/types/known/*`, `google.golang.org/genproto/...`, and `google.golang.org/grpc/...` — while still rejecting uncached sibling `cloud.google.com/go/*` service modules upfront. Callers can also pass `queries` (up to 10 `{package, symbol?}` items) to inspect multiple types in one sandbox round-trip. `golang.org/x/oauth2/google`, `golang.org/x/sync/errgroup`, `google.golang.org/protobuf/types/known/timestamppb`, `k8s.io/api/apps/v1`, and `k8s.io/api/core/v1` are promoted to direct precompiled packages so snippets importing them never trigger `go mod tidy`. ([#66](https://github.com/gke-demos/kode-gopher/issues/66))
