@@ -17,14 +17,19 @@ The sandbox image ships with these packages, and everything they depend on, alre
 | `cloud.google.com/go/logging/logadmin` |
 | `cloud.google.com/go/monitoring/apiv3/v2` |
 | `cloud.google.com/go/trace/apiv1` |
+| `golang.org/x/oauth2/google` |
+| `golang.org/x/sync/errgroup` |
 | `google.golang.org/api/option` |
+| `google.golang.org/protobuf/types/known/timestamppb` |
+| `k8s.io/api/apps/v1` |
+| `k8s.io/api/core/v1` |
 | `k8s.io/apimachinery/pkg/apis/meta/v1` |
 | `k8s.io/client-go/kubernetes` |
 | `k8s.io/client-go/tools/clientcmd` |
 | `k8s.io/client-go/dynamic` |
 | `k8s.io/client-go/tools/watch` |
 
-The list lives in `internal/curated`. The same list feeds the `execute_go_code` tool description, so the model sees it too, and `lookup_package_docs` serves `go doc` for these packages.
+The list lives in `internal/curated`. The same list feeds the `execute_go_code` tool description, so the model sees it too, and `lookup_package_docs` serves `go doc` for these packages and every module they depend on.
 
 **Other packages work too.** Any pure-Go import is allowed. The precompiled set is a speed optimization, not a limit. A snippet that imports something else makes the build run `go mod tidy` first (`tidied: true`), downloading and compiling the new package. The sandbox keeps its module and build caches for the rest of the MCP session, so later calls are faster. cgo isn't available: the image has no C compiler.
 

@@ -22,7 +22,12 @@ Build and run Go code in a sandboxed Kubernetes pod (gVisor-isolated on GKE, run
   cloud.google.com/go/logging/logadmin
   cloud.google.com/go/monitoring/apiv3/v2
   cloud.google.com/go/trace/apiv1
+  golang.org/x/oauth2/google
+  golang.org/x/sync/errgroup
   google.golang.org/api/option
+  google.golang.org/protobuf/types/known/timestamppb
+  k8s.io/api/apps/v1
+  k8s.io/api/core/v1
   k8s.io/apimachinery/pkg/apis/meta/v1
   k8s.io/client-go/kubernetes
   k8s.io/client-go/tools/clientcmd
@@ -96,9 +101,11 @@ None.
 **Description**
 
 ```text
-Return godoc-style documentation for a curated Go package (optionally scoped to a specific symbol). Runs 'go doc <package> [symbol]' inside the sandbox against the prewarmed module cache — no build, no network, subsecond. Use when writing execute_go_code snippets and you need to check a function signature, method set, or constant name that isn't in your prior knowledge.
+Return godoc-style documentation for one or more Go packages in the sandbox's prewarmed module graph (optionally scoped to specific symbols). Runs 'go doc <package> [symbol]' inside the sandbox against the prewarmed module cache — no build, no network, subsecond. Use when writing execute_go_code snippets and you need to check a function signature, method set, struct fields, or constant names.
 
-Curated set; other packages in the same modules work too, such as the *pb request types (monitoringpb, tracepb) and cloud.google.com/go/logging:
+Pass either 'package' (with optional 'symbol') for one lookup, or 'queries' (up to 10 {package, symbol?} items) to inspect multiple types in a single round-trip.
+
+Curated entry-point packages; every other package in their module graph works too, including *pb request/response types (monitoringpb, containerpb, iampb), k8s.io/api/* resource types, cloud.google.com/go/iam, cloud.google.com/go/civil, google.golang.org/genproto/..., and google.golang.org/grpc/...:
 
   cloud.google.com/go/storage
   cloud.google.com/go/compute/apiv1
@@ -108,27 +115,40 @@ Curated set; other packages in the same modules work too, such as the *pb reques
   cloud.google.com/go/logging/logadmin
   cloud.google.com/go/monitoring/apiv3/v2
   cloud.google.com/go/trace/apiv1
+  golang.org/x/oauth2/google
+  golang.org/x/sync/errgroup
   google.golang.org/api/option
+  google.golang.org/protobuf/types/known/timestamppb
+  k8s.io/api/apps/v1
+  k8s.io/api/core/v1
   k8s.io/apimachinery/pkg/apis/meta/v1
   k8s.io/client-go/kubernetes
   k8s.io/client-go/tools/clientcmd
   k8s.io/client-go/dynamic
   k8s.io/client-go/tools/watch
 
-The 'symbol' argument, when provided, narrows the output to that name (e.g. 'Client', 'Client.Bucket', 'NewClient'). Must be a plain Go identifier — no shell metacharacters.
+Each 'symbol', when provided, narrows output to that name (e.g. 'Client', 'Client.Bucket', 'PodSpec'). Must be a plain Go identifier — no shell metacharacters.
 ```
 
 **Input**
 
 | Field | Type | Description |
 |---|---|---|
-| `package` (required) | string | Import path of a curated package to look up, e.g. 'cloud.google.com/go/storage' or 'k8s.io/client-go/kubernetes'. Only curated packages are supported — the tool returns a descriptive error listing them otherwise. |
-| `symbol` | string | Optional specific symbol within the package to focus on, e.g. 'Client' or 'Client.Bucket'. If empty, returns the package-level overview. Must be a valid Go identifier (letters, digits, underscore, dot for method receivers). |
+| `package` | string | Import path of a prewarmed package to look up, e.g. 'cloud.google.com/go/storage' or 'k8s.io/api/core/v1'. Any module in the sandbox's prewarmed go.mod is supported. Mutually exclusive with 'queries'. |
+| `queries` | array of object | Batch form: 1 to 10 {package, symbol?} lookups executed in a single sandbox round-trip. Mutually exclusive with 'package' and 'symbol'. |
+| `queries[].package` (required) | string | Import path of a prewarmed package to look up, e.g. 'cloud.google.com/go/storage' or 'k8s.io/api/core/v1'. |
+| `queries[].symbol` | string | Optional symbol within the package, e.g. 'Client', 'Client.Bucket', or 'PodSpec'. Must be a valid Go identifier. |
+| `symbol` | string | Optional specific symbol within 'package' to focus on, e.g. 'Client' or 'Client.Bucket'. If empty, returns the package-level overview. Must be a valid Go identifier (letters, digits, underscore, dot for method receivers). Only valid with 'package'. |
 
 **Output** (structured content)
 
 | Field | Type | Description |
 |---|---|---|
-| `docs` (required) | string | The output of go doc. |
-| `package` (required) | string | The package looked up. |
-| `symbol` | string | The symbol looked up, if any. |
+| `docs` (required) | string | The output of go doc (combined across entries when 'queries' is used). |
+| `package` | string | Single-lookup mode: the package looked up. |
+| `results` | array of object | Batch mode ('queries'): per-query go doc results in request order. |
+| `results[].docs` (required) | string | The output of go doc for this query. |
+| `results[].error` | string | Batch mode: go doc error for this query, when this entry failed. |
+| `results[].package` (required) | string | The package looked up. |
+| `results[].symbol` | string | The symbol looked up, if any. |
+| `symbol` | string | Single-lookup mode: the symbol looked up, if any. |

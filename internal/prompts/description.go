@@ -15,7 +15,12 @@ const ExecuteGoCodeDescription = `Build and run Go code in a sandboxed Kubernete
   cloud.google.com/go/logging/logadmin
   cloud.google.com/go/monitoring/apiv3/v2
   cloud.google.com/go/trace/apiv1
+  golang.org/x/oauth2/google
+  golang.org/x/sync/errgroup
   google.golang.org/api/option
+  google.golang.org/protobuf/types/known/timestamppb
+  k8s.io/api/apps/v1
+  k8s.io/api/core/v1
   k8s.io/apimachinery/pkg/apis/meta/v1
   k8s.io/client-go/kubernetes
   k8s.io/client-go/tools/clientcmd

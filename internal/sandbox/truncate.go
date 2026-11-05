@@ -30,6 +30,21 @@ const (
 	defaultTailBytes = 8192
 )
 
+// DefaultTruncateConfig is the standard 8 KiB head + 8 KiB tail cap
+// applied to command output read by an LLM.
+var DefaultTruncateConfig = TruncateConfig{
+	HeadBytes: defaultHeadBytes,
+	TailBytes: defaultTailBytes,
+}
+
+// Truncate keeps the first HeadBytes and last TailBytes of s, with an
+// elision marker in between. Returns (output, wasTruncated). If both
+// HeadBytes and TailBytes are zero or s already fits, returns s
+// unchanged.
+func Truncate(s string, c TruncateConfig) (string, bool) {
+	return truncate(s, c)
+}
+
 // truncate keeps the first HeadBytes and last TailBytes of s, with an
 // elision marker in between. Returns (output, wasTruncated). If both
 // HeadBytes and TailBytes are zero or s already fits, returns s

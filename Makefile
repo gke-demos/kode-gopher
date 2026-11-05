@@ -20,7 +20,7 @@ prompts:
 # prompts-check fails if the committed generated files are out of sync
 # with the current curated set. Suitable for CI.
 prompts-check: prompts
-	@if ! git diff --exit-code internal/prompts/ docs/site/src/content/docs/reference/packages.md docs/site/src/content/docs/reference/tools.md; then \
+	@if ! git diff --exit-code internal/prompts/ docs/site/src/content/docs/reference/packages.md docs/site/src/content/docs/reference/tools.md || [ -n "$$(git ls-files --others --exclude-standard internal/prompts/)" ]; then \
 		echo ""; \
 		echo "internal/prompts/ or the docs site's packages page is out of date. Run 'make prompts' and commit the result."; \
 		exit 1; \
