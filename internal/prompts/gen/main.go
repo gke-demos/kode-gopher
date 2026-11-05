@@ -149,6 +149,10 @@ Environment: ` + "`$GOOGLE_CLOUD_PROJECT`" + ` may be set; prefer it to hard-cod
 
 The sandbox has no Kubernetes service-account token, so ` + "`rest.InClusterConfig()`" + ` fails, and the cluster's internal addresses (API server, cluster Services) are blocked. Reach every GKE cluster, including the one the sandbox runs in, through Google's API with the snippet's Google credentials: use ` + "`container/apiv1`" + ` ` + "`ListClusters`" + `/` + "`GetCluster`" + ` to find the cluster, prefer ` + "`c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint`" + ` over ` + "`c.Endpoint`" + ` (the DNS endpoint routes through Google's control plane, works for private-endpoint clusters, uses system-trust TLS), and wrap an ` + "`oauth2.Transport`" + ` sourced from ` + "`google.DefaultTokenSource`" + ` as ` + "`rest.Config.WrapTransport`" + `. What the snippet may do in the cluster is whatever Kubernetes RBAC grants the credentials' Google identity.
 
+## Keeping results small
+
+` + "`result.value`" + ` (or ` + "`/app/.kode-gopher/result.json`" + `) is capped at 256 KiB; anything larger is dropped with a warning. Filter, aggregate, and project API responses inside ` + "`run(ctx)`" + ` into small structs, maps, or slices carrying only the fields needed to answer the question. Avoid returning raw Google Cloud protobuf structs (such as ` + "`*containerpb.Cluster`" + `) or full Kubernetes list objects (` + "`*corev1.PodList`" + `, whose ` + "`metadata.managedFields`" + ` and ` + "`last-applied-configuration`" + ` annotations routinely exceed 256 KiB) verbatim.
+
 ## Failure surfaces
 
 The tool returns ` + "`phase`" + ` (build/run), ` + "`exit_code`" + `, ` + "`stdout`" + `, ` + "`stderr`" + `, and ` + "`result`" + ` (kind + value/message/stack). ` + "`IsError`" + ` is true when either the program crashed or ` + "`result.kind != \"ok\"`" + `.
@@ -195,5 +199,7 @@ Two input modes. Provide EXACTLY ONE:
 
 2) MULTI-FILE via 'files': map of path -> source. Root files (no '/' in key) share the entry-point package; subdirectory files are separate helper packages. The synthesized module name is 'kode_gopher_user' — a helper at 'helper/util.go' is imported as 'kode_gopher_user/helper'. If you include a 'go.mod' file the executor uses YOUR version pins instead of the prewarm lockfile; you take on any resulting recompile cost.
 
-Google Cloud calls authenticate automatically with Application Default Credentials, so cloud.google.com/go/* clients need no credential options. The identity depends on the deployment (the local developer, the signed-in user, the server's Workload Identity, or a service account); call gcp_auth_status to see it and its project. GOOGLE_CLOUD_PROJECT may be set; if it's empty, use gcp_auth_status's project_id.` + "`" + `
+Google Cloud calls authenticate automatically with Application Default Credentials, so cloud.google.com/go/* clients need no credential options. The identity depends on the deployment (the local developer, the signed-in user, the server's Workload Identity, or a service account); call gcp_auth_status to see it and its project. GOOGLE_CLOUD_PROJECT may be set; if it's empty, use gcp_auth_status's project_id.
+
+Structured results are capped at 256 KiB (larger payloads are dropped with a warning). Filter, aggregate, and project API responses inside run(ctx) into small structs or slices rather than returning raw *pb structs or full Kubernetes objects (such as corev1.PodList with metadata.managedFields) verbatim.` + "`" + `
 `

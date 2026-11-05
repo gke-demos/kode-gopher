@@ -257,7 +257,6 @@ func renderText(o *ExecuteGoCodeOutput) string {
 	if o.Result != nil {
 		b.WriteString("\n── result ──\n")
 		enc := json.NewEncoder(&b)
-		enc.SetIndent("", "  ")
 		enc.SetEscapeHTML(false)
 		_ = enc.Encode(o.Result)
 	}

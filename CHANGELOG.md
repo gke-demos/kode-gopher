@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Changed
+
+- **Compact MCP result text and result-projection guidance.** `execute_go_code` now encodes the `── result ──` block in `CallToolResult.Content` as compact single-line JSON instead of 2-space indented JSON (reducing text token overhead on nested slices and maps while keeping CLI `kode-gopher exec` output indented), and `internal/prompts/system.md` plus `execute_go_code`'s tool description explicitly guide snippets to project and summarize responses rather than returning raw `*pb` or Kubernetes `managedFields` structs that exceed the 256 KiB result cap. ([#69](https://github.com/gke-demos/kode-gopher/issues/69))
+
 ## [0.4.1] - 2026-11-01
 
 **This release stops active sign-ins under the credential vault from going back to browser sign-in every hour.** A client's hourly refresh used to force-refresh a Google token that was still valid, and the vault answers that by asking for consent, so the refresh failed. kode-gopher now never forces a token Google still accepts and waits out a nearly spent one (up to about 93 s) before the refresh token rotates, so a front end needs a request timeout of at least 2 minutes (the GKE overlay's Gateway allows 900 s). Ported from go-steer/steward#22 and #23.
