@@ -66,6 +66,7 @@ gcloud agent-identity auth-providers add-iam-policy-binding kode-gopher \
 What to get right:
 - **`access_type=offline`** in the authorization URL lets the vault renew tokens without asking the user again.
 - **[kode-gopher's principal](/deploy/#kode-gophers-identity) goes in twice:** in `--workload-ids` and in the IAM binding.
+- **Read-only deployments (`--read-only`):** create a dedicated vault auth provider whose `--allowed-scopes` replaces `cloud-platform` with the read-only set (`openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform.read-only,https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/bigquery.readonly,https://www.googleapis.com/auth/logging.read,https://www.googleapis.com/auth/monitoring.read,https://www.googleapis.com/auth/trace.readonly`); see [Read-only OAuth downscoping](/concepts/credentials/#read-only-oauth-downscoping).
 - **The IAM grant** can take a few minutes to take effect.
 
 ## 3. Decide who's admitted

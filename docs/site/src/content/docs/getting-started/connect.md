@@ -37,7 +37,7 @@ The server offers three [tools](/reference/tools/): `execute_go_code`, `gcp_auth
 
 > Use execute_go_code to list the GKE clusters in my project.
 
-Ask it to call `gcp_auth_status` to see who snippets run as.
+Ask it to call `gcp_auth_status` to see who snippets run as (and whether `--read-only` is active). When the model needs exact field or method signatures, `lookup_package_docs` can inspect up to 10 symbols across any module in the sandbox's prewarmed lockfile in a single call.
 
 ## Credentials
 

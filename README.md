@@ -58,11 +58,11 @@ Whatever `run` returns comes back to the model as JSON. Errors and panics come b
 
 ## Status
 
-Pre-alpha, and no release has been tagged yet. Built and verified so far:
+Pre-alpha (`0.x`); signed binaries and container images are published on [Releases](https://github.com/gke-demos/kode-gopher/releases). Built and verified so far:
 - **Local mode:** the CLI and the stdio MCP server, on kind and on GKE Autopilot with gVisor.
-- **Fast builds:** a CI-published sandbox image with the SDKs precompiled.
-- **In-cluster server:** a GKE Gateway with a managed certificate, a static token or OAuth 2.1 sign-in fronting Google (with Google's Agent Identity credential vault), service-account mode, and the `client_credentials` grant for automation. Real Google sign-in from Claude Code has been tested on GKE.
-- **CI:** presubmits, a kind end-to-end test, and signed multi-arch images.
+- **Fast single-hop builds and session state:** a CI-published sandbox image with Google Cloud SDKs and `client-go` precompiled, single-hop `POST /run-go` execution, `/app/persist` session scratch across calls, batched `lookup_package_docs` across the prewarmed module graph, and native MCP `ImageContent` attachments.
+- **In-cluster server & least privilege:** a GKE Gateway with a managed certificate, FQDN egress allowlists for sandboxes, a static token or OAuth 2.1 sign-in fronting Google (with Google's Agent Identity credential vault or sealed custody), service-account mode, the `client_credentials` grant for automation, and opt-in `--read-only` / `read_only` OAuth scope downscoping.
+- **CI & releases:** presubmits, a kind end-to-end test, cosign-signed release archives, and signed multi-arch images.
 
 What's next, and the evidence behind each step, are in [docs/plan.md](./docs/plan.md) and [docs/decisions.md](./docs/decisions.md).
 
@@ -76,6 +76,7 @@ Design and project records, in this repository:
 |---|---|
 | [docs/design.md](./docs/design.md) | architecture, execution modes, result protocol, sandbox boundary |
 | [docs/design-in-cluster.md](./docs/design-in-cluster.md) | the in-cluster server's design: sessions, OAuth, credentials in the sandbox, network policy |
+| [docs/code-mode.md](./docs/code-mode.md) | comparison against the Code Mode pattern and the `v0.5.0` optimization roadmap |
 | [docs/plan.md](./docs/plan.md) | slice-by-slice build plan and status |
 | [docs/decisions.md](./docs/decisions.md) | the log of judgment calls and measurements |
 | [docs/release-process.md](./docs/release-process.md) | versions, tags, release notes |
@@ -85,13 +86,13 @@ Design and project records, in this repository:
 
 | path | what |
 | --- | --- |
-| [`cmd/kode-gopher`](./cmd/kode-gopher) | the CLI binary — subcommands `exec` and `serve` |
+| [`cmd/kode-gopher`](./cmd/kode-gopher) | the CLI binary — subcommands `exec`, `serve`, and `version` |
 | [`cmd/mcp-smoketest`](./cmd/mcp-smoketest) | programmatic MCP client; spawns `kode-gopher serve` (stdio or streamable HTTP) and exercises `execute_go_code` end-to-end; `--offline` runs the checks that need no Google credentials |
-| [`cmd/sandbox-server`](./cmd/sandbox-server) | the in-pod HTTP server (agent-sandbox runtime protocol on :8888), built into the sandbox image |
-| [`internal/mcp`](./internal/mcp) | MCP server + tool handlers (execute_go_code, gcp_auth_status, lookup_package_docs) |
-| [`internal/executor`](./internal/executor) | Build/Run/Fetch phases over a `sandbox.Session`; bootstraps `/app/go.mod` from the prewarm lockfile |
-| [`internal/sandbox`](./internal/sandbox) | our thin client over `sigs.k8s.io/agent-sandbox`; `KubeContext` + `PerAttemptTimeout` options; typed `ErrSessionDead` for retry-once at MCP layer |
-| [`internal/creds`](./internal/creds) | unified `Source` interface: Materialize (files+env for the executor) + Identity (mode/type/email/project for gcp_auth_status), Forwarded, Minted, Service and OAuthUser impls |
+| [`cmd/sandbox-server`](./cmd/sandbox-server) | the in-pod HTTP server (agent-sandbox runtime protocol + single-hop `POST /run-go` + per-run GCE metadata emulator on :8888), built into the sandbox image |
+| [`internal/mcp`](./internal/mcp) | MCP server + tool handlers (`execute_go_code`, `gcp_auth_status`, `lookup_package_docs`) |
+| [`internal/executor`](./internal/executor) | single-hop `RunGo` (with multi-hop fallback) over a `sandbox.Session`; bootstraps `/app/go.mod` from the prewarm lockfile and collects structured results + image attachments |
+| [`internal/sandbox`](./internal/sandbox) | thin client over `sigs.k8s.io/agent-sandbox`; claim leases, `/app/persist` preservation across `Reset`, `RunGo`, and typed `ErrSessionDead` for retry-once at the MCP layer |
+| [`internal/creds`](./internal/creds) | unified `Source` interface (`Forwarded`, `Minted`, `Service`, `OAuthUser`) plus opt-in read-only OAuth scope downscoping |
 | [`internal/normalize`](./internal/normalize) | multi-file input; root vs subdirectory partitioning; same-package rewrite; optional `extra_imports` companion file |
 | [`internal/wrapper`](./internal/wrapper) | the generated `func main()` shipped alongside snippets |
 | [`internal/curated`](./internal/curated) | canonical list of GCP + k8s.io/client-go packages prewarmed in the sandbox image; `go:generate` drives prompts regen |

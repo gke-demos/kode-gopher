@@ -12,7 +12,16 @@ kode-gopher version
 
 The binary lands in `$(go env GOPATH)/bin`, usually `~/go/bin`. Add that to your `PATH`, or use the full path in your MCP client's config.
 
-Tagged releases will also publish binaries for linux and darwin (amd64 and arm64) on the [Releases](https://github.com/gke-demos/kode-gopher/releases) page, with a cosign-signed checksums file. No release has been tagged yet.
+Prebuilt binaries for Linux and macOS (`amd64` and `arm64`) are also published on the [Releases](https://github.com/gke-demos/kode-gopher/releases) page, alongside `checksums.txt` and a keyless Sigstore bundle (`checksums.txt.sigstore.json`). To verify a downloaded archive with `cosign`:
+
+```bash
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/gke-demos/kode-gopher/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+sha256sum --check --ignore-missing checksums.txt
+```
 
 ## Clone the repository too
 
