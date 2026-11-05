@@ -86,6 +86,7 @@ func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleHealth)
 	mux.HandleFunc("POST /execute", s.handleExecute)
+	mux.HandleFunc("POST /run-go", s.handleRunGo)
 	mux.HandleFunc("POST /upload", s.handleUpload)
 	mux.HandleFunc("GET /download/", s.handleDownload)
 	mux.HandleFunc("GET /list/", s.handleList)

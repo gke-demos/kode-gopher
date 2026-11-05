@@ -176,10 +176,8 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 	// out so the retry-on-dead-session path below can reuse it against
 	// a fresh session without duplicating logic.
 	runOnce := func(sess *sandbox.Session) (*executor.Outcome, error) {
-		if rErr := sess.Reset(ctx); rErr != nil {
-			return nil, fmt.Errorf("reset sandbox: %w", rErr)
-		}
 		return executor.Run(ctx, sess, executor.Request{
+			Reset:       true,
 			Files:       files,
 			Env:         envs,
 			Credentials: runCreds,

@@ -29,6 +29,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -85,6 +86,13 @@ type Outcome struct {
 
 // Request is the input to Run.
 type Request struct {
+	// Reset, when true, wipes /app (except PreserveDirs) before writing
+	// Files. Passing Reset here lets the single-hop /run-go path fold
+	// reset + file write + build + run + result fetch into one HTTP
+	// request; when /run-go is unsupported on an older sandbox image,
+	// Run falls back to sess.Reset before building.
+	Reset        bool
+	PreserveDirs []string
 	// Files is the file set to materialize under /app before building.
 	// At minimum should include main.go. go.mod / go.sum are optional:
 	// if absent, the executor bootstraps them from the sandbox image's
@@ -191,15 +199,137 @@ const (
 	missingModuleRE = `no required module provides package|missing go\.sum entry|updates to go\.(mod|sum) needed|cannot find module providing package`
 )
 
-// Run drives Build → Run → Fetch on sess. The session is reset to a
-// clean state by the caller (or not — Run is happy to reuse cached
-// build artifacts across invocations).
+type sessionRunner interface {
+	RunGo(ctx context.Context, req sandbox.RunGoRequest) (*sandbox.RunGoResult, error)
+	Reset(ctx context.Context) error
+	Execute(ctx context.Context, req sandbox.Request) (*sandbox.Result, error)
+}
+
+// Run drives Reset (optional) → Build → Run → Fetch on sess, preferring
+// sandbox-server's single-hop POST /run-go endpoint and falling back to
+// multi-hop /execute calls if the sandbox runs an older image.
 func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, error) {
+	return runWithSession(ctx, sess, req)
+}
+
+func runWithSession(ctx context.Context, sess sessionRunner, req Request) (*Outcome, error) {
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = 90 * time.Second
 	}
 
+	if outcome, err := runSingleHop(ctx, sess, req, timeout); !errors.Is(err, sandbox.ErrRunGoUnsupported) {
+		return outcome, err
+	}
+
+	if req.Reset {
+		if err := sess.Reset(ctx); err != nil {
+			return nil, fmt.Errorf("reset sandbox: %w", err)
+		}
+	}
+	return runMultiHop(ctx, sess, req, timeout)
+}
+
+func runSingleHop(ctx context.Context, sess sessionRunner, req Request, timeout time.Duration) (*Outcome, error) {
+	preserve := req.PreserveDirs
+	if req.Reset && len(preserve) == 0 {
+		preserve = []string{sandbox.PersistDir}
+	}
+	res, err := sess.RunGo(ctx, sandbox.RunGoRequest{
+		Reset:          req.Reset,
+		PreserveDirs:   preserve,
+		Files:          req.Files,
+		BuildCommand:   buildCmd,
+		RunCommand:     "./" + binPath,
+		Env:            req.Env,
+		Credentials:    req.Credentials,
+		ResultPath:     resultPath,
+		MaxResultBytes: maxResultBytes + 1024,
+		PhaseTimeout:   timeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res.TimedOut {
+		return nil, fmt.Errorf("execute (%s): %w", res.Phase, context.DeadlineExceeded)
+	}
+
+	buildStdout, tidied, moved := parseBuildStdout(res.BuildStdout)
+	var warnings []string
+	if len(moved) > 0 {
+		warnings = append(warnings, movedWarning(moved))
+	}
+
+	if res.Phase == string(PhaseBuild) {
+		outStdout, _, _ := parseBuildStdout(res.Stdout)
+		if !res.StdoutTruncated {
+			outStdout = buildStdout
+		}
+		return &Outcome{
+			Phase:         PhaseBuild,
+			ExitCode:      res.ExitCode,
+			Stdout:        outStdout,
+			Stderr:        res.Stderr,
+			Duration:      res.BuildDuration,
+			Tidied:        tidied,
+			Warnings:      warnings,
+			BuildDuration: res.BuildDuration,
+		}, nil
+	}
+
+	var attachments []Attachment
+	if res.HasAttachments {
+		var attWarnings []string
+		attachments, attWarnings = fetchSingleHopAttachments(ctx, sess)
+		warnings = append(warnings, attWarnings...)
+	}
+	result, resultErr := parseSingleHopResult(res)
+	if resultErr != "" {
+		warnings = append(warnings, resultErr)
+	}
+	return &Outcome{
+		Phase:         PhaseRun,
+		ExitCode:      res.ExitCode,
+		Stdout:        res.Stdout,
+		Stderr:        res.Stderr,
+		Duration:      res.BuildDuration + res.RunDuration,
+		Result:        result,
+		ResultError:   resultErr,
+		Tidied:        tidied,
+		Warnings:      warnings,
+		Attachments:   attachments,
+		BuildDuration: res.BuildDuration,
+	}, nil
+}
+
+func fetchSingleHopAttachments(ctx context.Context, sess sessionRunner) ([]Attachment, []string) {
+	nonce := rand.Text()
+	fetch, err := sess.Execute(ctx, sandbox.Request{
+		Command: fetchCmd(nonce),
+		Timeout: 30 * time.Second,
+		Raw:     true,
+	})
+	if err != nil {
+		return nil, []string{fmt.Sprintf("couldn't fetch attachments: %v", err)}
+	}
+	if fetch.ExitCode != 0 {
+		return nil, []string{fmt.Sprintf("couldn't fetch attachments: exit %d", fetch.ExitCode)}
+	}
+	_, _, attachments, warnings := parseFetchStdout(fetch.Stdout, nonce)
+	return attachments, warnings
+}
+
+func parseSingleHopResult(res *sandbox.RunGoResult) (*Result, string) {
+	if res.ResultReadErr != "" {
+		return nil, fmt.Sprintf("couldn't fetch the result: %s", res.ResultReadErr)
+	}
+	if res.Result == "" && res.ResultSize > maxResultBytes {
+		return nil, oversizeResultMsg(res.ResultSize)
+	}
+	return parseResult(res.Result)
+}
+
+func runMultiHop(ctx context.Context, sess sessionRunner, req Request, timeout time.Duration) (*Outcome, error) {
 	// Phase 1: build (with tidy only if the lockfile falls short).
 	build, err := sess.Execute(ctx, sandbox.Request{
 		Files:   req.Files,
@@ -216,14 +346,13 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 	}
 	if build.ExitCode != 0 {
 		return &Outcome{
-			Phase:    PhaseBuild,
-			ExitCode: build.ExitCode,
-			Stdout:   stdout,
-			Stderr:   build.Stderr,
-			Duration: build.Duration,
-			Tidied:   tidied,
-			Warnings: warnings,
-
+			Phase:         PhaseBuild,
+			ExitCode:      build.ExitCode,
+			Stdout:        stdout,
+			Stderr:        build.Stderr,
+			Duration:      build.Duration,
+			Tidied:        tidied,
+			Warnings:      warnings,
 			BuildDuration: build.Duration,
 		}, nil
 	}
@@ -266,19 +395,23 @@ func Run(ctx context.Context, sess *sandbox.Session, req Request) (*Outcome, err
 	}
 
 	return &Outcome{
-		Phase:       PhaseRun,
-		ExitCode:    run.ExitCode,
-		Stdout:      run.Stdout,
-		Stderr:      run.Stderr,
-		Duration:    build.Duration + run.Duration,
-		Result:      result,
-		Tidied:      tidied,
-		Warnings:    warnings,
-		Attachments: attachments,
-
+		Phase:         PhaseRun,
+		ExitCode:      run.ExitCode,
+		Stdout:        run.Stdout,
+		Stderr:        run.Stderr,
+		Duration:      build.Duration + run.Duration,
+		Result:        result,
+		Tidied:        tidied,
+		Warnings:      warnings,
+		Attachments:   attachments,
 		ResultError:   resultErr,
 		BuildDuration: build.Duration,
 	}, nil
+}
+
+func oversizeResultMsg(bytesLen int64) string {
+	return fmt.Sprintf("the result is %d KiB, over the %d KiB limit, so it was dropped: return less data (filter, summarize or page through it in the program)",
+		bytesLen>>10, maxResultBytes>>10)
 }
 
 // parseResult decodes result.json's contents. An empty file means no
@@ -290,8 +423,7 @@ func parseResult(body string) (*Result, string) {
 		return nil, ""
 	}
 	if len(body) > maxResultBytes {
-		return nil, fmt.Sprintf("the result is %d KiB, over the %d KiB limit, so it was dropped: return less data (filter, summarize or page through it in the program)",
-			len(body)>>10, maxResultBytes>>10)
+		return nil, oversizeResultMsg(int64(len(body)))
 	}
 	var r Result
 	if err := json.Unmarshal([]byte(body), &r); err != nil {
