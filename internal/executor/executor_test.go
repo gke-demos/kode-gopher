@@ -18,12 +18,19 @@ package executor
 
 import (
 	"archive/zip"
+	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gke-demos/kode-gopher/internal/sandbox"
 )
 
 func TestParseBuildStdout(t *testing.T) {
@@ -194,5 +201,213 @@ func writeProxyModule(t *testing.T, vDir, modPath, ver string) {
 	}
 	if err := zf.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type fakeSession struct {
+	runGoFn   func(context.Context, sandbox.RunGoRequest) (*sandbox.RunGoResult, error)
+	resetFn   func(context.Context) error
+	executeFn func(context.Context, sandbox.Request) (*sandbox.Result, error)
+
+	runGoCalls   int
+	resetCalls   int
+	executeCalls []sandbox.Request
+}
+
+func (f *fakeSession) RunGo(ctx context.Context, req sandbox.RunGoRequest) (*sandbox.RunGoResult, error) {
+	f.runGoCalls++
+	if f.runGoFn == nil {
+		return nil, sandbox.ErrRunGoUnsupported
+	}
+	return f.runGoFn(ctx, req)
+}
+
+func (f *fakeSession) Reset(ctx context.Context) error {
+	f.resetCalls++
+	if f.resetFn != nil {
+		return f.resetFn(ctx)
+	}
+	return nil
+}
+
+func (f *fakeSession) Execute(ctx context.Context, req sandbox.Request) (*sandbox.Result, error) {
+	f.executeCalls = append(f.executeCalls, req)
+	if f.executeFn != nil {
+		return f.executeFn(ctx, req)
+	}
+	return &sandbox.Result{}, nil
+}
+
+func TestRunSingleHopCollapsesResetBuildRunFetch(t *testing.T) {
+	fs := &fakeSession{
+		runGoFn: func(_ context.Context, req sandbox.RunGoRequest) (*sandbox.RunGoResult, error) {
+			if !req.Reset || req.ResultPath != resultPath {
+				t.Fatalf("unexpected RunGoRequest: %+v", req)
+			}
+			if !reflect.DeepEqual(req.PreserveDirs, []string{sandbox.PersistDir}) {
+				t.Fatalf("PreserveDirs = %q, want [%q]", req.PreserveDirs, sandbox.PersistDir)
+			}
+			return &sandbox.RunGoResult{
+				Phase:         "run",
+				ExitCode:      0,
+				Stdout:        "user log\n",
+				BuildStdout:   markerTidy + "\n" + markerMoved + " k8s.io/api v0.34.0 v0.35.0\n",
+				BuildDuration: 400 * time.Millisecond,
+				RunDuration:   50 * time.Millisecond,
+				Result:        `{"kind":"ok","value":"done"}`,
+				ResultSize:    28,
+			}, nil
+		},
+	}
+
+	out, err := runWithSession(context.Background(), fs, Request{
+		Reset: true,
+		Files: map[string][]byte{"main.go": []byte("package main\nfunc main(){}\n")},
+		Env:   map[string]string{"GOOGLE_CLOUD_PROJECT": "p"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.runGoCalls != 1 || fs.resetCalls != 0 || len(fs.executeCalls) != 0 {
+		t.Fatalf("expected 1 RunGo call and 0 Reset/Execute calls, got runGo=%d reset=%d execute=%d",
+			fs.runGoCalls, fs.resetCalls, len(fs.executeCalls))
+	}
+	if out.Phase != PhaseRun || !out.Tidied || out.Result == nil || out.Result.Kind != "ok" {
+		t.Fatalf("unexpected outcome: %+v", out)
+	}
+	if len(out.Warnings) != 1 || !strings.Contains(out.Warnings[0], "k8s.io/api v0.34.0 -> v0.35.0") {
+		t.Fatalf("warnings = %q, want moved module warning", out.Warnings)
+	}
+	if out.Duration != 450*time.Millisecond || out.BuildDuration != 400*time.Millisecond {
+		t.Fatalf("durations: total=%s build=%s", out.Duration, out.BuildDuration)
+	}
+}
+
+func TestRunSingleHopFetchesAttachmentsOnlyWhenSignaled(t *testing.T) {
+	pngBytes := samplePNG(t)
+	fs := &fakeSession{
+		runGoFn: func(_ context.Context, req sandbox.RunGoRequest) (*sandbox.RunGoResult, error) {
+			return &sandbox.RunGoResult{
+				Phase:          "run",
+				ExitCode:       0,
+				Result:         `{"kind":"ok","value":"with-plot"}`,
+				ResultSize:     31,
+				HasAttachments: true,
+			}, nil
+		},
+		executeFn: func(_ context.Context, req sandbox.Request) (*sandbox.Result, error) {
+			if !req.Raw {
+				t.Fatalf("expected Raw=true on attachment fetch")
+			}
+			_, rest, _ := strings.Cut(req.Command, "\nn='")
+			nonce, _, _ := strings.Cut(rest, "'")
+			bname := base64.StdEncoding.EncodeToString([]byte("plot.png"))
+			bdata := base64.StdEncoding.EncodeToString(pngBytes)
+			stdout := "\n::" + nonce + ":attachments::\n" +
+				"::" + nonce + ":file:68:" + bname + "::\n" +
+				bdata + "\n::" + nonce + ":end::\n"
+			return &sandbox.Result{Stdout: stdout}, nil
+		},
+	}
+
+	out, err := runWithSession(context.Background(), fs, Request{Reset: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.runGoCalls != 1 || len(fs.executeCalls) != 1 {
+		t.Fatalf("calls: runGo=%d execute=%d, want 1 and 1", fs.runGoCalls, len(fs.executeCalls))
+	}
+	if out.Result == nil || out.Result.Kind != "ok" {
+		t.Fatalf("Result = %+v, want kind=ok", out.Result)
+	}
+	if len(out.Attachments) != 1 || out.Attachments[0].Name != "plot.png" || !bytes.Equal(out.Attachments[0].Data, pngBytes) {
+		t.Fatalf("Attachments = %+v", out.Attachments)
+	}
+}
+
+func TestRunSingleHopBuildFailOversizeAndTimeout(t *testing.T) {
+	// 1. Build failure strips markers and reports PhaseBuild.
+	fsBuild := &fakeSession{
+		runGoFn: func(context.Context, sandbox.RunGoRequest) (*sandbox.RunGoResult, error) {
+			return &sandbox.RunGoResult{
+				Phase:         "build",
+				ExitCode:      2,
+				Stdout:        markerTidy + "\n",
+				Stderr:        "main.go:3: undefined: x\n",
+				BuildStdout:   markerTidy + "\n",
+				BuildDuration: 200 * time.Millisecond,
+			}, nil
+		},
+	}
+	out, err := runWithSession(context.Background(), fsBuild, Request{Reset: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Phase != PhaseBuild || out.ExitCode != 2 || !out.Tidied || out.Stdout != "" {
+		t.Fatalf("build failure outcome: %+v", out)
+	}
+
+	// 2. Oversize result dropped on server surfaces standard size warning.
+	fsBig := &fakeSession{
+		runGoFn: func(context.Context, sandbox.RunGoRequest) (*sandbox.RunGoResult, error) {
+			return &sandbox.RunGoResult{
+				Phase:      "run",
+				ResultSize: 300 << 10,
+			}, nil
+		},
+	}
+	out, err = runWithSession(context.Background(), fsBig, Request{Reset: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Result != nil || !strings.Contains(out.ResultError, "over the 256 KiB limit") {
+		t.Fatalf("oversize outcome: result=%v err=%q", out.Result, out.ResultError)
+	}
+
+	// 3. Phase timeout surfaces context.DeadlineExceeded.
+	fsTimeout := &fakeSession{
+		runGoFn: func(context.Context, sandbox.RunGoRequest) (*sandbox.RunGoResult, error) {
+			return &sandbox.RunGoResult{Phase: "run", TimedOut: true}, nil
+		},
+	}
+	if _, err := runWithSession(context.Background(), fsTimeout, Request{Reset: true}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout err = %v, want DeadlineExceeded", err)
+	}
+}
+
+func TestRunFallsBackToMultiHopWhenRunGoUnsupported(t *testing.T) {
+	step := 0
+	fs := &fakeSession{
+		runGoFn: func(context.Context, sandbox.RunGoRequest) (*sandbox.RunGoResult, error) {
+			return nil, sandbox.ErrRunGoUnsupported
+		},
+		executeFn: func(_ context.Context, req sandbox.Request) (*sandbox.Result, error) {
+			step++
+			switch step {
+			case 1: // build
+				return &sandbox.Result{Stdout: "", Duration: 100 * time.Millisecond}, nil
+			case 2: // run
+				return &sandbox.Result{Stdout: "fallback\n", Duration: 25 * time.Millisecond}, nil
+			default: // fetch
+				_, rest, _ := strings.Cut(req.Command, "\nn='")
+				nonce, _, _ := strings.Cut(rest, "'")
+				return &sandbox.Result{Stdout: "{\"kind\":\"ok\",\"value\":1}\n::" + nonce + ":attachments::\n"}, nil
+			}
+		},
+	}
+
+	out, err := runWithSession(context.Background(), fs, Request{
+		Reset: true,
+		Files: map[string][]byte{"main.go": []byte("package main\nfunc main(){}\n")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.runGoCalls != 1 || fs.resetCalls != 1 || len(fs.executeCalls) != 3 {
+		t.Fatalf("fallback calls: runGo=%d reset=%d execute=%d, want 1/1/3",
+			fs.runGoCalls, fs.resetCalls, len(fs.executeCalls))
+	}
+	if out.Phase != PhaseRun || out.Stdout != "fallback\n" || out.Result == nil || out.Result.Kind != "ok" || out.ResultError != "" {
+		t.Fatalf("fallback outcome: %+v", out)
 	}
 }

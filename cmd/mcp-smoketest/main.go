@@ -452,6 +452,9 @@ func callExecuteGoCodeSource(ctx context.Context, s *sdk.ClientSession, code str
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode structured content: %w", err)
 	}
+	if res.IsError && out.Phase == "" {
+		return nil, fmt.Errorf("tool error: %s", contentText(res.Content))
+	}
 	return &out, nil
 }
 

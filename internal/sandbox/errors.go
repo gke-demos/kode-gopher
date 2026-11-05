@@ -19,6 +19,8 @@ package sandbox
 import (
 	"errors"
 	"strings"
+
+	sb "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
 // ErrSessionDead is wrapped around Execute errors we've classified as
@@ -42,6 +44,9 @@ func classifySessionErr(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, sb.ErrPortForwardDied) || errors.Is(err, sb.ErrNotReady) {
+		return &sessionDeadError{orig: err}
+	}
 	msg := err.Error()
 	for _, phrase := range deadSessionPhrases {
 		if strings.Contains(msg, phrase) {
@@ -64,6 +69,9 @@ var deadSessionPhrases = []string{
 	// Sandbox claim was deleted out from under us (controller sweep,
 	// operator kubectl delete, warmpool eviction).
 	"sandbox not found",
+	// Port-forward tunnel died between turns or sandbox lost readiness.
+	"port-forward connection lost",
+	"sandbox is not ready",
 	// Port-forward TCP-refused after the pod restarted.
 	"connection refused",
 	// Response-headers HTTP timeout (the PerAttemptTimeout budget

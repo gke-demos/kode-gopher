@@ -32,6 +32,7 @@ func TestClassifySessionErr_KnownDead(t *testing.T) {
 	corpus := []string{
 		`sandbox: run: sandbox[default/sandbox-claim-mq2g6]: run failed: retries exhausted: POST failed after 1 attempts (url=http://127.0.0.1:40411/execute reqID=2f37e33b9754e145): Post "http://127.0.0.1:40411/execute": net/http: timeout awaiting response headers`,
 		`sandbox: run: sandbox not found`,
+		`sandbox: probe router: sandbox[default/sandbox-claim-mq2g6]: sandbox is not ready (reqID=abc): port-forward connection lost: EOF`,
 		`sandbox: run: dial tcp 127.0.0.1:41903: connect: connection refused`,
 		`sandbox: run: retries exhausted: unexpected EOF`,
 		`sandbox: run: read tcp 10.0.0.1:8080->10.0.0.2:9090: read: connection reset by peer`,

@@ -39,6 +39,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -161,13 +162,19 @@ type Result struct {
 
 // Session is an open connection to a sandbox.
 type Session struct {
-	client    *sb.Client
-	box       *sb.Sandbox
-	truncate  TruncateConfig
-	ownClient bool
-	inCluster bool
-	// direct posts credentialed run steps to the sandbox's Service.
+	client     *sb.Client
+	box        *sb.Sandbox
+	truncate   TruncateConfig
+	ownClient  bool
+	inCluster  bool
+	perAttempt time.Duration
+	// direct posts credentialed run steps and single-hop /run-go calls.
 	direct *http.Client
+	// router records the port-forward router URL and headers when
+	// !inCluster so /run-go can traverse sandbox-router in one hop.
+	router *routerCapture
+	// noRunGo latches true once the sandbox returns 404 for /run-go.
+	noRunGo atomic.Bool
 	// lease is nil unless Options.Lease was set.
 	lease *lease
 }
@@ -196,6 +203,7 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 	if perAttempt == 0 {
 		perAttempt = defaultPerAttemptTimeout
 	}
+	router, direct := newSessionHTTP(perAttempt, opts.InCluster)
 	clientOpts := sb.Options{
 		WarmPoolName:      opts.WarmPool,
 		Namespace:         opts.Namespace,
@@ -204,6 +212,9 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		// client read when it opened. A restarted pod gets a new IP, and
 		// the router kept dialing the old one (502, connection refused).
 		DisablePodIPRouting: true,
+	}
+	if router != nil {
+		clientOpts.HTTPTransport = router
 	}
 	if opts.InCluster {
 		clientOpts.Connectivity = sb.ConnectivityInClusterService
@@ -248,12 +259,14 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 	}
 
 	sess := &Session{
-		client:    client,
-		box:       box,
-		truncate:  tc,
-		ownClient: true,
-		inCluster: opts.InCluster,
-		direct:    &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: perAttempt}},
+		client:     client,
+		box:        box,
+		truncate:   tc,
+		ownClient:  true,
+		inCluster:  opts.InCluster,
+		perAttempt: perAttempt,
+		direct:     direct,
+		router:     router,
 	}
 	switch {
 	case opts.Lease > 0:
@@ -348,7 +361,13 @@ func (s *Session) Execute(ctx context.Context, req Request) (*Result, error) {
 	var raw *sb.ExecutionResult
 	var err error
 	if req.Credentials != nil {
-		raw, err = s.runWithCredentials(callCtx, req.Command, req.Credentials)
+		runCtx := callCtx
+		var cancelAttempt context.CancelFunc
+		if s.perAttempt > 0 {
+			runCtx, cancelAttempt = context.WithTimeout(callCtx, s.perAttempt)
+			defer cancelAttempt()
+		}
+		raw, err = s.runWithCredentials(runCtx, req.Command, req.Credentials)
 	} else {
 		raw, err = s.box.Run(callCtx, req.Command, sb.WithTimeout(timeout))
 	}
@@ -400,12 +419,19 @@ func postExecute(ctx context.Context, hc *http.Client, baseURL, command string, 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
+		if ctx.Err() == nil {
+			return nil, fmt.Errorf("%w: %w", sb.ErrRetriesExhausted, err)
+		}
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, &sb.HTTPError{StatusCode: resp.StatusCode, Body: string(body), Operation: "run"}
+		httpErr := &sb.HTTPError{StatusCode: resp.StatusCode, Body: string(body), Operation: "run"}
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+			return nil, fmt.Errorf("%w: %w", sb.ErrRetriesExhausted, httpErr)
+		}
+		return nil, httpErr
 	}
 	result := sb.ExecutionResult{ExitCode: -1}
 	lr := io.LimitedReader{R: resp.Body, N: maxExecuteResponse}
@@ -495,6 +521,7 @@ func (s *Session) Reset(ctx context.Context) error {
 // the claim still expires within one lease.
 func (s *Session) Disconnect(ctx context.Context) error {
 	s.stopLease()
+	defer s.closeHTTP()
 	return s.box.Disconnect(ctx)
 }
 
@@ -504,11 +531,21 @@ func (s *Session) stopLease() {
 	}
 }
 
+func (s *Session) closeHTTP() {
+	if s.direct != nil {
+		s.direct.CloseIdleConnections()
+	}
+	if s.router != nil {
+		s.router.CloseIdleConnections()
+	}
+}
+
 // Close deletes the sandbox claim, tearing down the pod. If this
 // Session owns its agent-sandbox client (i.e., Open created it), the
 // client's owned sandboxes are also cleaned up.
 func (s *Session) Close(ctx context.Context) error {
 	s.stopLease()
+	defer s.closeHTTP()
 	err := s.box.Close(ctx)
 	if s.ownClient {
 		s.client.DeleteAll(ctx)

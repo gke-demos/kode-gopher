@@ -955,3 +955,14 @@ Slice 2 wiped all of `/app` on every `Session.Reset` so one snippet's `main.go`,
 - `internal/normalize` reserves `persist` and `.kode-gopher` in the `files` map so shipped source files remain stateless across turns; snippets read and write `/app/persist` at runtime.
 - `internal/executor`'s `buildCmd` ensures `persist/` exists (covering `kode-gopher exec` without a prior `Reset`) and runs `go mod edit -ignore=persist` (Go 1.25+) before `go mod tidy` so scratch files (including non-building `.go` files) under `/app/persist` are ignored by module tidying while explicit `"kode_gopher_user/persist/..."` imports still build.
 - Multi-tenant and credential isolation are unchanged: each MCP session owns a dedicated sandbox pod (`SandboxClaim` deleted on session close), in-cluster tokens live only in `sandbox-server` memory, and forwarded `.kode-gopher/creds/adc.json` sits outside `/app/persist` and is wiped on every reset.
+
+---
+
+## Code Mode optimizations — single-hop `POST /run-go` on `sandbox-server` — 2026-11-04
+
+Each `execute_go_code` call previously made 4–6 sequential HTTP round-trips (`Reset`, multipart `/upload` or tar upload + `tar -xf`, `buildCmd`, `./.kode-gopher/bin/run`, and `cat .kode-gopher/result.json`), spawning 4–5 shell process groups under gVisor.
+
+### One `POST /run-go` endpoint with automatic `404` fallback
+- `cmd/sandbox-server` adds `POST /run-go`, which resets `/app` (preserving `preserve_dirs`, including `/app/persist`) and writes `files` directly in Go via `*os.Root` (no tar archive or shell spawn), runs `build_command` with no credentials or user env, starts the per-run metadata emulator only for `run_command` (if `build_command` exited 0), and reads `.kode-gopher/result.json` via `O_NONBLOCK` + regular-file check (while reporting `has_attachments` when `.kode-gopher/attachments` exists so normal runs make only one HTTP round-trip).
+- `internal/sandbox.Session.RunGo` calls `POST /run-go` both in-cluster (direct to `ServiceFQDN:8888`) and over local port-forward (through `sandbox-router` with `X-Sandbox-*` headers when `Credentials == nil`; credentials still require `Options.InCluster`).
+- If `POST /run-go` returns `404` or `405` (for example against a cluster running an older sandbox image during a rolling upgrade), `Session` latches `noRunGo` and `executor.Run` falls back transparently to `Reset` + multi-hop `Execute`.
