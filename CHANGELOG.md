@@ -4,12 +4,17 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+Prewarmed `github.com/gke-demos/kode-gopher/sdk/gkeutil` GKE diagnostic helpers (DNS control-plane dialing, Kubernetes object/secret scrubbing, and Drain log template clustering), the `skills/gke-diagnostics` agent skill pack, configurable `OAUTH_SECRET_NAME` in `scripts/deploy-gke-server.sh` for zero-downtime OAuth client rotation with rollback, and `github.com/klauspost/compress` `v1.20.2` in the sandbox prewarm module. Redeploy to pick up the new server and sandbox images; the deploy script refreshes the warm pool automatically. Documentation: https://gke-demos.github.io/kode-gopher/.
+
 ### Security
 
 - **Bump `github.com/klauspost/compress` to `v1.20.2` in the sandbox prewarm module.** Resolves `GO-2026-6865` (panic on two-block frames in `github.com/klauspost/compress`).
 
 ### Added
 
+- **Configurable `OAUTH_SECRET_NAME` in `scripts/deploy-gke-server.sh`.** Sets the Kubernetes Secret name in `codemode` (default `kode-gopher-oauth`) mounted by `--auth=oauth` deployments. When creating a new Secret while `kode-gopher-oauth` already exists, the script seeds `keyring` and `clients.json` from `kode-gopher-oauth` so existing tokens and `client_credentials` clients stay valid while keeping `kode-gopher-oauth` untouched for rollback.
 - **`skills/gke-diagnostics` agent skill pack for GKE incident triage and cloud capacity checks.** Adds progressive-disclosure skill instructions (`skills/gke-diagnostics/SKILL.md` plus `references/workload-bundle.md` and `references/gke-cloud-checks.md`) adapted from [go-steer/k8s-lookout](https://github.com/go-steer/k8s-lookout) and paired with `github.com/gke-demos/kode-gopher/sdk/gkeutil`: untrusted cluster-text prompt-injection guardrails, a triage decision tree, single-round-trip workload + ConfigMap/Secret/EndpointSlice edge + Drain log correlation, and `cloud.google.com/go/logging/logadmin` recipes for `cluster-autoscaler-visibility` (`GCE_STOCKOUT` vs. `GCE_QUOTA_EXCEEDED` vs. `IP_SPACE_EXHAUSTED`), GCE `ZONE_RESOURCE_POOL_EXHAUSTED` operation-start machine-type joins, and secondary Pod CIDR exhaustion math. ([#82](https://github.com/gke-demos/kode-gopher/issues/82))
 - **Prewarmed `github.com/gke-demos/kode-gopher/sdk/gkeutil` helper package.** Snippets now have zero-tidy access (`tidied: false`, plus offline `lookup_package_docs` coverage) to three self-contained GKE diagnostic helpers distilled from [go-steer/k8s-lookout](https://github.com/go-steer/k8s-lookout) without adding external module dependencies: `DialClientset` / `DialRESTConfig` / `RESTConfigFromCluster` (one-call GKE DNS control-plane `client-go` setup with IP+CA fallback), `ScrubPodList` / `ScrubPod` / `ScrubNode` / `ScrubObject` (stripping `managedFields`, applied-configuration snapshots, and `Node.Status.Images` while redacting literal env and Secret values and preserving `secretKeyRef` / `configMapKeyRef` names), and `ClusterLogs` / `NewDrainer` (Drain-style `<*>` log template clustering). ([#81](https://github.com/gke-demos/kode-gopher/issues/81))
 

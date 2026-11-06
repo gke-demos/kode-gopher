@@ -57,6 +57,8 @@
 #                         Static auth only: under oauth every request
 #                         carries its user's or client's own token
 #   oauth only:
+#   OAUTH_SECRET_NAME     Secret for the OAuth client, keyring and clients
+#                         (kode-gopher-oauth)
 #   GOOGLE_CLIENT_FILE    the Google OAuth client JSON (required on first deploy)
 #   CLIENTS_FILE          pre-registered clients JSON (kept from the existing
 #                         Secret if unset, else none); a client with
@@ -81,7 +83,7 @@ while [[ $# -gt 0 ]]; do
     --auth)    AUTH="$2"; shift 2;;
     --auth=*)  AUTH="${1#--auth=}"; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '17,73p' "$0"; exit 0;;
+    -h|--help) sed -n '17,75p' "$0"; exit 0;;
     *)         echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -90,6 +92,7 @@ NS=codemode
 IMAGE="${IMAGE:-ghcr.io/gke-demos/kode-gopher/server:main}"
 ADDRESS_NAME="${ADDRESS_NAME:-kode-gopher-ip}"
 CERT_NAME="${CERT_NAME:-kode-gopher-cert}"
+OAUTH_SECRET_NAME="${OAUTH_SECRET_NAME:-kode-gopher-oauth}"
 CUSTODY="${CUSTODY:-vault}"
 OPEN_REGISTRATION="${OPEN_REGISTRATION:-true}"
 
@@ -171,16 +174,27 @@ elif [[ "$AUTH" == static ]]; then
 else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  if secret_exists kode-gopher-oauth; then
+  if secret_exists "$OAUTH_SECRET_NAME"; then
     # Keep the keyring: replacing it would invalidate every token.
-    k -n "$NS" get secret kode-gopher-oauth -o jsonpath='{.data.keyring}' \
+    k -n "$NS" get secret "$OAUTH_SECRET_NAME" -o jsonpath='{.data.keyring}' \
       | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/keyring"
     if [[ -z "${GOOGLE_CLIENT_FILE:-}" ]]; then
-      k -n "$NS" get secret kode-gopher-oauth -o jsonpath='{.data.google-client\.json}' \
+      k -n "$NS" get secret "$OAUTH_SECRET_NAME" -o jsonpath='{.data.google-client\.json}' \
         | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/google-client.json"
     fi
     # Keep the pre-registered clients too, unless CLIENTS_FILE replaces
     # them: a routine redeploy mustn't drop them.
+    if [[ -z "${CLIENTS_FILE:-}" ]]; then
+      k -n "$NS" get secret "$OAUTH_SECRET_NAME" -o jsonpath='{.data.clients\.json}' \
+        | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/clients.json"
+    fi
+  elif secret_exists kode-gopher-oauth; then
+    # Creating a new Secret while kode-gopher-oauth exists: seed the
+    # keyring and pre-registered clients from kode-gopher-oauth so
+    # existing tokens and client_credentials clients keep working while
+    # leaving kode-gopher-oauth intact for rollback.
+    k -n "$NS" get secret kode-gopher-oauth -o jsonpath='{.data.keyring}' \
+      | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/keyring"
     if [[ -z "${CLIENTS_FILE:-}" ]]; then
       k -n "$NS" get secret kode-gopher-oauth -o jsonpath='{.data.clients\.json}' \
         | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/clients.json"
@@ -197,27 +211,27 @@ else
   elif [[ ! -s "$tmp/clients.json" ]]; then
     echo '[]' > "$tmp/clients.json"
   fi
-  k -n "$NS" create secret generic kode-gopher-oauth \
+  k -n "$NS" create secret generic "$OAUTH_SECRET_NAME" \
     --from-file=google-client.json="$tmp/google-client.json" \
     --from-file=keyring="$tmp/keyring" \
     --from-file=clients.json="$tmp/clients.json" \
     --dry-run=client -o yaml | k apply -f -
-  echo "kode-gopher-oauth applied (Google client redirect URIs must include $ISSUER/callback)"
+  echo "$OAUTH_SECRET_NAME applied (Google client redirect URIs must include $ISSUER/callback)"
 fi
 
 # kode-gopher reads its Secret only at startup: hash it into the pod
 # template, so a changed token, client list or keyring rolls the pod.
 secret=kode-gopher-token
-[[ "$AUTH" == oauth ]] && secret=kode-gopher-oauth
+[[ "$AUTH" == oauth ]] && secret="$OAUTH_SECRET_NAME"
 CONFIG_HASH="$(k -n "$NS" get secret "$secret" -o jsonpath='{.data}' 2>/dev/null | sha256sum | cut -c1-16)"
 
 step "render"
 work="$(mktemp -d)"
 trap 'rm -rf "$work" "${tmp:-}"' EXIT
-python3 - "$work" "$OVERLAY" "$IMAGE" "$AUTH" "$ISSUER" "$PROJECT" "$APISERVER" "$REGION" "$CONFIG_HASH" "$ADDRESS_NAME" "$CERT_NAME" <<'PY'
+python3 - "$work" "$OVERLAY" "$IMAGE" "$AUTH" "$ISSUER" "$PROJECT" "$APISERVER" "$REGION" "$CONFIG_HASH" "$ADDRESS_NAME" "$CERT_NAME" "$OAUTH_SECRET_NAME" <<'PY'
 import json, os, re, sys
 
-work, overlay, image, auth, issuer, project, apiserver, region, config_hash, address_name, cert_name = sys.argv[1:12]
+work, overlay, image, auth, issuer, project, apiserver, region, config_hash, address_name, cert_name, oauth_secret_name = sys.argv[1:13]
 env = os.environ.get
 
 ops = [{"op": "test", "path": "/spec/egress/2/to/0/ipBlock/cidr", "value": "192.0.2.1/32"},
@@ -253,6 +267,8 @@ if auth == "oauth":
 # The pod template has no annotations of its own, so this sets the map.
 ops = [{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": image},
        {"op": "add", "path": "/spec/template/metadata/annotations", "value": {"kode-gopher/config-hash": config_hash}}]
+if auth == "oauth":
+    ops.append({"op": "replace", "path": "/spec/template/spec/volumes/0/secret/secretName", "value": oauth_secret_name})
 if env("SERVICE_ACCOUNT"):
     ops += [{"op": "test", "path": "/spec/template/spec/containers/0/args/5", "value": "--credentials=access-token"},
             {"op": "replace", "path": "/spec/template/spec/containers/0/args/5", "value": "--credentials=service"}]
