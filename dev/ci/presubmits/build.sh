@@ -22,3 +22,6 @@ set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
 go build ./...
+
+toolchain="$(awk '/^toolchain/ {print $2}' go.mod)"
+(cd internal/prewarm/sdk/gkeutil && GOTOOLCHAIN="$toolchain" go build ./...)

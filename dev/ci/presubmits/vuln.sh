@@ -33,8 +33,8 @@ set -euo pipefail
 . "$(dirname "$0")/../../tools/common.sh"
 cd "$(repo_root)"
 
-ensure_tool govulncheck golang.org/x/vuln/cmd/govulncheck@latest
-govulncheck ./...
-
 toolchain="$(awk '/^toolchain/ {print $2}' go.mod)"
+GOTOOLCHAIN="$toolchain" ensure_tool govulncheck golang.org/x/vuln/cmd/govulncheck@latest
+GOTOOLCHAIN="$toolchain" govulncheck ./...
+(cd internal/prewarm/sdk/gkeutil && GOTOOLCHAIN="$toolchain" govulncheck -scan package ./...)
 (cd internal/prewarm && GOTOOLCHAIN="$toolchain" govulncheck -scan package ./...)

@@ -52,6 +52,7 @@ var Packages = []string{
 	"cloud.google.com/go/logging/logadmin",
 	"cloud.google.com/go/monitoring/apiv3/v2",
 	"cloud.google.com/go/trace/apiv1",
+	"github.com/gke-demos/kode-gopher/sdk/gkeutil",
 	"golang.org/x/oauth2/google",
 	"golang.org/x/sync/errgroup",
 	"google.golang.org/api/option",

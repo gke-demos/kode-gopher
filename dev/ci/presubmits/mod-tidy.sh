@@ -41,8 +41,14 @@ if ! cmp -s go.mod "$tmp/go.mod" || ! cmp -s go.sum "$tmp/go.sum"; then
   echo "go.mod / go.sum are not tidy. Run 'go mod tidy' locally and commit the result." >&2
   exit 1
 fi
-# internal/prewarm is its own module (the sandbox image's lockfile).
-if ! (cd internal/prewarm && go mod tidy -diff); then
+# internal/prewarm (and bundled first-party SDK modules under it) are
+# separate modules that feed the sandbox image's lockfile.
+toolchain="$(awk '/^toolchain/ {print $2}' go.mod)"
+if ! (cd internal/prewarm/sdk/gkeutil && GOTOOLCHAIN="$toolchain" go mod tidy -diff); then
+  echo "internal/prewarm/sdk/gkeutil's go.mod / go.sum are not tidy. Run 'go mod tidy' there, then 'make sandbox-pin', and commit the result." >&2
+  exit 1
+fi
+if ! (cd internal/prewarm && GOTOOLCHAIN="$toolchain" go mod tidy -diff); then
   echo "internal/prewarm's go.mod / go.sum are not tidy. Run 'go mod tidy' in internal/prewarm, then 'make sandbox-pin', and commit the result." >&2
   exit 1
 fi

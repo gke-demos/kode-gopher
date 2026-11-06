@@ -4,6 +4,14 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Security
+
+- **Bump `github.com/klauspost/compress` to `v1.20.2` in the sandbox prewarm module.** Resolves `GO-2026-6865` (panic on two-block frames in `github.com/klauspost/compress`).
+
+### Added
+
+- **Prewarmed `github.com/gke-demos/kode-gopher/sdk/gkeutil` helper package.** Snippets now have zero-tidy access (`tidied: false`, plus offline `lookup_package_docs` coverage) to three self-contained GKE diagnostic helpers distilled from [go-steer/k8s-lookout](https://github.com/go-steer/k8s-lookout) without adding external module dependencies: `DialClientset` / `DialRESTConfig` / `RESTConfigFromCluster` (one-call GKE DNS control-plane `client-go` setup with IP+CA fallback), `ScrubPodList` / `ScrubPod` / `ScrubNode` / `ScrubObject` (stripping `managedFields`, applied-configuration snapshots, and `Node.Status.Images` while redacting literal env and Secret values and preserving `secretKeyRef` / `configMapKeyRef` names), and `ClusterLogs` / `NewDrainer` (Drain-style `<*>` log template clustering). ([#81](https://github.com/gke-demos/kode-gopher/issues/81))
+
 ## [0.5.0] - 2026-11-05
 
 Single-hop sandbox execution (`POST /run-go`), batched `lookup_package_docs` across the full prewarmed module graph, cross-call session scratch storage in `/app/persist`, multimodal MCP `ImageContent` attachments, opt-in read-only Google Cloud scope downscoping (`--read-only` / `read_only`), and compact result output. Redeploy to pick up the new server and sandbox images; the deploy script refreshes the warm pool automatically. Documentation: https://gke-demos.github.io/kode-gopher/.

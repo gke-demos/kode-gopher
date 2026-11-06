@@ -38,6 +38,7 @@ import (
 	_ "cloud.google.com/go/secretmanager/apiv1"
 	_ "cloud.google.com/go/storage"
 	_ "cloud.google.com/go/trace/apiv1"
+	_ "github.com/gke-demos/kode-gopher/sdk/gkeutil"
 	_ "golang.org/x/oauth2/google"
 	_ "golang.org/x/sync/errgroup"
 	_ "google.golang.org/api/option"

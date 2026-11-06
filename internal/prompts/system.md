@@ -15,6 +15,7 @@ The sandbox image ships a prewarmed `$GOCACHE` + `$GOMODCACHE` for exactly this 
   cloud.google.com/go/logging/logadmin
   cloud.google.com/go/monitoring/apiv3/v2
   cloud.google.com/go/trace/apiv1
+  github.com/gke-demos/kode-gopher/sdk/gkeutil
   golang.org/x/oauth2/google
   golang.org/x/sync/errgroup
   google.golang.org/api/option
@@ -59,11 +60,11 @@ Environment: `$GOOGLE_CLOUD_PROJECT` may be set; prefer it to hard-coding a proj
 
 ## Kubernetes API access
 
-The sandbox has no Kubernetes service-account token, so `rest.InClusterConfig()` fails, and the cluster's internal addresses (API server, cluster Services) are blocked. Reach every GKE cluster, including the one the sandbox runs in, through Google's API with the snippet's Google credentials: use `container/apiv1` `ListClusters`/`GetCluster` to find the cluster, prefer `c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint` over `c.Endpoint` (the DNS endpoint routes through Google's control plane, works for private-endpoint clusters, uses system-trust TLS), and wrap an `oauth2.Transport` sourced from `google.DefaultTokenSource` as `rest.Config.WrapTransport`. What the snippet may do in the cluster is whatever Kubernetes RBAC grants the credentials' Google identity.
+The sandbox has no Kubernetes service-account token, so `rest.InClusterConfig()` fails, and the cluster's internal addresses (API server, cluster Services) are blocked. Reach every GKE cluster, including the one the sandbox runs in, through Google's API with the snippet's Google credentials: call `gkeutil.DialClientset(ctx, project, location, cluster)` (or `gkeutil.DialRESTConfig`) from `github.com/gke-demos/kode-gopher/sdk/gkeutil`, which resolves the cluster via `container/apiv1`, prefers `c.ControlPlaneEndpointsConfig.DnsEndpointConfig.Endpoint` (with IP+CA fallback when external DNS traffic is disabled), and wraps `google.DefaultTokenSource` as `rest.Config.WrapTransport`. What the snippet may do in the cluster is whatever Kubernetes RBAC grants the credentials' Google identity.
 
 ## Keeping results small
 
-`result.value` (or `/app/.kode-gopher/result.json`) is capped at 256 KiB; anything larger is dropped with a warning. Filter, aggregate, and project API responses inside `run(ctx)` into small structs, maps, or slices carrying only the fields needed to answer the question. Avoid returning raw Google Cloud protobuf structs (such as `*containerpb.Cluster`) or full Kubernetes list objects (`*corev1.PodList`, whose `metadata.managedFields` and `last-applied-configuration` annotations routinely exceed 256 KiB) verbatim.
+`result.value` (or `/app/.kode-gopher/result.json`) is capped at 256 KiB; anything larger is dropped with a warning. Filter, aggregate, and project API responses inside `run(ctx)` into small structs, maps, or slices carrying only the fields needed to answer the question. Avoid returning raw Google Cloud protobuf structs (such as `*containerpb.Cluster`) or full Kubernetes list objects (`*corev1.PodList`, whose `metadata.managedFields` and `last-applied-configuration` annotations routinely exceed 256 KiB) verbatim; for Kubernetes objects and noisy log streams, `gkeutil.ScrubPodList` / `ScrubPod` / `ScrubNode` / `ScrubObject` strip bloat and redact secret values, and `gkeutil.ClusterLogs` clusters logs into Drain `<*>` templates.
 
 ## Failure surfaces and image attachments
 

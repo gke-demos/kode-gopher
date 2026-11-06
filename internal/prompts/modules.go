@@ -34,6 +34,7 @@ var PrewarmModules = []string{
 	"github.com/envoyproxy/protoc-gen-validate",
 	"github.com/felixge/httpsnoop",
 	"github.com/fxamacker/cbor/v2",
+	"github.com/gke-demos/kode-gopher/sdk/gkeutil",
 	"github.com/go-jose/go-jose/v4",
 	"github.com/go-logr/logr",
 	"github.com/go-logr/stdr",
