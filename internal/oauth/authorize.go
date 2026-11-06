@@ -201,6 +201,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// may still need it. It expires with the flow.
 	req := &b.Req
 	fail := func(code, desc string) {
+		s.recordEvent(ctx, "signin", code)
 		redirectError(w, r, req.RedirectURI, req.State, s.cfg.Issuer, &authError{code, desc})
 	}
 	if e := q.Get("error"); e != "" {
@@ -300,8 +301,10 @@ func (s *Server) handleConsentContinue(w http.ResponseWriter, r *http.Request) {
 	s.clearCookie(w, cookieConsent)
 	grant, err := s.cfg.Custody.finish(ctx, s.google, p.User, p.Consent, r.URL.Query(), s.continueURI())
 	if err != nil {
+		code := custodyError(err)
+		s.recordEvent(ctx, "signin", code)
 		log.Printf("oauth: %s consent for %s: %v", s.cfg.Custody.Name(), p.User.Email, err)
-		redirectError(w, r, p.Req.RedirectURI, p.Req.State, s.cfg.Issuer, &authError{custodyError(err), grantFailed})
+		redirectError(w, r, p.Req.RedirectURI, p.Req.State, s.cfg.Issuer, &authError{code, grantFailed})
 		return
 	}
 	s.finishAuthorize(w, r, &p.Req, p.User, grant)
@@ -317,9 +320,11 @@ func (s *Server) finishAuthorize(w http.ResponseWriter, r *http.Request, req *au
 		JTI:      rand.Text(), Exp: time.Now().Add(codeTTL).Unix(),
 	})
 	if err != nil {
+		s.recordEvent(r.Context(), "signin", "server_error")
 		redirectError(w, r, req.RedirectURI, req.State, s.cfg.Issuer, &authError{"server_error", "couldn't issue a code"})
 		return
 	}
+	s.recordEvent(r.Context(), "signin", "ok")
 	log.Printf("oauth: signed in %s (client %s)", u.Email, clientLabel(req))
 	redirectTo(w, r, req.RedirectURI, url.Values{"code": {code}, "state": {req.State}, "iss": {s.cfg.Issuer}})
 }

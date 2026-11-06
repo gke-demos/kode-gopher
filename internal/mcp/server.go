@@ -33,7 +33,9 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/gke-demos/kode-gopher/internal/creds"
+	"github.com/gke-demos/kode-gopher/internal/executor"
 	"github.com/gke-demos/kode-gopher/internal/sandbox"
+	"github.com/gke-demos/kode-gopher/internal/telemetry"
 	"github.com/gke-demos/kode-gopher/internal/version"
 )
 
@@ -84,6 +86,20 @@ type Config struct {
 	// read-only Google Cloud OAuth scopes, failing closed if the active
 	// credential source cannot restrict scopes.
 	ReadOnly bool
+	// CaptureDir, if non-empty, writes JSON debug records of
+	// execute_go_code calls (source files, compiler/runtime stderr,
+	// timings; never credentials or result values) to this directory.
+	CaptureDir string
+	// CaptureMode selects which execute_go_code calls are written when
+	// CaptureDir is set: "failures" (the default: build errors, runtime
+	// errors, timeouts, normalize errors, and go mod tidy runs) or "all".
+	CaptureMode string
+	// CaptureMaxFiles caps the number of capture files retained in
+	// CaptureDir (default 200). Oldest files are pruned first.
+	CaptureMaxFiles int
+	// Metrics, if non-nil, records OpenTelemetry metrics for tool calls
+	// and sandbox sessions.
+	Metrics *telemetry.Recorder
 }
 
 func (c *Config) applyDefaults() {
@@ -103,12 +119,16 @@ func (c *Config) applyDefaults() {
 
 // Server is the kode-gopher MCP server.
 type Server struct {
-	cfg Config
+	cfg      Config
+	capturer *capturer
 
 	// testExec, when set in unit tests, replaces sandbox.Open + Execute
 	// inside lookup_package_docs so the full MCP tool handler and output
 	// schema can be exercised over in-memory transports without a cluster.
 	testExec func(context.Context, sandbox.Request) (*sandbox.Result, error)
+	// testRun, when set in unit tests, replaces ensureSession +
+	// executor.Run inside execute_go_code.
+	testRun func(context.Context, executor.Request) (*executor.Outcome, error)
 
 	// mu guards slots and open.
 	mu    sync.Mutex
@@ -121,13 +141,16 @@ type slot struct {
 	id   string
 	user string // TokenInfo.UserID; "" over stdio
 
-	// mu guards session and reopened. Held briefly during lazy-open
-	// and shutdown.
+	// mu guards session, reopened, and closed. Held briefly during
+	// lazy-open and shutdown.
 	mu      sync.Mutex
 	session *sandbox.Session
 	// reopened: a session was dropped (its sandbox died), so a failed
 	// --claim reattach falls back to a new sandbox.
 	reopened bool
+	// closed: release has run on this slot, so no new sandbox may be
+	// opened on it.
+	closed bool
 
 	// execMu serializes Execute calls so concurrent tool invocations
 	// can't race on /app or clobber each other's build artifacts. The
@@ -139,7 +162,12 @@ type slot struct {
 // New creates a Server with cfg's defaults filled in.
 func New(cfg Config) *Server {
 	cfg.applyDefaults()
-	return &Server{cfg: cfg, slots: map[string]*slot{}, open: map[string]int{}}
+	return &Server{
+		cfg:      cfg,
+		capturer: newCapturer(cfg.CaptureDir, cfg.CaptureMode, cfg.CaptureMaxFiles),
+		slots:    map[string]*slot{},
+		open:     map[string]int{},
+	}
 }
 
 // newSDKServer registers kode-gopher's tools on a go-sdk server.
@@ -228,6 +256,9 @@ func (s *Server) credentialsFor(req *sdk.CallToolRequest) creds.Source {
 func (s *Server) ensureSession(ctx context.Context, sl *slot) (*sandbox.Session, error) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+	if sl.closed {
+		return nil, fmt.Errorf("mcp session is closed")
+	}
 	if sl.session != nil {
 		return sl.session, nil
 	}
@@ -245,6 +276,7 @@ func (s *Server) ensureSession(ctx context.Context, sl *slot) (*sandbox.Session,
 		InCluster:   s.cfg.InCluster,
 		Lease:       s.cfg.Lease,
 	}
+	openStart := time.Now()
 	sess, err := sandbox.Open(openCtx, opts)
 	if err != nil && opts.ClaimName != "" && sl.reopened {
 		// The --claim sandbox died (an expired lease, an eviction) and
@@ -256,8 +288,11 @@ func (s *Server) ensureSession(ctx context.Context, sl *slot) (*sandbox.Session,
 	}
 	if err != nil {
 		s.unreserve(sl.user)
+		s.cfg.Metrics.RecordSandboxOpen(ctx, time.Since(openStart), s.cfg.InCluster, "error")
 		return nil, fmt.Errorf("open sandbox: %w", err)
 	}
+	s.cfg.Metrics.RecordSandboxOpen(ctx, time.Since(openStart), s.cfg.InCluster, "ok")
+	s.cfg.Metrics.AddActiveSessions(ctx, 1)
 	log.Printf("sandbox open: claim=%s", sess.ClaimName())
 	sl.session = sess
 	return sess, nil
@@ -276,6 +311,7 @@ func (s *Server) dropSession(ctx context.Context, sl *slot, sess *sandbox.Sessio
 	_ = sess.Close(ctx)
 	if current {
 		s.unreserve(sl.user)
+		s.cfg.Metrics.AddActiveSessions(ctx, -1)
 	}
 }
 
@@ -312,11 +348,15 @@ func (s *Server) release(ctx context.Context, id string) {
 	sl.mu.Lock()
 	sess := sl.session
 	sl.session = nil
+	sl.closed = true
 	sl.mu.Unlock()
 	if sess == nil {
 		return
 	}
-	defer s.unreserve(sl.user)
+	defer func() {
+		s.unreserve(sl.user)
+		s.cfg.Metrics.AddActiveSessions(ctx, -1)
+	}()
 	var err error
 	if s.cfg.Persistent {
 		log.Printf("disconnecting (claim %s preserved; reattach with --claim=%s)", sess.ClaimName(), sess.ClaimName())

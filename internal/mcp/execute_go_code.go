@@ -115,17 +115,50 @@ func toWireResult(r *executor.Result) *Result {
 func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolRequest, args ExecuteGoCodeArgs) (*sdk.CallToolResult, *ExecuteGoCodeOutput, error) {
 	start := time.Now()
 
-	// Exactly one of code/files must be set.
+	inputFiles, errMsg := prepareInputFiles(args)
+	if errMsg != "" {
+		log.Printf("execute_go_code: failed stage=validate reason=invalid_args (handler total=%s)", time.Since(start).Round(time.Millisecond))
+		s.cfg.Metrics.RecordExec(ctx, time.Since(start), "validate", "error", "unknown", false)
+		return toolError(errMsg), nil, nil
+	}
+
+	norm, err := normalize.Normalize(inputFiles, normalize.Options{
+		ExtraImports: args.ExtraImports,
+	})
+	if err != nil {
+		return s.failExec(ctx, start, "normalize", "unknown", args, inputFiles, err, fmt.Sprintf("normalize: %v", err)), nil, nil
+	}
+	mode := norm.Mode.String()
+	log.Printf("execute_go_code: mode=%s files=%v extra_imports=%d", norm.Mode, fileKeys(norm.Files), len(args.ExtraImports))
+
+	execReq, cErr := s.buildExecRequest(ctx, req, args, norm)
+	if cErr != nil {
+		return s.failExec(ctx, start, "credentials", mode, args, inputFiles, cErr, fmt.Sprintf("credentials: %v", cErr)), nil, nil
+	}
+
+	outcome, stage, err := s.executeRequest(ctx, req, execReq)
+	if err != nil {
+		msg := err.Error()
+		if stage == "execute" {
+			msg = fmt.Sprintf("execute: %v", err)
+		}
+		return s.failExec(ctx, start, stage, mode, args, inputFiles, err, msg), nil, nil
+	}
+
+	res, out := s.finishExec(ctx, start, args, inputFiles, mode, outcome)
+	return res, out, nil
+}
+
+func prepareInputFiles(args ExecuteGoCodeArgs) (map[string][]byte, string) {
 	hasCode := strings.TrimSpace(args.Code) != ""
 	hasFiles := len(args.Files) > 0
 	if hasCode && hasFiles {
-		return toolError("provide either `code` (single-file) or `files` (multi-file), not both"), nil, nil
+		return nil, "provide either `code` (single-file) or `files` (multi-file), not both"
 	}
 	if !hasCode && !hasFiles {
-		return toolError("either `code` or `files` is required"), nil, nil
+		return nil, "either `code` or `files` is required"
 	}
-
-	inputFiles := map[string][]byte{}
+	inputFiles := make(map[string][]byte, max(1, len(args.Files)))
 	if hasCode {
 		inputFiles["main.go"] = []byte(args.Code)
 	} else {
@@ -133,25 +166,20 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 			inputFiles[k] = []byte(v)
 		}
 	}
+	return inputFiles, ""
+}
 
-	norm, err := normalize.Normalize(inputFiles, normalize.Options{
-		ExtraImports: args.ExtraImports,
-	})
-	if err != nil {
-		return toolError(fmt.Sprintf("normalize: %v", err)), nil, nil
-	}
-	log.Printf("execute_go_code: mode=%s files=%v extra_imports=%d", norm.Mode, fileKeys(norm.Files), len(args.ExtraImports))
-
+func (s *Server) buildExecRequest(ctx context.Context, req *sdk.CallToolRequest, args ExecuteGoCodeArgs, norm *normalize.Result) (executor.Request, error) {
 	// Build the full file set: normalize output + forwarded credentials.
 	// go.mod is bootstrapped from the sandbox image's prewarm lockfile
 	// by internal/executor at tidy time — not synthesized here.
-	files := map[string][]byte{}
+	files := make(map[string][]byte, len(norm.Files))
 	for k, v := range norm.Files {
 		files[k] = v
 	}
-	credFiles, envs, tok, cErr := creds.ForRun(ctx, s.credentialsFor(req), s.cfg.ReadOnly || args.ReadOnly)
-	if cErr != nil {
-		return toolError(fmt.Sprintf("credentials: %v", cErr)), nil, nil
+	credFiles, envs, tok, err := creds.ForRun(ctx, s.credentialsFor(req), s.cfg.ReadOnly || args.ReadOnly)
+	if err != nil {
+		return executor.Request{}, err
 	}
 	for k, v := range credFiles {
 		files[k] = v
@@ -160,32 +188,36 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 	if tok != nil {
 		runCreds = sandboxCredentials(*tok)
 	}
+	return executor.Request{
+		Reset:       true,
+		Files:       files,
+		Env:         envs,
+		Credentials: runCreds,
+		Timeout:     s.cfg.ExecTimeout,
+	}, nil
+}
 
-	sl := s.slotFor(req)
-	sess, err := s.ensureSession(ctx, sl)
-	if err != nil {
-		return toolError(err.Error()), nil, nil
+func (s *Server) executeRequest(ctx context.Context, req *sdk.CallToolRequest, execReq executor.Request) (*executor.Outcome, string, error) {
+	if s.testRun != nil {
+		outcome, err := s.testRun(ctx, execReq)
+		return outcome, "execute", err
 	}
-
 	// Serialize tool invocations: one Execute at a time on this
 	// session, even if the SDK is dispatching us concurrently.
+	sl := s.slotFor(req)
 	sl.execMu.Lock()
 	defer sl.execMu.Unlock()
 
-	// runOnce runs Reset + Build/Run/Fetch on the given session. Split
-	// out so the retry-on-dead-session path below can reuse it against
-	// a fresh session without duplicating logic.
-	runOnce := func(sess *sandbox.Session) (*executor.Outcome, error) {
-		return executor.Run(ctx, sess, executor.Request{
-			Reset:       true,
-			Files:       files,
-			Env:         envs,
-			Credentials: runCreds,
-			Timeout:     s.cfg.ExecTimeout,
-		})
+	sess, err := s.ensureSession(ctx, sl)
+	if err != nil {
+		return nil, "open_sandbox", err
 	}
+	outcome, err := s.runWithRetry(ctx, sl, sess, execReq)
+	return outcome, "execute", err
+}
 
-	outcome, err := runOnce(sess)
+func (s *Server) runWithRetry(ctx context.Context, sl *slot, sess *sandbox.Session, execReq executor.Request) (*executor.Outcome, error) {
+	outcome, err := executor.Run(ctx, sess, execReq)
 	if err != nil && errors.Is(err, sandbox.ErrSessionDead) && ctx.Err() == nil {
 		// Session went away (pod evicted, port-forward dropped, ...).
 		// Close what we have, drop it from the MCP session's slot,
@@ -198,22 +230,77 @@ func (s *Server) handleExecuteGoCode(ctx context.Context, req *sdk.CallToolReque
 		s.dropSession(closeCtx, sl, sess)
 		cancelClose()
 		if sess2, e := s.ensureSession(ctx, sl); e == nil {
-			if o2, e2 := runOnce(sess2); e2 == nil {
-				outcome, err = o2, nil
+			if o2, e2 := executor.Run(ctx, sess2, execReq); e2 == nil {
+				return o2, nil
 			} else {
 				log.Printf("execute_go_code: retry also failed: %v", e2)
-				err = origErr
+				return nil, origErr
 			}
 		}
 	}
-	if err != nil {
-		return toolError(fmt.Sprintf("execute: %v", err)), nil, nil
-	}
+	return outcome, err
+}
 
-	res, out := outcomeToToolResult(outcome, norm.Mode.String())
-	log.Printf("execute_go_code: done phase=%s exit=%d tidied=%v attachments=%d duration=%s (handler total=%s)",
-		out.Phase, out.ExitCode, out.Tidied, len(out.Attachments), outcome.Duration.Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
-	return res, out, nil
+func (s *Server) failExec(ctx context.Context, start time.Time, stage, mode string, args ExecuteGoCodeArgs, inputFiles map[string][]byte, err error, toolMsg string) *sdk.CallToolResult {
+	elapsed := time.Since(start)
+	reason := classifyExecErr(ctx, err)
+	log.Printf("execute_go_code: failed stage=%s mode=%s reason=%s (handler total=%s)",
+		stage, mode, reason, elapsed.Round(time.Millisecond))
+	s.capturer.recordFailure(stage, mode, reason, elapsed, inputFiles, args.ExtraImports, err)
+	s.cfg.Metrics.RecordExec(ctx, elapsed, stage, classifyFailureStatus(stage, reason), mode, false)
+	return toolError(toolMsg)
+}
+
+func (s *Server) finishExec(ctx context.Context, start time.Time, args ExecuteGoCodeArgs, inputFiles map[string][]byte, mode string, outcome *executor.Outcome) (*sdk.CallToolResult, *ExecuteGoCodeOutput) {
+	elapsed := time.Since(start)
+	res, out := outcomeToToolResult(outcome, mode)
+	resultKind := sanitizeResultKind(out.Result)
+	log.Printf("execute_go_code: done phase=%s exit=%d result=%s tidied=%v build=%s attachments=%d duration=%s (handler total=%s)",
+		out.Phase, out.ExitCode, resultKind, out.Tidied,
+		outcome.BuildDuration.Round(time.Millisecond),
+		len(out.Attachments),
+		outcome.Duration.Round(time.Millisecond),
+		elapsed.Round(time.Millisecond))
+	s.capturer.recordOutcome(inputFiles, args.ExtraImports, out)
+
+	execStatus := "ok"
+	buildStatus := "ok"
+	if out.Phase == "build" {
+		execStatus = "build_error"
+		buildStatus = "error"
+	} else if res.IsError {
+		execStatus = "run_error"
+	}
+	s.cfg.Metrics.RecordBuild(ctx, outcome.BuildDuration, buildStatus, out.Tidied)
+	s.cfg.Metrics.RecordExec(ctx, elapsed, out.Phase, execStatus, mode, out.Tidied)
+	return res, out
+}
+
+func sanitizeResultKind(r *Result) string {
+	if r == nil || r.Kind == "" {
+		return "none"
+	}
+	switch r.Kind {
+	case "ok", "error", "panic", "marshal_error":
+		return r.Kind
+	default:
+		return "custom"
+	}
+}
+
+func classifyExecErr(ctx context.Context, err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled), errors.Is(ctx.Err(), context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, sandbox.ErrSessionDead):
+		return "session_dead"
+	case err != nil && (strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "Client.Timeout exceeded")):
+		return "deadline_exceeded"
+	default:
+		return "error"
+	}
 }
 
 func outcomeToToolResult(outcome *executor.Outcome, mode string) (*sdk.CallToolResult, *ExecuteGoCodeOutput) {

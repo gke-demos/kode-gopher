@@ -71,6 +71,10 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
     	http, static auth: file holding the bearer token clients must send
   -auth-user string
     	http, static auth: the user the static token authenticates as (default "operator")
+  -capture-dir string
+    	directory to write JSON debug records of execute_go_code calls (source files, compiler/runtime stderr, timings; never credentials or result values)
+  -capture-mode string
+    	which execute_go_code calls to write when --capture-dir is set: failures (default: build/run/normalize errors, timeouts, and go mod tidy runs) or all
   -claim string
     	reattach to an existing sandbox claim instead of creating a new one on first tool call
   -claim-lease duration
@@ -109,6 +113,8 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
     	oauth, vault custody: projects/<p>/locations/<l>/authProviders/<name>
   -open-timeout duration
     	max time spent opening the sandbox on first tool call (default 5m0s)
+  -otel-endpoint string
+    	OpenTelemetry OTLP gRPC collector endpoint (e.g. localhost:4317, http://otel-collector:4317, or https://telemetry.googleapis.com; also read from OTEL_EXPORTER_OTLP_ENDPOINT)
   -persistent
     	on shutdown, Disconnect from the sandbox (preserve for reattach) instead of Close (delete it)
   -project string

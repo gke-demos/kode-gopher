@@ -4,6 +4,11 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **Failure logging and opt-in debug code capture (`--capture-dir` / `--capture-mode`) for `execute_go_code`.** `kode-gopher serve` now logs a completion line on every `execute_go_code` exit path — including `normalize`, `credentials`, `open_sandbox`, and `execute` timeouts/cancellations — and reports `build` duration and `result` kind (`ok`, `error`, `panic`, `marshal_error`, `none`) on completed calls. Setting `--capture-dir=<path>` (or `CAPTURE_DIR` in `scripts/deploy-gke-server.sh`) with `--capture-mode=failures|all` (default `failures`) writes a bounded ring buffer of JSON debug records containing the caller's Go source files, `extra_imports`, `phase`, `exit_code`, `tidied`, `build_ms`, `duration_ms`, `stderr`, `stdout`, `warnings`, and `result.kind`/`result.message` while omitting credential files, environment variables, access tokens, and `result.value`. ([#87](https://github.com/gke-demos/kode-gopher/issues/87))
+- **OpenTelemetry metric export (`--otel-endpoint` / `OTEL_ENDPOINT`).** `kode-gopher serve` now exports OpenTelemetry metrics (`kode_gopher.exec.duration`, `kode_gopher.exec.build.duration`, `kode_gopher.lookup.duration`, `kode_gopher.sandbox.open.duration`, `kode_gopher.sessions.active`, and `kode_gopher.oauth.events`) over OTLP gRPC when `--otel-endpoint` or `OTEL_EXPORTER_OTLP_ENDPOINT` is configured, including direct ingestion to Google Cloud Monitoring (`https://telemetry.googleapis.com`) using Application Default Credentials / GKE Workload Identity (`roles/monitoring.metricWriter`). ([#88](https://github.com/gke-demos/kode-gopher/issues/88))
+
 ## [0.6.0] - 2026-11-06
 
 Prewarmed `github.com/gke-demos/kode-gopher/sdk/gkeutil` GKE diagnostic helpers (DNS control-plane dialing, Kubernetes object/secret scrubbing, and Drain log template clustering), the `skills/gke-diagnostics` agent skill pack, configurable `OAUTH_SECRET_NAME` in `scripts/deploy-gke-server.sh` for zero-downtime OAuth client rotation with rollback, and `github.com/klauspost/compress` `v1.20.2` in the sandbox prewarm module. Redeploy to pick up the new server and sandbox images; the deploy script refreshes the warm pool automatically. Documentation: https://gke-demos.github.io/kode-gopher/.

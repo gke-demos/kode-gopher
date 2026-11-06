@@ -56,6 +56,11 @@
 #                         roles/iam.serviceAccountTokenCreator on it.
 #                         Static auth only: under oauth every request
 #                         carries its user's or client's own token
+#   CAPTURE_DIR           directory to write JSON debug records of
+#                         execute_go_code calls (e.g. /tmp/kode-gopher-captures)
+#   CAPTURE_MODE          failures (default when CAPTURE_DIR is set) or all
+#   OTEL_ENDPOINT         OpenTelemetry OTLP gRPC collector endpoint
+#                         (e.g. https://telemetry.googleapis.com)
 #   oauth only:
 #   OAUTH_SECRET_NAME     Secret for the OAuth client, keyring and clients
 #                         (kode-gopher-oauth)
@@ -83,7 +88,7 @@ while [[ $# -gt 0 ]]; do
     --auth)    AUTH="$2"; shift 2;;
     --auth=*)  AUTH="${1#--auth=}"; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '17,75p' "$0"; exit 0;;
+    -h|--help) sed -n '17,80p' "$0"; exit 0;;
     *)         echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -264,6 +269,12 @@ if auth == "oauth":
                       ("--oauth-vault-auth-provider", "VAULT_AUTH_PROVIDER")]:
         if env(var):
             args.append(flag + "=" + env(var))
+elif env("OTEL_ENDPOINT"):
+    args.append("--project=" + project)
+for flag, var in [("--capture-dir", "CAPTURE_DIR"), ("--capture-mode", "CAPTURE_MODE"),
+                  ("--otel-endpoint", "OTEL_ENDPOINT")]:
+    if env(var):
+        args.append(flag + "=" + env(var))
 # The pod template has no annotations of its own, so this sets the map.
 ops = [{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": image},
        {"op": "add", "path": "/spec/template/metadata/annotations", "value": {"kode-gopher/config-hash": config_hash}}]
