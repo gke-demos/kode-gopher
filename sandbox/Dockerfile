@@ -68,11 +68,17 @@ ENV PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
     CGO_ENABLED=0 \
     GOFLAGS=-buildvcs=false
 
-# Drop the prewarm sources owned by the sandbox user, then switch to
-# USER 1000 so the actual `go build` writes its caches to
-# /home/sandbox/{.cache/go-build,go/pkg/mod} — the same paths the
-# runtime sandbox reads from at exec time.
+# Drop the prewarm sources owned by the sandbox user. Preserve any
+# bundled first-party SDK modules at /opt/kode-gopher-base/sdk BEFORE
+# running `go build` so prewarm compiles them from the exact filesystem
+# path that snippet builds inherit via /opt/kode-gopher-base/go.mod
+# (local `replace` paths feed Go's $GOCACHE action IDs).
 COPY --chown=1000:1000 internal/prewarm /tmp/prewarm
+RUN mkdir -p /opt/kode-gopher-base \
+ && chmod 0755 /opt/kode-gopher-base \
+ && cp -r /tmp/prewarm/sdk /opt/kode-gopher-base/sdk \
+ && sed -i 's|=> ./sdk/|=> /opt/kode-gopher-base/sdk/|g' /tmp/prewarm/go.mod \
+ && chmod -R a+rX,u-w,g-w,o-w /opt/kode-gopher-base/sdk
 USER 1000
 
 # The committed go.mod + go.sum in internal/prewarm/ lock the exact
@@ -107,8 +113,7 @@ RUN cd /tmp/prewarm \
 # empty go.mod resolves DIFFERENT versions from proxy, invalidating
 # the compile cache; see docs/decisions.md.
 USER root
-RUN mkdir -p /opt/kode-gopher-base \
- && cp /tmp/prewarm/go.mod /opt/kode-gopher-base/go.mod \
+RUN cp /tmp/prewarm/go.mod /opt/kode-gopher-base/go.mod \
  && cp /tmp/prewarm/go.sum /opt/kode-gopher-base/go.sum \
  && chmod 0444 /opt/kode-gopher-base/go.mod /opt/kode-gopher-base/go.sum \
  && rm -rf /tmp/prewarm

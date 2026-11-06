@@ -15,6 +15,7 @@ require (
 	cloud.google.com/go/secretmanager v1.20.0
 	cloud.google.com/go/storage v1.63.0
 	cloud.google.com/go/trace v1.16.0
+	github.com/gke-demos/kode-gopher/sdk/gkeutil v0.0.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.23.0
 	google.golang.org/api v0.287.0
@@ -59,7 +60,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.22.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.16.7 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.5 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
@@ -109,3 +110,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/gke-demos/kode-gopher/sdk/gkeutil => ./sdk/gkeutil

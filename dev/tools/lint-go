@@ -19,12 +19,48 @@
 
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
-cd "$(repo_root)"
+root="$(repo_root)"
+cd "$root"
 
 # Keep in sync with the cache key in .github/workflows/ci.yml.
 GOLANGCI_LINT_VERSION="v2.12.1"
 ensure_tool golangci-lint "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
 
-exec golangci-lint run \
-  --config=dev/tools/.golangci.yml \
+toolchain="$(awk '/^toolchain/ {print $2}' "$root/go.mod")"
+
+GOTOOLCHAIN="$toolchain" golangci-lint run \
+  --config="$root/dev/tools/.golangci.yml" \
   "$@"
+
+has_paths=0
+skip_next=0
+after_ddash=0
+for arg in "$@"; do
+  if ((after_ddash)); then
+    has_paths=1
+    break
+  fi
+  if ((skip_next)); then
+    skip_next=0
+    continue
+  fi
+  case "$arg" in
+    --)
+      after_ddash=1
+      ;;
+    -c|--config|-E|--enable|-D|--disable|--enable-only|-p|--presets|-j|--concurrency|--timeout|--issues-exit-code|--max-issues-per-linter|--max-same-issues|--new-from-rev|--new-from-patch|--new-from-merge-base|--path-prefix|--path-mode|--build-tags|--go|--out-format|--cpu-profile-path|--mem-profile-path|--trace-path)
+      skip_next=1
+      ;;
+    -*)
+      ;;
+    *)
+      has_paths=1
+      break
+      ;;
+  esac
+done
+if [[ "$has_paths" -eq 0 ]]; then
+  (cd "$root/internal/prewarm/sdk/gkeutil" && GOTOOLCHAIN="$toolchain" golangci-lint run \
+    --config="$root/dev/tools/.golangci.yml" \
+    "$@")
+fi

@@ -112,6 +112,7 @@ func runOffline(ctx context.Context, session *sdk.ClientSession, namespace strin
 
 	checkLargeResults(ctx, session)
 	checkPersistDir(ctx, session)
+	checkGKEUtil(ctx, session)
 
 	fmt.Println("\n========== gcp_auth_status ==========")
 	auth := callAuthStatus(ctx, session)
@@ -158,6 +159,7 @@ func checkBatchPackageDocs(ctx context.Context, session *sdk.ClientSession) {
 			"queries": []map[string]any{
 				{"package": "k8s.io/api/core/v1", "symbol": "PodSpec"},
 				{"package": "cloud.google.com/go/civil", "symbol": "Date"},
+				{"package": "github.com/gke-demos/kode-gopher/sdk/gkeutil", "symbol": "ScrubPodList"},
 				{"package": "k8s.io/api/core/v1", "symbol": "NoSuchSymbol"},
 			},
 		},
@@ -177,13 +179,42 @@ func checkBatchPackageDocs(ctx context.Context, session *sdk.ClientSession) {
 	if raw, e := json.Marshal(res.StructuredContent); e == nil {
 		_ = json.Unmarshal(raw, &out)
 	}
-	if len(out.Results) != 3 ||
+	if len(out.Results) != 4 ||
 		!strings.Contains(out.Results[0].Docs, "type PodSpec struct") ||
 		!strings.Contains(out.Results[1].Docs, "type Date struct") ||
-		out.Results[2].Error == "" {
+		!strings.Contains(out.Results[2].Docs, "func ScrubPodList") ||
+		out.Results[3].Error == "" {
 		fatalf("[docs-batch] unexpected batch results: %+v", out.Results)
 	}
-	fmt.Println("  batch: PodSpec + civil.Date ok, missing symbol isolated")
+	fmt.Println("  batch: PodSpec + civil.Date + gkeutil.ScrubPodList ok, missing symbol isolated")
+}
+
+// checkGKEUtil verifies the bundled first-party sdk/gkeutil module builds
+// from the prewarmed cache without running `go mod tidy`.
+func checkGKEUtil(ctx context.Context, session *sdk.ClientSession) {
+	fmt.Println("\n========== sdk/gkeutil prewarmed helper ==========")
+	code := `package snippet
+
+import (
+	"context"
+	"github.com/gke-demos/kode-gopher/sdk/gkeutil"
+)
+
+func run(_ context.Context) (any, error) {
+	return gkeutil.ClusterLogs([]string{
+		"level=error host=10.0.0.1 wait=120ms",
+		"level=error host=10.0.0.2 wait=250ms",
+	}, 5), nil
+}
+`
+	out, err := callExecuteGoCodeSource(ctx, session, code)
+	if err != nil {
+		fatalf("[gkeutil] call: %v", err)
+	}
+	if out.Phase != "run" || out.ExitCode != 0 || out.Tidied || out.Result == nil || out.Result.Kind != "ok" {
+		fatalf("[gkeutil] want phase=run exit=0 tidied=false kind=ok; got %+v stderr:\n%s", out, out.Stderr)
+	}
+	fmt.Printf("  phase=run tidied=false result=%s\n", string(out.Result.Value))
 }
 
 // checkClaimLeases: while the session holds a sandbox, every claim in
