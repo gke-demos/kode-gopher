@@ -39,6 +39,16 @@ The server offers three [tools](/reference/tools/): `execute_go_code`, `gcp_auth
 
 Ask it to call `gcp_auth_status` to see who snippets run as (and whether `--read-only` is active). When the model needs exact field or method signatures, `lookup_package_docs` can inspect up to 10 symbols across any module in the sandbox's prewarmed lockfile in a single call.
 
+## Optional agent skills (`skills/gke-diagnostics`)
+
+For GKE and Kubernetes incident response (`CrashLoopBackOff`, `Pending` pods, `GCE_STOCKOUT` vs. quota vs. secondary Pod CIDR exhaustion, and noisy log streams), the repository includes an on-demand skill pack under [`skills/gke-diagnostics/`](https://github.com/gke-demos/kode-gopher/tree/main/skills/gke-diagnostics):
+
+- **`SKILL.md`:** untrusted-cluster-text safety guardrails, a triage decision tree, and a quickstart snippet using the prewarmed `github.com/gke-demos/kode-gopher/sdk/gkeutil` helpers (`DialClientset`, `ScrubPodList`, `NewDrainer`; see [Precompiled packages](/reference/packages/)).
+- **`references/workload-bundle.md`:** correlates Deployment rollout health, abnormal pods, missing `ConfigMapKeyRef`/`SecretKeyRef` keys (without exposing secret bytes), `EndpointSlice` readiness, and multi-pod Drain log templates in a single `execute_go_code` call.
+- **`references/gke-cloud-checks.md`:** queries GKE's `cluster-autoscaler-visibility` structured logs and joins GCE `ZONE_RESOURCE_POOL_EXHAUSTED` audit records to machine types via `cloud.google.com/go/logging/logadmin`.
+
+Copy or symlink `skills/gke-diagnostics` into your agent's skills directory (for example `~/.claude/skills/gke-diagnostics` or `~/.gemini/skills/gke-diagnostics`) so it loads only when investigating a GKE or Kubernetes issue.
+
 ## Credentials
 
 In this mode kode-gopher copies your ADC file (`~/.config/gcloud/application_default_credentials.json`) and `GOOGLE_CLOUD_PROJECT` into the sandbox for each run. **Snippets can do anything your account can do.** Treat the model's code as running as you, because it is.
