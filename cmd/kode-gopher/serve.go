@@ -29,6 +29,7 @@ import (
 
 	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/mcp"
+	"github.com/gke-demos/kode-gopher/internal/telemetry"
 )
 
 // runServe is `kode-gopher serve`: starts the MCP server on stdio,
@@ -53,6 +54,7 @@ func runServe(args []string) int {
 	lease := fs.Duration("claim-lease", 10*time.Minute, "sandbox claims expire this long after the last renewal, so a crashed or killed server's sandboxes go away; 0 = never (--persistent turns it off)")
 	maxPerUser := fs.Int("max-sandboxes-per-user", 2, "http: open sandboxes (MCP sessions with a sandbox) allowed per user; 0 = no cap")
 	credCfg := addCredFlags(fs)
+	obsCfg := addObsFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: kode-gopher serve [flags]\n\nMCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_status and lookup_package_docs.\n\n")
 		fs.PrintDefaults()
@@ -73,8 +75,18 @@ func runServe(args []string) int {
 		log.Printf("mcp serve: %v", err)
 		return 2
 	}
+	metrics, shutdownMetrics, err := obsCfg.setup(ctx, *oauthCfg.project)
+	if err != nil {
+		log.Printf("mcp serve: %v", err)
+		return 2
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = shutdownMetrics(shutCtx)
+	}()
 	if *transport == "http" {
-		if err := httpAuth(ctx, &httpOpts, *authMode, *tokenFile, *authUser, *inCluster, *credCfg.readOnly, oauthCfg); err != nil {
+		if err := httpAuth(ctx, &httpOpts, *authMode, *tokenFile, *authUser, *inCluster, *credCfg.readOnly, oauthCfg, metrics); err != nil {
 			log.Printf("mcp serve: %v", err)
 			return 2
 		}
@@ -97,6 +109,9 @@ func runServe(args []string) int {
 		InCluster:   *inCluster,
 		Lease:       *lease,
 		ReadOnly:    *credCfg.readOnly,
+		CaptureDir:  *obsCfg.captureDir,
+		CaptureMode: *obsCfg.captureMode,
+		Metrics:     metrics,
 
 		MaxSandboxesPerUser: *maxPerUser,
 	})
@@ -145,7 +160,7 @@ func serveCreds(ctx context.Context, transport, authMode string, inCluster bool,
 // httpAuth fills in how HTTP requests are authenticated. Under OAuth
 // each request carries the user's own credentials, which override
 // --credentials.
-func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user string, inCluster, readOnly bool, of *oauthFlags) error {
+func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user string, inCluster, readOnly bool, of *oauthFlags, metrics *telemetry.Recorder) error {
 	switch mode {
 	case "static":
 		token, err := readToken(tokenFile)
@@ -159,7 +174,7 @@ func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user 
 			// metadata emulator, reached by its in-cluster Service.
 			return fmt.Errorf("--auth=oauth needs --in-cluster")
 		}
-		as, err := of.server(ctx, readOnly)
+		as, err := of.server(ctx, readOnly, metrics)
 		if err != nil {
 			return err
 		}
@@ -169,6 +184,30 @@ func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user 
 		return fmt.Errorf("--auth must be static or oauth, got %q", mode)
 	}
 	return nil
+}
+
+type obsFlags struct {
+	captureDir   *string
+	captureMode  *string
+	otelEndpoint *string
+}
+
+func addObsFlags(fs *flag.FlagSet) *obsFlags {
+	return &obsFlags{
+		captureDir:   fs.String("capture-dir", "", "directory to write JSON debug records of execute_go_code calls (source files, compiler/runtime stderr, timings; never credentials or result values)"),
+		captureMode:  fs.String("capture-mode", "", "which execute_go_code calls to write when --capture-dir is set: failures (default: build/run/normalize errors, timeouts, and go mod tidy runs) or all"),
+		otelEndpoint: fs.String("otel-endpoint", "", "OpenTelemetry OTLP gRPC collector endpoint (e.g. localhost:4317, http://otel-collector:4317, or https://telemetry.googleapis.com; also read from OTEL_EXPORTER_OTLP_ENDPOINT)"),
+	}
+}
+
+func (f *obsFlags) setup(ctx context.Context, project string) (*telemetry.Recorder, func(context.Context) error, error) {
+	if err := mcp.ValidateCaptureConfig(*f.captureDir, *f.captureMode); err != nil {
+		return nil, nil, err
+	}
+	return telemetry.Setup(ctx, telemetry.Config{
+		Endpoint: *f.otelEndpoint,
+		Project:  project,
+	})
 }
 
 // readToken reads the static bearer token from path. Never logged.

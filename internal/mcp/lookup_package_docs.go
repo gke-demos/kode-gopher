@@ -82,7 +82,12 @@ type LookupPackageDocsOutput struct {
 var symbolPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 
 func (s *Server) handleLookupPackageDocs(ctx context.Context, req *sdk.CallToolRequest, args LookupPackageDocsArgs) (*sdk.CallToolResult, *LookupPackageDocsOutput, error) {
+	start := time.Now()
 	queries, batch, errMsg := resolveDocQueries(args)
+	status := "error"
+	defer func() {
+		s.cfg.Metrics.RecordLookup(ctx, time.Since(start), batch, status)
+	}()
 	if errMsg != "" {
 		return toolError(errMsg), nil, nil
 	}
@@ -107,6 +112,9 @@ func (s *Server) handleLookupPackageDocs(ctx context.Context, req *sdk.CallToolR
 	out, isErr, err := buildDocOutput(queries, batch, res.Stdout, token)
 	if err != nil {
 		return toolError(fmt.Sprintf("go doc: %v", err)), nil, nil
+	}
+	if !isErr {
+		status = "ok"
 	}
 	return &sdk.CallToolResult{
 		Content: []sdk.Content{&sdk.TextContent{Text: out.Docs}},

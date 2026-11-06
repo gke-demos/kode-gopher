@@ -31,6 +31,7 @@ import (
 
 	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/oauth"
+	"github.com/gke-demos/kode-gopher/internal/telemetry"
 )
 
 // oauthFlags are serve's --auth=oauth settings: one deployment's
@@ -72,7 +73,7 @@ var authProviderRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authPro
 // server builds the authorization server. Calls to the vault, Cloud
 // Identity and (for client-credentials clients) the IAM Credentials API
 // use kode-gopher's own ADC (Workload Identity in a pod).
-func (f *oauthFlags) server(ctx context.Context, readOnly bool) (*oauth.Server, error) {
+func (f *oauthFlags) server(ctx context.Context, readOnly bool, metrics *telemetry.Recorder) (*oauth.Server, error) {
 	if *f.issuer == "" || *f.googleClient == "" || *f.keyring == "" {
 		return nil, fmt.Errorf("--auth=oauth needs --oauth-issuer, --oauth-google-client-file and --oauth-keyring-file")
 	}
@@ -135,6 +136,7 @@ func (f *oauthFlags) server(ctx context.Context, readOnly bool) (*oauth.Server, 
 		Project:          *f.project,
 		QuotaProject:     *f.quotaProject,
 		ReadOnly:         readOnly,
+		OnEvent:          metrics.RecordOAuthEvent,
 	})
 }
 

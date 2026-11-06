@@ -23,6 +23,9 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 | `CERT_NAME` | `kode-gopher-cert` | Name of the Google-managed SSL certificate in the project. Set a distinct name when running more than one deployment in the same project. |
 | `EGRESS_ALLOW` | none | Extra hosts sandboxes may reach on port 443, comma-separated: `api.example.com,*.example.org`. A `*.` pattern matches one label. Always allowed: `*.googleapis.com`, `proxy.golang.org`, `sum.golang.org` and `*.<cluster-region>.gke.goog`. |
 | `KG_HOST` | `<ip-with-dashes>.sslip.io` | Public hostname. For your own domain, point a DNS A record at the IP; see [Operations](/deploy/operations/#your-own-domain). |
+| `CAPTURE_DIR` | none | Directory inside the server container (such as `/tmp/kode-gopher-captures` on the `emptyDir` volume) where JSON debug records of `execute_go_code` calls are written (source files, compiler/runtime stderr, timings; never credentials or result values). |
+| `CAPTURE_MODE` | `failures` (when `CAPTURE_DIR` is set) | Which `execute_go_code` calls to capture when `CAPTURE_DIR` is set: `failures` (build errors, runtime errors, timeouts, normalize errors, and `go mod tidy` runs) or `all`. |
+| `OTEL_ENDPOINT` | none | OpenTelemetry OTLP gRPC collector endpoint (`--otel-endpoint`), such as `https://telemetry.googleapis.com` for Google Cloud Monitoring (the `kode-gopher` service account needs `roles/monitoring.metricWriter` on `PROJECT`). |
 
 ## Static token only
 

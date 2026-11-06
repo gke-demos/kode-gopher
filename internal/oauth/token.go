@@ -116,19 +116,23 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, &tokenError{Code: "invalid_request", Desc: "malformed form body"})
 		return
 	}
+	grantType := r.PostForm.Get("grant_type")
 	c, terr := s.authenticateClient(r)
 	if terr != nil {
+		s.recordTokenEvent(ctx, grantType, terr)
 		writeTokenError(w, terr)
 		return
 	}
 	if len(r.PostForm["resource"]) > 1 {
 		// Each grant checks the first; refuse a second rather than
 		// leave it checked by no one (RFC 8707).
-		writeTokenError(w, &tokenError{Code: "invalid_target", Desc: "one resource only"})
+		terr = &tokenError{Code: "invalid_target", Desc: "one resource only"}
+		s.recordTokenEvent(ctx, grantType, terr)
+		writeTokenError(w, terr)
 		return
 	}
 	var resp map[string]any
-	switch r.PostForm.Get("grant_type") {
+	switch grantType {
 	case "authorization_code":
 		resp, terr = s.exchangeCode(r, c)
 	case "refresh_token":
@@ -138,11 +142,29 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	default:
 		terr = &tokenError{Code: "unsupported_grant_type", Desc: "authorization_code, refresh_token and client_credentials only"}
 	}
+	s.recordTokenEvent(ctx, grantType, terr)
 	if terr != nil {
 		writeTokenError(w, terr)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) recordTokenEvent(ctx context.Context, grantType string, terr *tokenError) {
+	event := "token_other"
+	switch grantType {
+	case "authorization_code":
+		event = "token_exchange"
+	case "refresh_token":
+		event = "refresh"
+	case "client_credentials":
+		event = "client_credentials"
+	}
+	status := "ok"
+	if terr != nil {
+		status = terr.Code
+	}
+	s.recordEvent(ctx, event, status)
 }
 
 // authenticateClient resolves the client and, for a confidential one,

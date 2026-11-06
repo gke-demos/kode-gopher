@@ -24,6 +24,7 @@ limitations under the License.
 package oauth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,6 +94,9 @@ type Config struct {
 	// CIMDClient fetches Client ID Metadata Documents. Default:
 	// SSRFSafeClient. Tests on loopback override it.
 	CIMDClient *http.Client
+	// OnEvent, if set, is called with fixed event and status labels for
+	// sign-in and token-endpoint outcomes.
+	OnEvent func(ctx context.Context, event, status string)
 }
 
 // Server is the authorization server. Mount Handler at the root of
@@ -223,6 +227,12 @@ func (s *Server) ResourceMetadataURL() string {
 
 func (s *Server) callbackURI() string { return s.cfg.Issuer + "/callback" }
 func (s *Server) continueURI() string { return s.cfg.Issuer + "/consent/continue" }
+
+func (s *Server) recordEvent(ctx context.Context, event, status string) {
+	if s.cfg.OnEvent != nil {
+		s.cfg.OnEvent(ctx, event, status)
+	}
+}
 
 // Handler serves the metadata and authorization-server endpoints.
 func (s *Server) Handler() http.Handler {
