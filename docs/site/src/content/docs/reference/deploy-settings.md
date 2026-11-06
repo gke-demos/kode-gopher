@@ -34,6 +34,7 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `OAUTH_SECRET_NAME` | `kode-gopher-oauth` | Name of the Kubernetes Secret in `codemode` holding `google-client.json`, `keyring`, and `clients.json`. When creating a new Secret while `kode-gopher-oauth` exists, the script copies `keyring` and `clients.json` from `kode-gopher-oauth` so active tokens keep working while leaving the old Secret untouched for rollback. |
 | `GOOGLE_CLIENT_FILE` | none (required on first deploy) | The Google OAuth client JSON downloaded from the console. |
 | `ALLOW_DOMAINS` | none | Comma-separated Workspace domains to admit, matched against the ID token's `hd` claim. |
 | `ALLOW_GROUPS` | none | Comma-separated Google group emails to admit. Nested membership counts. |
