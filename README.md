@@ -60,7 +60,7 @@ Whatever `run` returns comes back to the model as JSON. Errors and panics come b
 
 Pre-alpha (`0.x`); signed binaries and container images are published on [Releases](https://github.com/gke-demos/kode-gopher/releases). Built and verified so far:
 - **Local mode:** the CLI and the stdio MCP server, on kind and on GKE Autopilot with gVisor.
-- **Fast single-hop builds and session state:** a CI-published sandbox image with Google Cloud SDKs and `client-go` precompiled, single-hop `POST /run-go` execution, `/app/persist` session scratch across calls, batched `lookup_package_docs` across the prewarmed module graph, and native MCP `ImageContent` attachments.
+- **Fast single-hop builds and session state:** a CI-published sandbox image with Google Cloud SDKs, `client-go`, and `sdk/gkeutil` precompiled, single-hop `POST /run-go` execution, `/app/persist` session scratch across calls, batched `lookup_package_docs` across the prewarmed module graph, native MCP `ImageContent` attachments, and the [`skills/gke-diagnostics`](./skills/gke-diagnostics) skill pack for GKE incident triage.
 - **In-cluster server & least privilege:** a GKE Gateway with a managed certificate, FQDN egress allowlists for sandboxes, a static token or OAuth 2.1 sign-in fronting Google (with Google's Agent Identity credential vault or sealed custody), service-account mode, the `client_credentials` grant for automation, and opt-in `--read-only` / `read_only` OAuth scope downscoping.
 - **CI & releases:** presubmits, a kind end-to-end test, cosign-signed release archives, and signed multi-arch images.
 
@@ -98,6 +98,7 @@ Design and project records, in this repository:
 | [`internal/curated`](./internal/curated) | canonical list of GCP + k8s.io/client-go packages prewarmed in the sandbox image; `go:generate` drives prompts regen |
 | [`internal/prewarm`](./internal/prewarm) | standalone Go module imported at image build to populate `$GOCACHE`; committed `go.mod`+`go.sum` pin versions |
 | [`internal/prompts`](./internal/prompts) | generated `system.md` (LLM system prompt) + `description.go` (execute_go_code tool description); regenerate via `make prompts` |
+| [`skills/gke-diagnostics`](./skills/gke-diagnostics) | optional agent skill pack (`SKILL.md` + `references/`) for GKE workload bundle triage, Drain log clustering, and Cloud Logging autoscaler/stockout checks |
 | [`sandbox/Dockerfile`](./sandbox/Dockerfile) | the sandbox image: Go toolchain, `sandbox-server`, prewarmed cache |
 | [`server/Dockerfile`](./server/Dockerfile) | the in-cluster server image: static `kode-gopher` on distroless, amd64 and arm64 |
 | [`manifests/base`](./manifests/base) | kustomize base (kind-compatible): v1beta1 SandboxTemplate with network policy, SandboxWarmPool `go-runtime-pool`, per-namespace sandbox-router |
