@@ -111,7 +111,7 @@ type User struct {
 }
 
 // authCodeURL is Google's sign-in URL for one /authorize.
-func (g *GoogleClient) authCodeURL(redirectURI, state, challenge string, scopes []string, offline bool) string {
+func (g *GoogleClient) authCodeURL(redirectURI, state, challenge, hd string, scopes []string, offline bool) string {
 	q := url.Values{
 		"client_id":             {g.ClientID},
 		"redirect_uri":          {redirectURI},
@@ -120,6 +120,9 @@ func (g *GoogleClient) authCodeURL(redirectURI, state, challenge string, scopes 
 		"state":                 {state},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
+	}
+	if hd != "" {
+		q.Set("hd", hd)
 	}
 	if offline {
 		// prompt=consent: Google returns a refresh token only on consent.

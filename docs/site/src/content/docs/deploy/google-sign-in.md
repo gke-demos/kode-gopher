@@ -68,6 +68,7 @@ What to get right:
 - **[kode-gopher's principal](/deploy/#kode-gophers-identity) goes in twice:** in `--workload-ids` and in the IAM binding.
 - **Read-only deployments (`--read-only`):** create a dedicated vault auth provider whose `--allowed-scopes` replaces `cloud-platform` with the read-only set (`openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform.read-only,https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/bigquery.readonly,https://www.googleapis.com/auth/logging.read,https://www.googleapis.com/auth/monitoring.read,https://www.googleapis.com/auth/trace.readonly`); see [Read-only OAuth downscoping](/concepts/credentials/#read-only-oauth-downscoping).
 - **The IAM grant** can take a few minutes to take effect.
+- **Multiple Workspace organizations:** if a second admitted domain requires its own internal Google OAuth client, create a second OAuth client and vault auth provider for that domain and pass `DOMAIN_GOOGLE_CLIENT_FILES=<domain>=<path>` and `DOMAIN_VAULT_AUTH_PROVIDERS=<domain>=projects/<PROJECT_ID>/locations/<LOCATION>/authProviders/<NAME>` to `scripts/deploy-gke-server.sh`.
 
 ## 3. Decide who's admitted
 

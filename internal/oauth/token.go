@@ -264,9 +264,10 @@ func (s *Server) refreshTokens(ctx context.Context, r *http.Request, c *client) 
 	// here, checked against p.User, is the one issued below. A refusal
 	// (errReauth) is answered after the rotation, so the token stays
 	// spent and a replayed one still revokes its family.
-	pre, preErr := s.cfg.Custody.prepare(ctx, s.google, p.User, p.Secret, s.continueURI())
+	prov := s.providerFor(p.User.Domain)
+	pre, preErr := prov.custody.prepare(ctx, prov.google, p.User, p.Secret, s.continueURI())
 	if preErr != nil && !errors.Is(preErr, errReauth) {
-		log.Printf("oauth: %s refresh for %s: %v", s.cfg.Custody.Name(), p.User.Email, preErr)
+		log.Printf("oauth: %s refresh for %s: %v", prov.custody.Name(), p.User.Email, preErr)
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't refresh the Google grant"}
 	}
 	// From the rotation on, the answer must reach the client: a lost one
@@ -342,17 +343,18 @@ func (s *Server) renewGrant(ctx context.Context, u User, secret string, pre *Gra
 		}
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't check the allow-list"}
 	}
+	prov := s.providerFor(u.Domain)
 	g, err := pre, preErr
 	if g == nil && err == nil {
-		g, err = s.cfg.Custody.refresh(ctx, s.google, u, secret, s.continueURI())
+		g, err = prov.custody.refresh(ctx, prov.google, u, secret, s.continueURI())
 	}
 	if errors.Is(err, errReauth) {
 		// The client signs the user out: say why in the log too.
-		log.Printf("oauth: %s refresh for %s needs a new sign-in: %v", s.cfg.Custody.Name(), u.Email, err)
+		log.Printf("oauth: %s refresh for %s needs a new sign-in: %v", prov.custody.Name(), u.Email, err)
 		return nil, invalidGrant(err.Error())
 	}
 	if err != nil {
-		log.Printf("oauth: %s refresh for %s: %v", s.cfg.Custody.Name(), u.Email, err)
+		log.Printf("oauth: %s refresh for %s: %v", prov.custody.Name(), u.Email, err)
 		return nil, &tokenError{Code: "server_error", Desc: "couldn't refresh the Google grant"}
 	}
 	return g, nil

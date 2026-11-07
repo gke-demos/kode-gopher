@@ -42,6 +42,7 @@ type authRequest struct {
 	Resource    string `json:"aud"`
 	Scope       string `json:"s"`
 	State       string `json:"st,omitempty"`
+	Domain      string `json:"hd,omitempty"`
 }
 
 // browserBound is an envelope tied to the browser that started the flow
@@ -70,7 +71,14 @@ const (
 	cookieConsent = "kg_consent"
 )
 
-var challengeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+var (
+	challengeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+	domainRE    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+)
+
+func validDomain(d string) bool {
+	return len(d) <= 253 && domainRE.MatchString(d)
+}
 
 // authError is an /authorize failure. Before the redirect URI is
 // trusted it's shown to the user; after, it goes back to the client.
@@ -122,7 +130,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		authPage(w, http.StatusInternalServerError, "Error", "Couldn't start sign-in.")
 		return
 	}
-	consentPage(w, c, redirectURI, form)
+	var domains []string
+	if req.Domain == "" {
+		domains = s.providerNames
+	}
+	consentPage(w, c, redirectURI, form, domains)
 }
 
 func (s *Server) validateAuthRequest(q url.Values, c *client, redirectURI string) (*authRequest, *authError) {
@@ -141,6 +153,13 @@ func (s *Server) validateAuthRequest(q url.Values, c *client, redirectURI string
 	if resource != s.resource || len(q["resource"]) > 1 {
 		return nil, &authError{"invalid_target", "resource must be " + s.resource}
 	}
+	if len(q["hd"]) > 1 {
+		return nil, &authError{"invalid_request", "at most one hd parameter is allowed"}
+	}
+	hd := strings.ToLower(strings.TrimSpace(q.Get("hd")))
+	if hd != "" && !validDomain(hd) {
+		return nil, &authError{"invalid_request", "hd must be a domain name"}
+	}
 	// One scope exists. Others are dropped rather than refused, as RFC
 	// 6749 §3.3 allows; the token response says what was granted.
 	return &authRequest{
@@ -151,6 +170,7 @@ func (s *Server) validateAuthRequest(q url.Values, c *client, redirectURI string
 		Resource:    resource,
 		Scope:       ScopeExecute,
 		State:       q.Get("state"),
+		Domain:      hd,
 	}, nil
 }
 
@@ -166,7 +186,14 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if ck, err := r.Cookie(s.cookieName(cookieBrowser)); err == nil {
 		s.setCookie(w, cookieBrowser, ck.Value)
 	}
-	if r.PostFormValue("action") != "approve" {
+	action := r.PostFormValue("action")
+	if domain, ok := strings.CutPrefix(action, "approve:"); ok {
+		if _, exists := s.providers[domain]; !exists {
+			redirectError(w, r, b.Req.RedirectURI, b.Req.State, s.cfg.Issuer, &authError{"invalid_request", "unknown sign-in domain"})
+			return
+		}
+		b.Req.Domain = domain
+	} else if action != "approve" {
 		redirectError(w, r, b.Req.RedirectURI, b.Req.State, s.cfg.Issuer, &authError{"access_denied", "the user declined"})
 		return
 	}
@@ -182,8 +209,9 @@ func (s *Server) toGoogle(w http.ResponseWriter, r *http.Request, req *authReque
 		authPage(w, http.StatusInternalServerError, "Error", "Couldn't start sign-in.")
 		return
 	}
+	prov := s.providerFor(req.Domain)
 	sum := sha256.Sum256([]byte(verifier))
-	u := s.cfg.Google.authCodeURL(s.callbackURI(), state, base64.RawURLEncoding.EncodeToString(sum[:]), s.cfg.Custody.signInScopes(), s.cfg.Custody.signInOffline())
+	u := prov.google.client.authCodeURL(s.callbackURI(), state, base64.RawURLEncoding.EncodeToString(sum[:]), req.Domain, prov.custody.signInScopes(), prov.custody.signInOffline())
 	http.Redirect(w, r, u, http.StatusSeeOther)
 }
 
@@ -211,16 +239,23 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		fail("access_denied", "Google sign-in was cancelled or refused")
 		return
 	}
-	t, err := s.cfg.Google.exchange(ctx, s.google.hc, q.Get("code"), s.callbackURI(), b.Verifier)
+	prov := s.providerFor(req.Domain)
+	t, err := prov.google.client.exchange(ctx, prov.google.hc, q.Get("code"), s.callbackURI(), b.Verifier)
 	if err != nil {
 		log.Printf("oauth: Google code exchange: %v", err)
 		fail("server_error", "Google sign-in failed")
 		return
 	}
-	u, err := s.cfg.Google.verifyIDToken(t.IDToken, time.Now())
+	u, err := prov.google.client.verifyIDToken(t.IDToken, time.Now())
 	if err != nil {
 		log.Printf("oauth: Google ID token: %v", err)
 		fail("server_error", "Google sign-in failed")
+		return
+	}
+	prov, ok := s.selectCallbackProvider(req, u, prov)
+	if !ok {
+		log.Printf("oauth: refused %s: signed-in domain %q doesn't match provider %q", u.Email, u.Domain, req.Domain)
+		fail("access_denied", "this account doesn't match the selected sign-in domain")
 		return
 	}
 	if err := s.cfg.Allow.admit(ctx, u); err != nil {
@@ -234,9 +269,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	grant, consent, err := s.cfg.Custody.begin(ctx, s.google, u, t, s.continueURI())
+	grant, consent, err := prov.custody.begin(ctx, prov.google, u, t, s.continueURI())
 	if err != nil {
-		log.Printf("oauth: %s custody for %s: %v", s.cfg.Custody.Name(), u.Email, err)
+		log.Printf("oauth: %s custody for %s: %v", prov.custody.Name(), u.Email, err)
 		fail(custodyError(err), grantFailed)
 		return
 	}
@@ -245,6 +280,25 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.finishAuthorize(w, r, req, u, grant)
+}
+
+// selectCallbackProvider checks that u's Workspace domain matches any
+// domain requested at /authorize, and routes a user whose domain has a
+// dedicated provider in s.providers to that provider when possible.
+func (s *Server) selectCallbackProvider(req *authRequest, u User, current provider) (provider, bool) {
+	if req.Domain != "" && !strings.EqualFold(u.Domain, req.Domain) {
+		return provider{}, false
+	}
+	if req.Domain == "" && u.Domain != "" {
+		if ded, hasDed := s.providers[strings.ToLower(u.Domain)]; hasDed {
+			if current.custody.Name() != "vault" || ded.custody.Name() != "vault" {
+				return provider{}, false
+			}
+			req.Domain = strings.ToLower(u.Domain)
+			return ded, true
+		}
+	}
+	return current, true
 }
 
 // grantFailed is what the client hears when custody fails; the reason
@@ -299,11 +353,12 @@ func (s *Server) handleConsentContinue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clearCookie(w, cookieConsent)
-	grant, err := s.cfg.Custody.finish(ctx, s.google, p.User, p.Consent, r.URL.Query(), s.continueURI())
+	prov := s.providerFor(p.User.Domain)
+	grant, err := prov.custody.finish(ctx, prov.google, p.User, p.Consent, r.URL.Query(), s.continueURI())
 	if err != nil {
 		code := custodyError(err)
 		s.recordEvent(ctx, "signin", code)
-		log.Printf("oauth: %s consent for %s: %v", s.cfg.Custody.Name(), p.User.Email, err)
+		log.Printf("oauth: %s consent for %s: %v", prov.custody.Name(), p.User.Email, err)
 		redirectError(w, r, p.Req.RedirectURI, p.Req.State, s.cfg.Issuer, &authError{code, grantFailed})
 		return
 	}
@@ -502,13 +557,13 @@ code{background:#f3f3f3;padding:0 .3em}</style></head>
 <p>After sign-in you'll be sent back to <code dir="ltr">{{.RedirectHost}}</code>.</p>
 <p>Only continue if you started this from your own MCP client.</p>
 <form method="post" action="authorize"><input type="hidden" name="request" value="{{.Form}}">
-<button name="action" value="approve">Continue with Google</button><button name="action" value="deny">Cancel</button></form>
+<button name="action" value="approve">Continue with Google</button>{{range .Domains}}<button name="action" value="approve:{{.}}">Continue with Google ({{.}})</button>{{end}}<button name="action" value="deny">Cancel</button></form>
 {{else}}<p>{{.Message}}</p>{{end}}</div></body></html>
 `))
 
 func authPage(w http.ResponseWriter, code int, title, msg string) {
 	pageHeaders(w, code)
-	_ = pageTmpl.Execute(w, map[string]string{"Title": title, "Message": msg})
+	_ = pageTmpl.Execute(w, map[string]any{"Title": title, "Message": msg})
 }
 
 // consentPage asks the user to approve a client. The client chose its
@@ -520,7 +575,7 @@ func authPage(w http.ResponseWriter, code int, title, msg string) {
 // client ID is a sealed blob, gets a line saying nothing vouches for its
 // name instead, so a name carrying a fake "(https://...)" still reads as
 // the client's own claim.
-func consentPage(w http.ResponseWriter, c *client, redirectURI, form string) {
+func consentPage(w http.ResponseWriter, c *client, redirectURI, form string, domains []string) {
 	var id, registered string
 	switch {
 	case strings.HasPrefix(c.ID, "https://"):
@@ -533,8 +588,8 @@ func consentPage(w http.ResponseWriter, c *client, redirectURI, form string) {
 		host = u.Scheme + "://" + u.Host
 	}
 	pageHeaders(w, http.StatusOK)
-	_ = pageTmpl.Execute(w, map[string]string{
-		"Title": "Sign in", "Form": form,
+	_ = pageTmpl.Execute(w, map[string]any{
+		"Title": "Sign in", "Form": form, "Domains": domains,
 		"ClientName": clientName(c.Name), "ClientID": id, "Registered": registered, "RedirectHost": displayURL(host),
 	})
 }

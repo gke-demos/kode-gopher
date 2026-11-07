@@ -410,6 +410,8 @@ type browser struct {
 	t       *testing.T
 	hc      *http.Client
 	deny    bool
+	action  string
+	hd      string
 	sawPage bool
 }
 
@@ -452,7 +454,9 @@ func (b *browser) visit(u string) (*url.URL, string) {
 		}
 		b.sawPage = true
 		action := "approve"
-		if b.deny {
+		if b.action != "" {
+			action = b.action
+		} else if b.deny {
 			action = "deny"
 		}
 		resp, err = b.hc.PostForm(resp.Request.URL.String(), url.Values{"request": {html.UnescapeString(string(m[1]))}, "action": {action}})
@@ -464,7 +468,11 @@ func (b *browser) visit(u string) (*url.URL, string) {
 
 // fetcher is the go-sdk client's AuthorizationCodeFetcher.
 func (b *browser) fetcher(_ context.Context, args *auth.AuthorizationArgs) (*auth.AuthorizationResult, error) {
-	loc, page := b.visit(args.URL)
+	u := args.URL
+	if b.hd != "" {
+		u += "&hd=" + url.QueryEscape(b.hd)
+	}
+	loc, page := b.visit(u)
 	if loc == nil {
 		return nil, fmt.Errorf("sign-in stopped on a page: %s", page)
 	}

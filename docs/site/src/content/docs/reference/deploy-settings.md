@@ -39,11 +39,13 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 |---|---|---|
 | `OAUTH_SECRET_NAME` | `kode-gopher-oauth` | Name of the Kubernetes Secret in `codemode` holding `google-client.json`, `keyring`, and `clients.json`. When creating a new Secret while `kode-gopher-oauth` exists, the script copies `keyring` and `clients.json` from `kode-gopher-oauth` so active tokens keep working while leaving the old Secret untouched for rollback. |
 | `GOOGLE_CLIENT_FILE` | none (required on first deploy) | The Google OAuth client JSON downloaded from the console. |
+| `DOMAIN_GOOGLE_CLIENT_FILES` | none | Comma-separated `<domain>=<path>` overrides for `GOOGLE_CLIENT_FILE` when admitting multiple Workspace organizations that need distinct OAuth clients (for example `google.com=./corp_client.json`). Stored in the Secret as `google-client-<domain>.json` and kept across redeploys when unset. |
 | `ALLOW_DOMAINS` | none | Comma-separated Workspace domains to admit, matched against the ID token's `hd` claim. |
 | `ALLOW_GROUPS` | none | Comma-separated Google group emails to admit. Nested membership counts. |
 | `GROUPS_SERVICE_ACCOUNT` | none | The service account that checks `ALLOW_GROUPS`: it holds the Groups Reader admin role, and kode-gopher impersonates it. See [Groups](/deploy/google-sign-in/#groups). |
 | `CUSTODY` | `vault` | Where users' Google grants are kept: `vault` (Google's Agent Identity credential vault) or `sealed` (inside kode-gopher's own refresh tokens). |
 | `VAULT_AUTH_PROVIDER` | none | With vault custody: `projects/<p>/locations/<l>/authProviders/<name>`. |
+| `DOMAIN_VAULT_AUTH_PROVIDERS` | none | With vault custody: comma-separated `<domain>=projects/<p>/locations/<l>/authProviders/<name>` overrides for `VAULT_AUTH_PROVIDER`, paired with `DOMAIN_GOOGLE_CLIENT_FILES`. |
 | `CLIENTS_FILE` | the existing Secret's | Pre-registered clients, a JSON array. Without it, a redeploy keeps the clients already deployed. A client with a `service_account` uses the `client_credentials` grant; see [Clients](/deploy/clients/). |
 | `OPEN_REGISTRATION` | `true` | Accept clients that register themselves (DCR, Client ID Metadata Documents), not only pre-registered ones. |
 

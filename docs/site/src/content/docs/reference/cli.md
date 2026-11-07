@@ -99,6 +99,10 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
     	oauth: JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris}, or {client_id, client_secret, service_account} for the client_credentials grant)
   -oauth-custody string
     	oauth: who holds users' Google grants: vault (Agent Identity credential vault) or sealed (inside kode-gopher's refresh token) (default "vault")
+  -oauth-domain-google-client-files string
+    	oauth: comma-separated <domain>=<path> overrides for --oauth-google-client-file (e.g. google.com=/etc/kode-gopher/oauth/google-client-google.com.json)
+  -oauth-domain-vault-auth-providers string
+    	oauth, vault custody: comma-separated <domain>=projects/<p>/locations/<l>/authProviders/<name> overrides for --oauth-vault-auth-provider
   -oauth-google-client-file string
     	oauth: kode-gopher's Google OAuth client, as the JSON the Cloud console downloads
   -oauth-groups-service-account string

@@ -65,6 +65,9 @@
 #   OAUTH_SECRET_NAME     Secret for the OAuth client, keyring and clients
 #                         (kode-gopher-oauth)
 #   GOOGLE_CLIENT_FILE    the Google OAuth client JSON (required on first deploy)
+#   DOMAIN_GOOGLE_CLIENT_FILES  comma-separated <domain>=<path> overrides for
+#                         GOOGLE_CLIENT_FILE (stored in the Secret as
+#                         google-client-<domain>.json; kept on redeploy if unset)
 #   CLIENTS_FILE          pre-registered clients JSON (kept from the existing
 #                         Secret if unset, else none); a client with
 #                         a service_account uses the client_credentials
@@ -77,6 +80,8 @@
 #                         roles/iam.serviceAccountTokenCreator on it)
 #   CUSTODY               vault or sealed (vault)
 #   VAULT_AUTH_PROVIDER   projects/<p>/locations/<l>/authProviders/<name>
+#   DOMAIN_VAULT_AUTH_PROVIDERS  comma-separated <domain>=<authProvider>
+#                         overrides for VAULT_AUTH_PROVIDER
 #   OPEN_REGISTRATION     true or false (true)
 
 set -euo pipefail
@@ -88,7 +93,7 @@ while [[ $# -gt 0 ]]; do
     --auth)    AUTH="$2"; shift 2;;
     --auth=*)  AUTH="${1#--auth=}"; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '17,80p' "$0"; exit 0;;
+    -h|--help) sed -n '17,85p' "$0"; exit 0;;
     *)         echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -193,6 +198,17 @@ else
       k -n "$NS" get secret "$OAUTH_SECRET_NAME" -o jsonpath='{.data.clients\.json}' \
         | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/clients.json"
     fi
+    # Keep any domain-specific Google client files already in the Secret.
+    k -n "$NS" get secret "$OAUTH_SECRET_NAME" -o json \
+      | python3 -c '
+import base64, json, os, sys
+tmp = sys.argv[1]
+data = json.load(sys.stdin).get("data") or {}
+for k, v in data.items():
+    if k.startswith("google-client-") and k.endswith(".json"):
+        with open(os.path.join(tmp, k), "wb") as f:
+            f.write(base64.b64decode(v))
+' "$tmp"
   elif secret_exists kode-gopher-oauth; then
     # Creating a new Secret while kode-gopher-oauth exists: seed the
     # keyring and pre-registered clients from kode-gopher-oauth so
@@ -204,6 +220,16 @@ else
       k -n "$NS" get secret kode-gopher-oauth -o jsonpath='{.data.clients\.json}' \
         | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$tmp/clients.json"
     fi
+    k -n "$NS" get secret kode-gopher-oauth -o json \
+      | python3 -c '
+import base64, json, os, sys
+tmp = sys.argv[1]
+data = json.load(sys.stdin).get("data") or {}
+for k, v in data.items():
+    if k.startswith("google-client-") and k.endswith(".json"):
+        with open(os.path.join(tmp, k), "wb") as f:
+            f.write(base64.b64decode(v))
+' "$tmp"
   else
     python3 -c 'import base64, secrets; print("k1", base64.b64encode(secrets.token_bytes(32)).decode())' > "$tmp/keyring"
   fi
@@ -211,15 +237,53 @@ else
     cp "$GOOGLE_CLIENT_FILE" "$tmp/google-client.json"
   fi
   [[ -s "$tmp/google-client.json" ]] || die "GOOGLE_CLIENT_FILE is required on first deploy"
+  if [[ -n "${DOMAIN_GOOGLE_CLIENT_FILES:-}" || -n "${DOMAIN_VAULT_AUTH_PROVIDERS:-}" ]]; then
+    python3 - "$tmp" "${DOMAIN_GOOGLE_CLIENT_FILES:-}" "${DOMAIN_VAULT_AUTH_PROVIDERS:-}" <<'PY'
+import os, re, shutil, sys
+tmp, raw_files, raw_vaults = sys.argv[1], sys.argv[2], sys.argv[3]
+domain_re = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+for item in raw_files.split(","):
+    item = item.strip()
+    if not item:
+        continue
+    if "=" not in item:
+        sys.exit(f"DOMAIN_GOOGLE_CLIENT_FILES entry {item!r} must be <domain>=<path>")
+    dom, path = item.split("=", 1)
+    dom, path = dom.strip().lower(), path.strip()
+    if len(dom) > 253 or not domain_re.match(dom):
+        sys.exit(f"DOMAIN_GOOGLE_CLIENT_FILES domain {dom!r} isn't a valid domain")
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        sys.exit(f"DOMAIN_GOOGLE_CLIENT_FILES file for {dom!r} is missing or empty")
+    shutil.copyfile(path, os.path.join(tmp, f"google-client-{dom}.json"))
+for item in raw_vaults.split(","):
+    item = item.strip()
+    if not item:
+        continue
+    if "=" not in item:
+        sys.exit(f"DOMAIN_VAULT_AUTH_PROVIDERS entry {item!r} must be <domain>=<provider>")
+    dom, val = item.split("=", 1)
+    dom, val = dom.strip().lower(), val.strip()
+    if len(dom) > 253 or not domain_re.match(dom) or not val:
+        sys.exit(f"DOMAIN_VAULT_AUTH_PROVIDERS entry {item!r} has an invalid domain or empty provider")
+    cf = os.path.join(tmp, f"google-client-{dom}.json")
+    if not os.path.isfile(cf) or os.path.getsize(cf) == 0:
+        sys.exit(f"DOMAIN_VAULT_AUTH_PROVIDERS domain {dom!r} requires DOMAIN_GOOGLE_CLIENT_FILES on first deploy")
+PY
+  fi
   if [[ -n "${CLIENTS_FILE:-}" ]]; then
     cp "$CLIENTS_FILE" "$tmp/clients.json"
   elif [[ ! -s "$tmp/clients.json" ]]; then
     echo '[]' > "$tmp/clients.json"
   fi
-  k -n "$NS" create secret generic "$OAUTH_SECRET_NAME" \
-    --from-file=google-client.json="$tmp/google-client.json" \
-    --from-file=keyring="$tmp/keyring" \
-    --from-file=clients.json="$tmp/clients.json" \
+  secret_args=(
+    --from-file=google-client.json="$tmp/google-client.json"
+    --from-file=keyring="$tmp/keyring"
+    --from-file=clients.json="$tmp/clients.json"
+  )
+  for df in "$tmp"/google-client-*.json; do
+    [[ -f "$df" ]] && secret_args+=(--from-file="$(basename "$df")=$df")
+  done
+  k -n "$NS" create secret generic "$OAUTH_SECRET_NAME" "${secret_args[@]}" \
     --dry-run=client -o yaml | k apply -f -
   echo "$OAUTH_SECRET_NAME applied (Google client redirect URIs must include $ISSUER/callback)"
 fi
@@ -269,6 +333,26 @@ if auth == "oauth":
                       ("--oauth-vault-auth-provider", "VAULT_AUTH_PROVIDER")]:
         if env(var):
             args.append(flag + "=" + env(var))
+    domain_re = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+    domain_order = []
+    for raw in [env("DOMAIN_GOOGLE_CLIENT_FILES", ""), env("DOMAIN_VAULT_AUTH_PROVIDERS", "")]:
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "=" not in item:
+                sys.exit("domain override %r must be <domain>=<value>" % item)
+            dom, val = item.split("=", 1)
+            dom, val = dom.strip().lower(), val.strip()
+            if len(dom) > 253 or not domain_re.match(dom) or not val:
+                sys.exit("domain override %r has an invalid domain or empty value" % item)
+            if dom not in domain_order:
+                domain_order.append(dom)
+    if domain_order:
+        args.append("--oauth-domain-google-client-files=" + ",".join(
+            f"{d}=/etc/kode-gopher/oauth/google-client-{d}.json" for d in domain_order))
+    if env("DOMAIN_VAULT_AUTH_PROVIDERS"):
+        args.append("--oauth-domain-vault-auth-providers=" + env("DOMAIN_VAULT_AUTH_PROVIDERS"))
 elif env("OTEL_ENDPOINT"):
     args.append("--project=" + project)
 for flag, var in [("--capture-dir", "CAPTURE_DIR"), ("--capture-mode", "CAPTURE_MODE"),
