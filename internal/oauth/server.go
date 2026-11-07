@@ -58,6 +58,20 @@ const (
 	purposeRefresh = "refresh"
 )
 
+// Provider is a domain-specific Google OAuth client and custody
+// backend, used when a sign-in or token refresh belongs to that
+// Workspace domain (the ID token's hd claim).
+type Provider struct {
+	Google  GoogleClient
+	Custody Custody
+}
+
+// provider is a validated Provider on a running Server.
+type provider struct {
+	google  *google
+	custody Custody
+}
+
 // Config is one deployment's authorization server. Nothing about the
 // Google side is hard-coded.
 type Config struct {
@@ -69,6 +83,13 @@ type Config struct {
 	Google GoogleClient
 	// Custody holds users' Google grants.
 	Custody Custody
+	// Providers maps a Workspace domain (the ID token's hd claim, e.g.
+	// "google.com") to a domain-specific Google OAuth client and Custody
+	// backend. When set, a sign-in selecting that domain (via ?hd=<domain>
+	// on /authorize or the consent page) and subsequent token refreshes for
+	// users in that domain use that provider's GoogleClient and Custody
+	// instead of Google and Custody.
+	Providers map[string]Provider
 	// Allow admits users. Required.
 	Allow *AllowList
 	// Keys seals every token, code and DCR client ID.
@@ -102,11 +123,13 @@ type Config struct {
 // Server is the authorization server. Mount Handler at the root of
 // Issuer, and wrap the MCP endpoint with Protect.
 type Server struct {
-	cfg      Config
-	resource string
-	keys     *Keyring
-	google   *google
-	static   map[string]StaticClient
+	cfg           Config
+	resource      string
+	keys          *Keyring
+	google        *google
+	providers     map[string]provider
+	providerNames []string
+	static        map[string]StaticClient
 	// serviceClients: some client may use the client_credentials grant.
 	serviceClients bool
 	cimd           *cimdFetcher
@@ -142,14 +165,20 @@ func New(cfg Config) (*Server, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
+	providers, providerNames, err := buildServerProviders(cfg)
+	if err != nil {
+		return nil, err
+	}
 	s := &Server{
-		cfg:      cfg,
-		resource: cfg.Issuer + "/mcp",
-		keys:     cfg.Keys,
-		google:   &google{client: &cfg.Google, hc: cfg.HTTPClient},
-		static:   map[string]StaticClient{},
-		cimd:     newCIMDFetcher(cfg.CIMDClient),
-		used:     &replayCache{seen: map[string]time.Time{}},
+		cfg:           cfg,
+		resource:      cfg.Issuer + "/mcp",
+		keys:          cfg.Keys,
+		google:        &google{client: &cfg.Google, hc: cfg.HTTPClient},
+		providers:     providers,
+		providerNames: providerNames,
+		static:        map[string]StaticClient{},
+		cimd:          newCIMDFetcher(cfg.CIMDClient),
+		used:          &replayCache{seen: map[string]time.Time{}},
 	}
 	for _, c := range cfg.Clients {
 		if _, dup := s.static[c.ID]; dup {
@@ -175,18 +204,66 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
+func (s *Server) providerFor(domain string) provider {
+	if p, ok := s.providers[strings.ToLower(strings.TrimSpace(domain))]; ok {
+		return p
+	}
+	return provider{google: s.google, custody: s.cfg.Custody}
+}
+
+func buildServerProviders(cfg Config) (map[string]provider, []string, error) {
+	if len(cfg.Providers) == 0 {
+		return nil, nil, nil
+	}
+	out := make(map[string]provider, len(cfg.Providers))
+	names := make([]string, 0, len(cfg.Providers))
+	for rawDomain, p := range cfg.Providers {
+		d := strings.ToLower(strings.TrimSpace(rawDomain))
+		switch {
+		case !validDomain(d):
+			return nil, nil, fmt.Errorf("oauth: provider domain %q isn't a valid domain name", rawDomain)
+		case p.Google.ClientID == "" || p.Google.ClientSecret == "":
+			return nil, nil, fmt.Errorf("oauth: provider %q needs Google client ID and secret", d)
+		case p.Custody == nil:
+			return nil, nil, fmt.Errorf("oauth: provider %q needs a custody backend", d)
+		case cfg.ReadOnly != p.Custody.readOnly():
+			return nil, nil, fmt.Errorf("oauth: provider %q Custody.ReadOnly (%v) must match Config.ReadOnly (%v)", d, p.Custody.readOnly(), cfg.ReadOnly)
+		}
+		if _, dup := out[d]; dup {
+			return nil, nil, fmt.Errorf("oauth: duplicate provider domain %q", d)
+		}
+		if err := checkProviderEndpoints(d, p); err != nil {
+			return nil, nil, err
+		}
+		gc := p.Google
+		gc.applyDefaults()
+		out[d] = provider{google: &google{client: &gc, hc: cfg.HTTPClient}, custody: p.Custody}
+		names = append(names, d)
+	}
+	slices.Sort(names)
+	return out, names, nil
+}
+
 // checkGoogleEndpoints requires overridden Google and vault endpoints to
 // be https (http only on loopback, for tests): the ID token is trusted
 // for coming straight from Google's token endpoint over TLS, and the
 // vault hands out users' Google tokens.
 func checkGoogleEndpoints(cfg Config) error {
-	endpoints := [][2]string{
-		{"Google.AuthURL", cfg.Google.AuthURL},
-		{"Google.TokenURL", cfg.Google.TokenURL},
-		{"Google.TokenInfoURL", cfg.Google.TokenInfoURL},
+	return checkProviderEndpoints("", Provider{Google: cfg.Google, Custody: cfg.Custody})
+}
+
+func checkProviderEndpoints(domain string, p Provider) error {
+	prefix := ""
+	if domain != "" {
+		prefix = fmt.Sprintf("Providers[%q].", domain)
 	}
-	if v, ok := cfg.Custody.(*VaultCustody); ok && v != nil {
-		endpoints = append(endpoints, [2]string{"VaultCustody.Endpoint", v.Endpoint})
+	endpoints := [][2]string{
+		{prefix + "Google.AuthURL", p.Google.AuthURL},
+		{prefix + "Google.TokenURL", p.Google.TokenURL},
+		{prefix + "Google.TokenInfoURL", p.Google.TokenInfoURL},
+	}
+	if v, ok := p.Custody.(*VaultCustody); ok && v != nil {
+		endpoints = append(endpoints, [2]string{prefix + "VaultCustody.Endpoint", v.Endpoint})
 	}
 	for _, e := range endpoints {
 		if e[1] != "" && !httpsOrLoopback(e[1]) { // empty: Google's default

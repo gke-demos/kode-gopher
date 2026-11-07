@@ -102,7 +102,7 @@ func TestConsentCIMDNameCannotSpoofClientID(t *testing.T) {
 // The page cleans the name itself, whatever reaches it.
 func TestConsentPageCleansName(t *testing.T) {
 	w := httptest.NewRecorder()
-	consentPage(w, &client{ID: sealPrefix + "x", Name: spoofName}, clientRedirect, "form")
+	consentPage(w, &client{ID: sealPrefix + "x", Name: spoofName}, clientRedirect, "form", nil)
 	checkConsentName(t, w.Body.String())
 }
 
