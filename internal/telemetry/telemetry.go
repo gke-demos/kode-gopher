@@ -27,8 +27,10 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
@@ -46,9 +48,11 @@ import (
 const (
 	scopeName             = "github.com/gke-demos/kode-gopher"
 	defaultServiceName    = "kode-gopher"
+	defaultCloudRegion    = "us-central1"
 	defaultExportInterval = 60 * time.Second
 	cloudMonitoringHost   = "telemetry.googleapis.com"
 	monitoringWriteScope  = "https://www.googleapis.com/auth/monitoring.write"
+	k8sSANamespacePath    = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
 // Config configures OpenTelemetry metric export.
@@ -61,8 +65,26 @@ type Config struct {
 	Endpoint string
 	// Project is the Google Cloud project ID attached as gcp.project_id
 	// (and x-goog-user-project when exporting to telemetry.googleapis.com).
-	// Falls back to GOOGLE_CLOUD_PROJECT if empty.
+	// Falls back to GOOGLE_CLOUD_PROJECT (or GCE metadata when exporting
+	// to telemetry.googleapis.com) if empty.
 	Project string
+	// Location is the cloud region or zone attached to the OTel resource
+	// (cloud.region / cloud.availability_zone). Falls back to
+	// GOOGLE_CLOUD_LOCATION, CLOUDSDK_COMPUTE_REGION, CLOUDSDK_COMPUTE_ZONE
+	// (ignoring "global"), or GCE metadata when exporting to
+	// telemetry.googleapis.com if empty.
+	Location string
+	// ClusterName is the GKE cluster name attached as k8s.cluster.name.
+	// Auto-detected from GCE metadata when exporting to
+	// telemetry.googleapis.com if empty.
+	ClusterName string
+	// Namespace is the Kubernetes namespace attached as k8s.namespace.name.
+	// Falls back to POD_NAMESPACE (or the in-cluster service account
+	// namespace file) if empty.
+	Namespace string
+	// InstanceID overrides the OTel service.instance.id resource attribute.
+	// Falls back to HOSTNAME, os.Hostname(), or "pid-<pid>" if empty.
+	InstanceID string
 	// ServiceName overrides the OTel service.name resource attribute
 	// (default "kode-gopher").
 	ServiceName string
@@ -71,6 +93,11 @@ type Config struct {
 	ServiceVersion string
 	// ExportInterval is the periodic reader interval (default 60s).
 	ExportInterval time.Duration
+
+	findCredentials func(ctx context.Context, scopes ...string) (*google.Credentials, error)
+	detectMetadata  func(ctx context.Context, project, location, cluster string) (string, string, string)
+	hostname        func() (string, error)
+	readSANamespace func() string
 }
 
 // Recorder records kode-gopher operational metrics. A nil *Recorder is
@@ -143,14 +170,11 @@ func Setup(ctx context.Context, cfg Config) (*Recorder, func(context.Context) er
 	if err != nil {
 		return nil, noopShutdown, err
 	}
-	project := strings.TrimSpace(cfg.Project)
-	if project == "" {
-		project = strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	res, project, err := resolveResource(ctx, cfg, ep.isGoogleCloud)
+	if err != nil {
+		return nil, noopShutdown, err
 	}
-	if ep.isGoogleCloud && project == "" {
-		return nil, noopShutdown, fmt.Errorf("telemetry: exporting to %s requires --project or GOOGLE_CLOUD_PROJECT", cloudMonitoringHost)
-	}
-	opts, err := buildExporterOptions(ctx, ep, project)
+	opts, err := buildExporterOptions(ctx, cfg, ep, project)
 	if err != nil {
 		return nil, noopShutdown, err
 	}
@@ -162,12 +186,35 @@ func Setup(ctx context.Context, cfg Config) (*Recorder, func(context.Context) er
 	if interval <= 0 {
 		interval = defaultExportInterval
 	}
-	res := buildResource(cfg, project)
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(interval))),
 	)
-	return NewRecorder(mp.Meter(scopeName)), mp.Shutdown, nil
+	var once sync.Once
+	var shutErr error
+	shutdown := func(sctx context.Context) error {
+		once.Do(func() { shutErr = mp.Shutdown(sctx) })
+		return shutErr
+	}
+	return NewRecorder(mp.Meter(scopeName)), shutdown, nil
+}
+
+func resolveResource(ctx context.Context, cfg Config, isGoogleCloud bool) (*resource.Resource, string, error) {
+	project := firstNonEmpty(cfg.Project, os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	location := resolveLocation(cfg.Location)
+	cluster := strings.TrimSpace(cfg.ClusterName)
+	if isGoogleCloud {
+		detect := cfg.detectMetadata
+		if detect == nil {
+			detect = detectGCEMetadata
+		}
+		project, location, cluster = detect(ctx, project, location, cluster)
+		location = cleanCloudLocation(location)
+		if project == "" {
+			return nil, "", fmt.Errorf("telemetry: exporting to %s requires --project, GOOGLE_CLOUD_PROJECT, or GCE metadata", cloudMonitoringHost)
+		}
+	}
+	return buildResource(cfg, project, location, cluster, isGoogleCloud), project, nil
 }
 
 // ResolveEndpoint returns explicit if non-empty, else checks standard
@@ -241,18 +288,25 @@ func parseEndpoint(raw string) (parsedEndpoint, error) {
 	}, nil
 }
 
-func buildExporterOptions(ctx context.Context, ep parsedEndpoint, project string) ([]otlpmetricgrpc.Option, error) {
-	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(ep.hostPort)}
+func buildExporterOptions(ctx context.Context, cfg Config, ep parsedEndpoint, project string) ([]otlpmetricgrpc.Option, error) {
+	scheme := "https"
 	if ep.insecure {
-		opts = append(opts, otlpmetricgrpc.WithInsecure())
+		scheme = "http"
+	}
+	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpointURL(scheme + "://" + ep.hostPort)}
+	if ep.insecure || !ep.isGoogleCloud {
 		return opts, nil
 	}
-	if !ep.isGoogleCloud {
-		return opts, nil
+	findCreds := cfg.findCredentials
+	if findCreds == nil {
+		findCreds = google.FindDefaultCredentials
 	}
-	creds, err := google.FindDefaultCredentials(ctx, monitoringWriteScope)
+	creds, err := findCreds(ctx, monitoringWriteScope)
 	if err != nil {
 		return nil, fmt.Errorf("telemetry: find Google credentials for %s: %w", cloudMonitoringHost, err)
+	}
+	if creds == nil || creds.TokenSource == nil {
+		return nil, fmt.Errorf("telemetry: Google credentials for %s have no token source", cloudMonitoringHost)
 	}
 	opts = append(opts, otlpmetricgrpc.WithDialOption(grpc.WithPerRPCCredentials(&tokenSourceRPCCreds{ts: creds.TokenSource})))
 	if project != "" {
@@ -261,23 +315,268 @@ func buildExporterOptions(ctx context.Context, ep parsedEndpoint, project string
 	return opts, nil
 }
 
-func buildResource(cfg Config, project string) *resource.Resource {
-	svcName := strings.TrimSpace(cfg.ServiceName)
-	if svcName == "" {
-		svcName = defaultServiceName
+func detectGCEMetadata(ctx context.Context, project, location, cluster string) (string, string, string) {
+	if project != "" && location != "" && cluster != "" {
+		return project, location, cluster
 	}
-	svcVer := strings.TrimSpace(cfg.ServiceVersion)
-	if svcVer == "" {
-		svcVer = version.Effective()
+	if !metadata.OnGCEWithContext(ctx) {
+		return project, location, cluster
 	}
+	return detectMetadataFromClient(ctx, metadata.NewClient(nil), project, location, cluster)
+}
+
+func detectMetadataFromClient(ctx context.Context, c *metadata.Client, project, location, cluster string) (string, string, string) {
+	if project != "" && location != "" && cluster != "" {
+		return project, location, cluster
+	}
+	mctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if project == "" {
+		if p, err := c.GetWithContext(mctx, "project/project-id"); err == nil {
+			project = strings.TrimSpace(p)
+		}
+	}
+	if location == "" {
+		if loc, err := c.InstanceAttributeValueWithContext(mctx, "cluster-location"); err == nil && cleanCloudLocation(loc) != "" {
+			location = cleanCloudLocation(loc)
+		} else if z, err := c.ZoneWithContext(mctx); err == nil {
+			location = cleanCloudLocation(z)
+		}
+	}
+	if cluster == "" {
+		if cl, err := c.InstanceAttributeValueWithContext(mctx, "cluster-name"); err == nil {
+			cluster = strings.TrimSpace(cl)
+		}
+	}
+	return project, location, cluster
+}
+
+func cleanCloudLocation(v string) string {
+	s := strings.TrimSpace(v)
+	if strings.EqualFold(s, "global") {
+		return ""
+	}
+	return s
+}
+
+func resolveLocation(explicit string) string {
+	return firstNonEmpty(
+		cleanCloudLocation(explicit),
+		cleanCloudLocation(os.Getenv("GOOGLE_CLOUD_LOCATION")),
+		cleanCloudLocation(os.Getenv("CLOUDSDK_COMPUTE_REGION")),
+		cleanCloudLocation(os.Getenv("CLOUDSDK_COMPUTE_ZONE")),
+	)
+}
+
+func resolveHostname(hostFn func() (string, error)) string {
+	if hostFn == nil {
+		hostFn = os.Hostname
+	}
+	if h, err := hostFn(); err == nil {
+		return strings.TrimSpace(h)
+	}
+	return ""
+}
+
+func resolveInstanceID(explicit string, hostFn func() (string, error)) string {
+	if id := firstNonEmpty(explicit, os.Getenv("HOSTNAME")); id != "" {
+		return id
+	}
+	if h := resolveHostname(hostFn); h != "" {
+		return h
+	}
+	return fmt.Sprintf("pid-%d", os.Getpid())
+}
+
+func resolveInClusterNamespace(readSA func() string) string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) == "" {
+		return ""
+	}
+	if readSA != nil {
+		return strings.TrimSpace(readSA())
+	}
+	b, err := os.ReadFile(k8sSANamespacePath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func splitZoneRegion(loc string) (region, zone string) {
+	idx := strings.LastIndexByte(loc, '-')
+	if idx <= 0 || !hasTwoNonEmptyParts(loc[:idx]) || !isZoneSuffix(loc[idx+1:]) {
+		return loc, ""
+	}
+	return loc[:idx], loc
+}
+
+func hasTwoNonEmptyParts(s string) bool {
+	i := strings.IndexByte(s, '-')
+	return i > 0 && i < len(s)-1 && !strings.Contains(s, "--") && s[0] != '-' && s[len(s)-1] != '-'
+}
+
+func isZoneSuffix(s string) bool {
+	if len(s) == 1 {
+		return s[0] >= 'a' && s[0] <= 'z'
+	}
+	if len(s) < 4 || !strings.HasPrefix(s, "ai") {
+		return false
+	}
+	last := s[len(s)-1]
+	if last < 'a' || last > 'z' {
+		return false
+	}
+	for i := 2; i < len(s)-1; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func appendLocationAttrs(attrs []attribute.KeyValue, location string) []attribute.KeyValue {
+	region, zone := splitZoneRegion(strings.TrimSpace(location))
+	if region == "" {
+		return attrs
+	}
+	attrs = append(attrs, attribute.String("cloud.region", region))
+	if zone != "" {
+		attrs = append(attrs, attribute.String("cloud.availability_zone", zone))
+	}
+	return attrs
+}
+
+func buildResource(cfg Config, project, location, cluster string, isGoogleCloud bool) *resource.Resource {
+	defaults := buildDefaultAttrs(cfg, project, location, cluster)
+	res, _ := resource.Merge(resource.NewSchemaless(defaults...), resource.Environment())
+	if overrides := buildExplicitAttrs(cfg); len(overrides) > 0 {
+		res, _ = resource.Merge(res, resource.NewSchemaless(overrides...))
+	}
+	if isGoogleCloud {
+		return finalizeGoogleCloudResource(res, cfg, project)
+	}
+	return res
+}
+
+func buildDefaultAttrs(cfg Config, project, location, cluster string) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
-		attribute.String("service.name", svcName),
-		attribute.String("service.version", svcVer),
+		attribute.String("service.name", defaultServiceName),
+		attribute.String("service.version", version.Effective()),
+		attribute.String("service.instance.id", resolveInstanceID("", cfg.hostname)),
 	}
 	if project != "" {
-		attrs = append(attrs, attribute.String("gcp.project_id", project))
+		attrs = append(attrs,
+			attribute.String("cloud.provider", "gcp"),
+			attribute.String("cloud.account.id", project),
+			attribute.String("gcp.project_id", project),
+		)
 	}
-	return resource.NewSchemaless(attrs...)
+	attrs = appendLocationAttrs(attrs, location)
+	if cluster != "" {
+		attrs = append(attrs,
+			attribute.String("cloud.platform", "gcp_kubernetes_engine"),
+			attribute.String("k8s.cluster.name", cluster),
+		)
+	}
+	envNS := resolveInClusterNamespace(cfg.readSANamespace)
+	if envNS != "" {
+		attrs = append(attrs, attribute.String("k8s.namespace.name", envNS))
+	}
+	inK8sPod := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" || strings.TrimSpace(os.Getenv("POD_NAMESPACE")) != ""
+	if inK8sPod {
+		if pod := firstNonEmpty(os.Getenv("HOSTNAME"), resolveHostname(cfg.hostname)); pod != "" {
+			attrs = append(attrs, attribute.String("k8s.pod.name", pod))
+		}
+	}
+	return attrs
+}
+
+func buildExplicitAttrs(cfg Config) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
+	if s := strings.TrimSpace(cfg.ServiceName); s != "" {
+		attrs = append(attrs, attribute.String("service.name", s))
+	}
+	if s := strings.TrimSpace(cfg.ServiceVersion); s != "" {
+		attrs = append(attrs, attribute.String("service.version", s))
+	}
+	if s := strings.TrimSpace(cfg.InstanceID); s != "" {
+		attrs = append(attrs, attribute.String("service.instance.id", s))
+	}
+	if p := strings.TrimSpace(cfg.Project); p != "" {
+		attrs = append(attrs,
+			attribute.String("cloud.provider", "gcp"),
+			attribute.String("cloud.account.id", p),
+			attribute.String("gcp.project_id", p),
+		)
+	}
+	if loc := cleanCloudLocation(cfg.Location); loc != "" {
+		attrs = appendLocationAttrs(attrs, loc)
+	}
+	if cl := strings.TrimSpace(cfg.ClusterName); cl != "" {
+		attrs = append(attrs,
+			attribute.String("cloud.platform", "gcp_kubernetes_engine"),
+			attribute.String("k8s.cluster.name", cl),
+		)
+	}
+	if ns := strings.TrimSpace(cfg.Namespace); ns != "" {
+		attrs = append(attrs, attribute.String("k8s.namespace.name", ns))
+	}
+	return attrs
+}
+
+func finalizeGoogleCloudResource(res *resource.Resource, cfg Config, project string) *resource.Resource {
+	hasLoc := false
+	hasInst := false
+	filtered := make([]attribute.KeyValue, 0, res.Len()+3)
+	for _, kv := range res.Attributes() {
+		k := string(kv.Key)
+		v := strings.TrimSpace(kv.Value.AsString())
+		if isLocationKey(k) && strings.EqualFold(v, "global") {
+			continue
+		}
+		if k == "gcp.project_id" || k == "cloud.account.id" || k == "cloud.provider" {
+			continue
+		}
+		if isLocationKey(k) && v != "" {
+			hasLoc = true
+		}
+		if isInstanceKey(k) && v != "" {
+			hasInst = true
+		}
+		filtered = append(filtered, kv)
+	}
+	filtered = append(filtered,
+		attribute.String("cloud.provider", "gcp"),
+		attribute.String("cloud.account.id", project),
+		attribute.String("gcp.project_id", project),
+	)
+	if !hasLoc {
+		filtered = append(filtered, attribute.String("cloud.region", defaultCloudRegion))
+	}
+	if !hasInst {
+		filtered = append(filtered, attribute.String("service.instance.id", resolveInstanceID(cfg.InstanceID, cfg.hostname)))
+	}
+	return resource.NewSchemaless(filtered...)
+}
+
+func isLocationKey(k string) bool {
+	return k == "location" || k == "cloud.availability_zone" || k == "cloud.region"
+}
+
+func isInstanceKey(k string) bool {
+	return k == "instance" || k == "service.instance.id" || k == "faas.instance"
 }
 
 type tokenSourceRPCCreds struct {
