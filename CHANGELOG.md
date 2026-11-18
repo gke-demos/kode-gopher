@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-18
+
+Patch release fixing OpenTelemetry `prometheus_target` resource attributes (`service.instance.id`, regional vs. zonal `cloud.region` / `cloud.availability_zone`, `k8s.*`, and GCE metadata auto-detection) when exporting metrics directly to Google Cloud Monitoring (`https://telemetry.googleapis.com`). Redeploy the server image to pick up the fix; the sandbox image is unchanged from `0.7.0`. Documentation: https://gke-demos.github.io/kode-gopher/.
+
 ### Fixed
 
 - **OpenTelemetry exports to Google Cloud Monitoring (`https://telemetry.googleapis.com`) include required `prometheus_target` resource attributes and GCE metadata defaults.** `internal/telemetry` now always populates `service.instance.id` (resolving `INVALID_ARGUMENT: prometheus_target resource type must have an instance specified`), auto-detects project ID, cluster location, and cluster name from GCE metadata on GKE (so `--auth=static` deployments without `--project` or `GOOGLE_CLOUD_PROJECT` also work), attaches `cloud.region` / `cloud.availability_zone`, `k8s.cluster.name`, `k8s.namespace.name`, and `k8s.pod.name`, honors `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` while rejecting invalid `"global"` `prometheus_target` locations, and preserves TLS when an explicit `https://` `--otel-endpoint` overrides an `http://` `OTEL_EXPORTER_OTLP_ENDPOINT`. Deployment docs also note that direct `https://telemetry.googleapis.com` export requires `telemetry.googleapis.com` enabled and `roles/serviceusage.serviceUsageConsumer` alongside `roles/monitoring.metricWriter` on the quota project. ([#88](https://github.com/gke-demos/kode-gopher/issues/88))
