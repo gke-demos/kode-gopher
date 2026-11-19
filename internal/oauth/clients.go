@@ -77,13 +77,19 @@ func LoadStaticClients(path string) ([]StaticClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read clients: %w", err)
 	}
+	return ParseStaticClients(b, path)
+}
+
+// ParseStaticClients parses a JSON array of StaticClient from raw bytes;
+// source names the file or sm:// URI in error messages.
+func ParseStaticClients(b []byte, source string) ([]StaticClient, error) {
 	var cs []StaticClient
 	if err := json.Unmarshal(b, &cs); err != nil {
-		return nil, fmt.Errorf("parse clients %s: %w", path, err)
+		return nil, fmt.Errorf("parse clients %s: %w", source, err)
 	}
 	for _, c := range cs {
 		if err := c.validate(); err != nil {
-			return nil, fmt.Errorf("clients %s: %w", path, err)
+			return nil, fmt.Errorf("clients %s: %w", source, err)
 		}
 	}
 	return cs, nil

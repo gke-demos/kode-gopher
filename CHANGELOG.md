@@ -4,6 +4,10 @@ All notable changes to kode-gopher are recorded here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- **Google Cloud Secret Manager support (`sm://` URIs and `SECRET_STORE=secret-manager`) for server OAuth and static token secrets.** `--auth-token-file`, `--oauth-google-client-file`, `--oauth-domain-google-client-files`, `--oauth-keyring-file`, and `--oauth-clients-file` now accept `sm://projects/<p>/secrets/<s>[/versions/<v>]` (and regional `sm://projects/<p>/locations/<l>/secrets/<s>[/versions/<v>]`) URIs fetched directly at server startup over the Secret Manager REST API via Application Default Credentials / GKE Workload Identity with CRC32C payload verification and zero new module dependencies. Setting `SECRET_STORE=secret-manager` in `scripts/deploy-gke-server.sh` provisions versioned Secret Manager secrets (`SECRET_PREFIX`, seeding from an existing Kubernetes `Secret` on first migration so active user tokens and keyrings stay valid), adds new versions only when payload content changes, grants per-secret `roles/secretmanager.secretAccessor` to `ns/codemode/sa/kode-gopher`'s Workload Identity principal, omits the Kubernetes `Secret` volume mount, and pins concrete numeric version IDs (`TOKEN_SECRET_VERSION`, `GOOGLE_CLIENT_SECRET_VERSION`, `KEYRING_SECRET_VERSION`, `CLIENTS_SECRET_VERSION`, `DOMAIN_GOOGLE_CLIENT_SECRET_VERSIONS`) for atomic rollbacks; `scripts/smoketest-http.sh` also reads `sm://` static tokens automatically. ([#85](https://github.com/gke-demos/kode-gopher/issues/85))
+
 ## [0.7.1] - 2026-11-18
 
 Patch release fixing OpenTelemetry `prometheus_target` resource attributes (`service.instance.id`, regional vs. zonal `cloud.region` / `cloud.availability_zone`, `k8s.*`, and GCE metadata auto-detection) when exporting metrics directly to Google Cloud Monitoring (`https://telemetry.googleapis.com`). Redeploy the server image to pick up the fix; the sandbox image is unchanged from `0.7.0`. Documentation: https://gke-demos.github.io/kode-gopher/.

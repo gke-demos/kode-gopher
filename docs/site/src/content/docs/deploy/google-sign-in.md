@@ -114,9 +114,25 @@ VAULT_AUTH_PROVIDER=projects/<PROJECT_ID>/locations/<LOCATION>/authProviders/kod
 scripts/deploy-gke-server.sh --auth=oauth
 ```
 
-(Omit `KG_HOST` if using the default `sslip.io` hostname, or `IMAGE` to track `:main`. If this project already hosts another kode-gopher deployment, also set distinct `ADDRESS_NAME` and `CERT_NAME` values.)
+(Omit `KG_HOST` if using the default `sslip.io` hostname, or `IMAGE` to track `:main`. If this project already hosts another kode-gopher deployment, also set distinct `ADDRESS_NAME`, `CERT_NAME`, and `SECRET_PREFIX` / `OAUTH_SECRET_NAME` values.)
 
-The script stores the client file, a new token-sealing keyring, and any `CLIENTS_FILE` in the Secret `kode-gopher-oauth`. On later deploys `GOOGLE_CLIENT_FILE` is optional. The keyring is always kept, because replacing it would invalidate every token kode-gopher has issued.
+The script stores the client file, a new token-sealing keyring, and any `CLIENTS_FILE` in the Kubernetes Secret `kode-gopher-oauth` by default (`SECRET_STORE=k8s`). On later deploys `GOOGLE_CLIENT_FILE` is optional. The keyring is always kept, because replacing it would invalidate every token kode-gopher has issued.
+
+To keep secrets out of Kubernetes `etcd` and store them as versioned secrets in Google Cloud Secret Manager (`secretmanager.googleapis.com`), enable `secretmanager.googleapis.com` on `PROJECT` and set `SECRET_STORE=secret-manager`:
+
+```bash
+gcloud services enable secretmanager.googleapis.com
+
+SECRET_STORE=secret-manager \
+KG_HOST=<host> \
+IMAGE=ghcr.io/gke-demos/kode-gopher/server:<version> \
+GOOGLE_CLIENT_FILE=./client_secret_....json \
+ALLOW_DOMAINS=example.com \
+VAULT_AUTH_PROVIDER=projects/<PROJECT_ID>/locations/<LOCATION>/authProviders/kode-gopher \
+scripts/deploy-gke-server.sh --auth=oauth
+```
+
+Under `SECRET_STORE=secret-manager`, the script creates `<prefix>-google-client`, `<prefix>-keyring`, and `<prefix>-clients` (plus `<prefix>-google-client-<domain_with_underscores>` for per-domain clients), migrates an existing `kode-gopher-oauth` keyring and client list on first switch so active tokens stay valid, grants `roles/secretmanager.secretAccessor` on only those secrets to kode-gopher's Workload Identity principal, and pins the resolved numeric version (`sm://projects/<PROJECT_ID>/secrets/<name>/versions/<N>`) on the Deployment for auditable rollbacks; see [Deployment settings](/reference/deploy-settings/) and [Operations](/deploy/operations/#secret-changes-and-rollbacks).
 
 Once the Google-managed certificate turns `ACTIVE`, verify the public HTTPS and OAuth endpoints before signing in:
 

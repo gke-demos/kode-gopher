@@ -11,7 +11,7 @@ Set `KG_HOST=kode-gopher.example.com`, and create a DNS `A` record pointing it a
 
 Do this before the first deploy, because the certificate (`CERT_NAME`, default `kode-gopher-cert`) is issued for whatever hostname the script sees first. To change the hostname on an existing deployment, delete its certificate (`gcloud compute ssl-certificates delete kode-gopher-cert --global`), then redeploy with `KG_HOST`. Under Google sign-in the issuer URL and vault continue URI change with the hostname, so update the OAuth client's redirect URI and the vault auth provider's `--three-legged-oauth-default-continue-uri` as well.
 
-To run more than one kode-gopher deployment in the same GCP project (for example a staging cluster and a production cluster), pass distinct `ADDRESS_NAME`, `CERT_NAME` and (under Google sign-in) `VAULT_AUTH_PROVIDER` values for each deployment.
+To run more than one kode-gopher deployment in the same GCP project (for example a staging cluster and a production cluster), pass distinct `ADDRESS_NAME`, `CERT_NAME`, `SECRET_PREFIX` (or `OAUTH_SECRET_NAME` under `SECRET_STORE=k8s`), and (under Google sign-in) `VAULT_AUTH_PROVIDER` values for each deployment.
 
 ## Test a deployment
 
@@ -44,7 +44,11 @@ The warm pool doesn't pick up a new sandbox image on its own: agent-sandbox keep
   - its ingress is limited to Google's load balancer ranges;
   - the sandbox router accepts no in-cluster traffic at all.
 - **Front-end timeout:** keep any proxy or load balancer in front of kode-gopher at a request timeout of at least 2 minutes. Under vault custody, a token refresh or sign-in can wait out a nearly spent Google token for up to about 93 seconds before answering, and a client that gets a 504 instead may start a new browser sign-in. The GKE Gateway the deploy script creates allows 900 seconds; a load balancer's default is often 30 or 60.
-- **Secret changes:** kode-gopher reads its Secret at startup. The deploy script restarts it whenever the Secret changes: a new token, `CLIENTS_FILE` or Google client file.
+- **Secret changes:** kode-gopher reads its secrets at startup (either from the mounted Kubernetes Secret under `SECRET_STORE=k8s` or directly from Google Cloud Secret Manager over Workload Identity via `sm://.../versions/<N>` URIs under `SECRET_STORE=secret-manager`). The deploy script restarts the pod whenever a secret payload or pinned version changes.
+
+## Secret changes and rollbacks
+
+With `SECRET_STORE=secret-manager`, `scripts/deploy-gke-server.sh` records the exact numeric Secret Manager version (`versions/<N>`) in the Deployment's `--auth-token-file` or `--oauth-*-file` flags and adds a new Secret Manager version only when a supplied file's content changes. To roll back a client rotation without mutating Secret Manager or cluster Secrets by hand, either pass the prior version (`GOOGLE_CLIENT_SECRET_VERSION=1`, `CLIENTS_SECRET_VERSION=1`, `KEYRING_SECRET_VERSION=1`, `DOMAIN_GOOGLE_CLIENT_SECRET_VERSIONS=<domain>=1`, or `TOKEN_SECRET_VERSION=1`) to `scripts/deploy-gke-server.sh` or run `kubectl -n codemode rollout undo deployment/kode-gopher`.
 
 ## Logs
 
@@ -60,6 +64,9 @@ kode-gopher never logs tokens or secrets.
 kubectl -n codemode delete gateway kode-gopher   # first, so the load balancer releases the IP and certificate
 kubectl delete -k manifests/overlays/gke-server
 kubectl -n codemode delete secret kode-gopher-token kode-gopher-oauth --ignore-not-found
+# If deployed with SECRET_STORE=secret-manager, delete its Secret Manager secrets when no longer needed:
+# gcloud secrets delete kode-gopher-token --quiet
+# gcloud secrets delete kode-gopher-oauth-google-client kode-gopher-oauth-keyring kode-gopher-oauth-clients --quiet
 gcloud compute addresses delete kode-gopher-ip --global
 gcloud compute ssl-certificates delete kode-gopher-cert --global
 ```

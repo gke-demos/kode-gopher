@@ -31,6 +31,7 @@ import (
 
 	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/oauth"
+	"github.com/gke-demos/kode-gopher/internal/secretmgr"
 	"github.com/gke-demos/kode-gopher/internal/telemetry"
 )
 
@@ -51,25 +52,58 @@ type oauthFlags struct {
 	openReg             *bool
 	project             *string
 	quotaProject        *string
+
+	loader *secretmgr.Loader
 }
 
 func addOAuthFlags(fs *flag.FlagSet) *oauthFlags {
 	return &oauthFlags{
 		issuer:              fs.String("oauth-issuer", "", "oauth: public base URL of this server, e.g. https://kg.example.com (the MCP endpoint is <issuer>/mcp)"),
-		googleClient:        fs.String("oauth-google-client-file", "", "oauth: kode-gopher's Google OAuth client, as the JSON the Cloud console downloads"),
-		domainGoogleClients: fs.String("oauth-domain-google-client-files", "", "oauth: comma-separated <domain>=<path> overrides for --oauth-google-client-file (e.g. google.com=/etc/kode-gopher/oauth/google-client-google.com.json)"),
-		keyring:             fs.String("oauth-keyring-file", "", "oauth: token-sealing keys, one \"<id> <base64 32 bytes>\" per line, sealing key first"),
+		googleClient:        fs.String("oauth-google-client-file", "", "oauth: kode-gopher's Google OAuth client JSON file or Secret Manager URI (sm://projects/<p>/secrets/<s>[/versions/<v>])"),
+		domainGoogleClients: fs.String("oauth-domain-google-client-files", "", "oauth: comma-separated <domain>=<path-or-sm://-URI> overrides for --oauth-google-client-file (e.g. google.com=/etc/kode-gopher/oauth/google-client-google.com.json)"),
+		keyring:             fs.String("oauth-keyring-file", "", "oauth: token-sealing keys file or sm:// URI, one \"<id> <base64 32 bytes>\" per line, sealing key first"),
 		custody:             fs.String("oauth-custody", "vault", "oauth: who holds users' Google grants: vault (Agent Identity credential vault) or sealed (inside kode-gopher's refresh token)"),
 		authProvider:        fs.String("oauth-vault-auth-provider", "", "oauth, vault custody: projects/<p>/locations/<l>/authProviders/<name>"),
 		domainAuthProviders: fs.String("oauth-domain-vault-auth-providers", "", "oauth, vault custody: comma-separated <domain>=projects/<p>/locations/<l>/authProviders/<name> overrides for --oauth-vault-auth-provider"),
 		allowDomains:        fs.String("oauth-allow-domains", "", "oauth: comma-separated Workspace domains (the ID token's hd claim) to admit"),
 		allowGroups:         fs.String("oauth-allow-groups", "", "oauth: comma-separated Google group emails to admit (nested membership counts; the checking identity needs the Groups Reader admin role)"),
 		groupsSA:            fs.String("oauth-groups-service-account", "", "oauth: check --oauth-allow-groups as this Google service account (impersonated; it holds Groups Reader) instead of kode-gopher's own identity, which as a Workload Identity principal has no email to assign the role to"),
-		clientsFile:         fs.String("oauth-clients-file", "", "oauth: JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris}, or {client_id, client_secret, service_account} for the client_credentials grant)"),
+		clientsFile:         fs.String("oauth-clients-file", "", "oauth: file or sm:// URI holding a JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris}, or {client_id, client_secret, service_account} for the client_credentials grant)"),
 		openReg:             fs.Bool("oauth-open-registration", true, "oauth: accept dynamically registered (DCR) and Client ID Metadata Document clients, not just pre-registered ones"),
 		project:             fs.String("project", "", "oauth: project reported to snippets as GOOGLE_CLOUD_PROJECT"),
 		quotaProject:        fs.String("quota-project", "", "oauth: quota project reported to snippets as GOOGLE_CLOUD_QUOTA_PROJECT"),
 	}
+}
+
+func (f *oauthFlags) secretLoader() *secretmgr.Loader {
+	if f != nil && f.loader != nil {
+		return f.loader
+	}
+	return &secretmgr.Loader{}
+}
+
+func loadGoogleClientSource(ctx context.Context, loader *secretmgr.Loader, source string) (oauth.GoogleClient, error) {
+	b, err := loader.Read(ctx, source)
+	if err != nil {
+		return oauth.GoogleClient{}, fmt.Errorf("read Google client: %w", err)
+	}
+	return oauth.ParseGoogleClient(b, source)
+}
+
+func loadKeyringSource(ctx context.Context, loader *secretmgr.Loader, source string) (*oauth.Keyring, error) {
+	b, err := loader.Read(ctx, source)
+	if err != nil {
+		return nil, fmt.Errorf("read keyring: %w", err)
+	}
+	return oauth.ParseKeyring(b, source)
+}
+
+func loadStaticClientsSource(ctx context.Context, loader *secretmgr.Loader, source string) ([]oauth.StaticClient, error) {
+	b, err := loader.Read(ctx, source)
+	if err != nil {
+		return nil, fmt.Errorf("read clients: %w", err)
+	}
+	return oauth.ParseStaticClients(b, source)
 }
 
 var authProviderRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authProviders/[^/]+$`)
@@ -81,15 +115,16 @@ func (f *oauthFlags) server(ctx context.Context, readOnly bool, metrics *telemet
 	if *f.issuer == "" || *f.googleClient == "" || *f.keyring == "" {
 		return nil, fmt.Errorf("--auth=oauth needs --oauth-issuer, --oauth-google-client-file and --oauth-keyring-file")
 	}
-	gc, err := oauth.LoadGoogleClient(*f.googleClient)
+	loader := f.secretLoader()
+	gc, err := loadGoogleClientSource(ctx, loader, *f.googleClient)
 	if err != nil {
 		return nil, err
 	}
-	keys, err := oauth.LoadKeyring(*f.keyring)
+	keys, err := loadKeyringSource(ctx, loader, *f.keyring)
 	if err != nil {
 		return nil, err
 	}
-	custody, providers, err := f.buildCustody(ctx, readOnly)
+	custody, providers, err := f.buildCustody(ctx, loader, readOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +142,7 @@ func (f *oauthFlags) server(ctx context.Context, readOnly bool, metrics *telemet
 	var clients []oauth.StaticClient
 	var serviceTokens oauth.ServiceTokens
 	if *f.clientsFile != "" {
-		if clients, err = oauth.LoadStaticClients(*f.clientsFile); err != nil {
+		if clients, err = loadStaticClientsSource(ctx, loader, *f.clientsFile); err != nil {
 			return nil, err
 		}
 		if slices.ContainsFunc(clients, func(c oauth.StaticClient) bool { return c.ServiceAccount != "" }) {
@@ -133,7 +168,7 @@ func (f *oauthFlags) server(ctx context.Context, readOnly bool, metrics *telemet
 	})
 }
 
-func (f *oauthFlags) buildCustody(ctx context.Context, readOnly bool) (oauth.Custody, map[string]oauth.Provider, error) {
+func (f *oauthFlags) buildCustody(ctx context.Context, loader *secretmgr.Loader, readOnly bool) (oauth.Custody, map[string]oauth.Provider, error) {
 	domainClients, err := parseDomainMap(*f.domainGoogleClients, "--oauth-domain-google-client-files")
 	if err != nil {
 		return nil, nil, err
@@ -151,7 +186,7 @@ func (f *oauthFlags) buildCustody(ctx context.Context, readOnly bool) (oauth.Cus
 		if err != nil {
 			return nil, nil, fmt.Errorf("vault client: %w", err)
 		}
-		providers, err := buildVaultProviders(domainClients, domainVaults, hc, readOnly)
+		providers, err := buildVaultProviders(ctx, loader, domainClients, domainVaults, hc, readOnly)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -160,7 +195,7 @@ func (f *oauthFlags) buildCustody(ctx context.Context, readOnly bool) (oauth.Cus
 		if len(domainVaults) > 0 {
 			return nil, nil, fmt.Errorf("--oauth-domain-vault-auth-providers requires --oauth-custody=vault")
 		}
-		providers, err := buildSealedProviders(domainClients, readOnly)
+		providers, err := buildSealedProviders(ctx, loader, domainClients, readOnly)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -191,7 +226,7 @@ func parseDomainMap(raw, flagName string) (map[string]string, error) {
 	return out, nil
 }
 
-func buildVaultProviders(clients, vaults map[string]string, hc *http.Client, readOnly bool) (map[string]oauth.Provider, error) {
+func buildVaultProviders(ctx context.Context, loader *secretmgr.Loader, clients, vaults map[string]string, hc *http.Client, readOnly bool) (map[string]oauth.Provider, error) {
 	for d := range vaults {
 		if _, ok := clients[d]; !ok {
 			return nil, fmt.Errorf("--oauth-domain-vault-auth-providers domain %q has no matching entry in --oauth-domain-google-client-files", d)
@@ -201,7 +236,7 @@ func buildVaultProviders(clients, vaults map[string]string, hc *http.Client, rea
 		return nil, nil
 	}
 	out := make(map[string]oauth.Provider, len(clients))
-	for d, path := range clients {
+	for d, source := range clients {
 		ap, ok := vaults[d]
 		if !ok {
 			return nil, fmt.Errorf("--oauth-domain-google-client-files domain %q has no matching entry in --oauth-domain-vault-auth-providers", d)
@@ -209,7 +244,7 @@ func buildVaultProviders(clients, vaults map[string]string, hc *http.Client, rea
 		if !authProviderRE.MatchString(ap) {
 			return nil, fmt.Errorf("--oauth-domain-vault-auth-providers for %q must match projects/<p>/locations/<l>/authProviders/<name>", d)
 		}
-		gc, err := oauth.LoadGoogleClient(path)
+		gc, err := loadGoogleClientSource(ctx, loader, source)
 		if err != nil {
 			return nil, fmt.Errorf("domain %q: %w", d, err)
 		}
@@ -221,13 +256,13 @@ func buildVaultProviders(clients, vaults map[string]string, hc *http.Client, rea
 	return out, nil
 }
 
-func buildSealedProviders(clients map[string]string, readOnly bool) (map[string]oauth.Provider, error) {
+func buildSealedProviders(ctx context.Context, loader *secretmgr.Loader, clients map[string]string, readOnly bool) (map[string]oauth.Provider, error) {
 	if len(clients) == 0 {
 		return nil, nil
 	}
 	out := make(map[string]oauth.Provider, len(clients))
-	for d, path := range clients {
-		gc, err := oauth.LoadGoogleClient(path)
+	for d, source := range clients {
+		gc, err := loadGoogleClientSource(ctx, loader, source)
 		if err != nil {
 			return nil, fmt.Errorf("domain %q: %w", d, err)
 		}

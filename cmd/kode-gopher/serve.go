@@ -29,6 +29,7 @@ import (
 
 	"github.com/gke-demos/kode-gopher/internal/creds"
 	"github.com/gke-demos/kode-gopher/internal/mcp"
+	"github.com/gke-demos/kode-gopher/internal/secretmgr"
 	"github.com/gke-demos/kode-gopher/internal/telemetry"
 )
 
@@ -47,7 +48,7 @@ func runServe(args []string) int {
 	transport := fs.String("transport", "stdio", "stdio, or http (streamable HTTP at <addr>/mcp, one sandbox per MCP session)")
 	addr := fs.String("addr", ":8080", "http: listen address")
 	authMode := fs.String("auth", "static", "http: static (one operator-issued bearer token) or oauth (kode-gopher's OAuth server fronting Google sign-in; snippets run as the signed-in user; needs --in-cluster)")
-	tokenFile := fs.String("auth-token-file", "", "http, static auth: file holding the bearer token clients must send")
+	tokenFile := fs.String("auth-token-file", "", "http, static auth: file or Secret Manager URI (sm://projects/<p>/secrets/<s>[/versions/<v>]) holding the bearer token clients must send")
 	authUser := fs.String("auth-user", "operator", "http, static auth: the user the static token authenticates as")
 	oauthCfg := addOAuthFlags(fs)
 	sessionTO := fs.Duration("session-timeout", 15*time.Minute, "http: end MCP sessions idle this long, closing their sandboxes")
@@ -163,7 +164,7 @@ func serveCreds(ctx context.Context, transport, authMode string, inCluster bool,
 func httpAuth(ctx context.Context, opts *mcp.HTTPOptions, mode, tokenFile, user string, inCluster, readOnly bool, of *oauthFlags, metrics *telemetry.Recorder) error {
 	switch mode {
 	case "static":
-		token, err := readToken(tokenFile)
+		token, err := readToken(ctx, of.secretLoader(), tokenFile)
 		if err != nil {
 			return err
 		}
@@ -210,18 +211,19 @@ func (f *obsFlags) setup(ctx context.Context, project string) (*telemetry.Record
 	})
 }
 
-// readToken reads the static bearer token from path. Never logged.
-func readToken(path string) (string, error) {
-	if path == "" {
+// readToken reads the static bearer token from source (file path or sm:// URI).
+// Never logged.
+func readToken(ctx context.Context, loader *secretmgr.Loader, source string) (string, error) {
+	if source == "" {
 		return "", fmt.Errorf("--auth=static needs --auth-token-file")
 	}
-	b, err := os.ReadFile(path)
+	b, err := loader.Read(ctx, source)
 	if err != nil {
 		return "", fmt.Errorf("read auth token: %w", err)
 	}
 	token := strings.TrimSpace(string(b))
 	if len(token) < 32 {
-		return "", fmt.Errorf("auth token in %s is shorter than 32 characters", path)
+		return "", fmt.Errorf("auth token in %s is shorter than 32 characters", source)
 	}
 	return token, nil
 }

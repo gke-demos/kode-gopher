@@ -68,7 +68,7 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
   -auth string
     	http: static (one operator-issued bearer token) or oauth (kode-gopher's OAuth server fronting Google sign-in; snippets run as the signed-in user; needs --in-cluster) (default "static")
   -auth-token-file string
-    	http, static auth: file holding the bearer token clients must send
+    	http, static auth: file or Secret Manager URI (sm://projects/<p>/secrets/<s>[/versions/<v>]) holding the bearer token clients must send
   -auth-user string
     	http, static auth: the user the static token authenticates as (default "operator")
   -capture-dir string
@@ -96,21 +96,21 @@ MCP server over stdio or streamable HTTP. Registers execute_go_code, gcp_auth_st
   -oauth-allow-groups string
     	oauth: comma-separated Google group emails to admit (nested membership counts; the checking identity needs the Groups Reader admin role)
   -oauth-clients-file string
-    	oauth: JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris}, or {client_id, client_secret, service_account} for the client_credentials grant)
+    	oauth: file or sm:// URI holding a JSON array of pre-registered clients ({client_id, client_secret?, client_name, redirect_uris}, or {client_id, client_secret, service_account} for the client_credentials grant)
   -oauth-custody string
     	oauth: who holds users' Google grants: vault (Agent Identity credential vault) or sealed (inside kode-gopher's refresh token) (default "vault")
   -oauth-domain-google-client-files string
-    	oauth: comma-separated <domain>=<path> overrides for --oauth-google-client-file (e.g. google.com=/etc/kode-gopher/oauth/google-client-google.com.json)
+    	oauth: comma-separated <domain>=<path-or-sm://-URI> overrides for --oauth-google-client-file (e.g. google.com=/etc/kode-gopher/oauth/google-client-google.com.json)
   -oauth-domain-vault-auth-providers string
     	oauth, vault custody: comma-separated <domain>=projects/<p>/locations/<l>/authProviders/<name> overrides for --oauth-vault-auth-provider
   -oauth-google-client-file string
-    	oauth: kode-gopher's Google OAuth client, as the JSON the Cloud console downloads
+    	oauth: kode-gopher's Google OAuth client JSON file or Secret Manager URI (sm://projects/<p>/secrets/<s>[/versions/<v>])
   -oauth-groups-service-account string
     	oauth: check --oauth-allow-groups as this Google service account (impersonated; it holds Groups Reader) instead of kode-gopher's own identity, which as a Workload Identity principal has no email to assign the role to
   -oauth-issuer string
     	oauth: public base URL of this server, e.g. https://kg.example.com (the MCP endpoint is <issuer>/mcp)
   -oauth-keyring-file string
-    	oauth: token-sealing keys, one "<id> <base64 32 bytes>" per line, sealing key first
+    	oauth: token-sealing keys file or sm:// URI, one "<id> <base64 32 bytes>" per line, sealing key first
   -oauth-open-registration
     	oauth: accept dynamically registered (DCR) and Client ID Metadata Document clients, not just pre-registered ones (default true)
   -oauth-vault-auth-provider string
