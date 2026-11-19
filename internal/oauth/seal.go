@@ -88,6 +88,12 @@ func LoadKeyring(path string) (*Keyring, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read keyring: %w", err)
 	}
+	return ParseKeyring(b, path)
+}
+
+// ParseKeyring parses keyring bytes ("<id> <base64 32 bytes>" per line,
+// sealing key first); source names the file or sm:// URI in error messages.
+func ParseKeyring(b []byte, source string) (*Keyring, error) {
 	var keys []KeyringKey
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for n := 1; sc.Scan(); n++ {
@@ -97,13 +103,16 @@ func LoadKeyring(path string) (*Keyring, error) {
 		}
 		f := strings.Fields(line)
 		if len(f) != 2 {
-			return nil, fmt.Errorf("keyring %s:%d: want \"<id> <base64 key>\"", path, n)
+			return nil, fmt.Errorf("keyring %s:%d: want \"<id> <base64 key>\"", source, n)
 		}
 		secret, err := base64.StdEncoding.DecodeString(f[1])
 		if err != nil {
-			return nil, fmt.Errorf("keyring %s:%d: key isn't base64", path, n)
+			return nil, fmt.Errorf("keyring %s:%d: key isn't base64", source, n)
 		}
 		keys = append(keys, KeyringKey{ID: f[0], Secret: secret})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("keyring %s: %w", source, err)
 	}
 	return NewKeyring(keys...)
 }

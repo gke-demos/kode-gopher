@@ -91,9 +91,38 @@ k -n "$NS" rollout status deployment/kode-gopher --timeout=60s
 args="$(k -n "$NS" get deployment kode-gopher -o jsonpath='{.spec.template.spec.containers[0].args[*]}')"
 if [[ " $args " != *" --auth=oauth "* ]]; then
   AUTH=static
-  # Handed to python in the environment; never printed.
-  KG_TOKEN="$(k -n "$NS" get secret kode-gopher-token -o jsonpath='{.data.token}' \
-    | python3 -c 'import base64, sys; print(base64.b64decode(sys.stdin.read()).decode())')"
+  # Handed to python in the environment; never printed. Supports both
+  # Kubernetes Secret mounts and sm:// Secret Manager URIs.
+  token_src="$(k -n "$NS" get deployment kode-gopher -o json \
+    | python3 -c '
+import json, sys
+for a in (json.load(sys.stdin)["spec"]["template"]["spec"]["containers"][0].get("args") or []):
+    if a.startswith("--auth-token-file="):
+        print(a.split("=", 1)[1])
+        break
+')"
+  if [[ "$token_src" == sm://* ]]; then
+    command -v gcloud >/dev/null 2>&1 || die "missing prerequisite: gcloud (needed to read sm:// static token)"
+    KG_TOKEN="$(python3 - "$token_src" <<'PY'
+import re, subprocess, sys
+uri = sys.argv[1]
+m = re.match(
+    r"^sm://projects/([a-zA-Z0-9][a-zA-Z0-9._:-]*)(?:/locations/([a-z0-9][a-z0-9-]*))?/secrets/([a-zA-Z0-9_][a-zA-Z0-9_-]*)(?:/versions/([a-zA-Z0-9][a-zA-Z0-9_-]*))?$",
+    uri,
+)
+if not m:
+    sys.exit(f"unsupported sm:// static token URI: {uri!r}")
+proj, loc, sec, ver = m.group(1), m.group(2), m.group(3), m.group(4) or "latest"
+cmd = ["gcloud", "secrets", "versions", "access", ver, f"--secret={sec}", f"--project={proj}"]
+if loc:
+    cmd.append(f"--location={loc}")
+sys.stdout.write(subprocess.check_output(cmd, text=True).strip())
+PY
+)"
+  else
+    KG_TOKEN="$(k -n "$NS" get secret kode-gopher-token -o jsonpath='{.data.token}' \
+      | python3 -c 'import base64, sys; print(base64.b64decode(sys.stdin.read()).decode().strip())')"
+  fi
   export KG_TOKEN
 else
   AUTH=oauth

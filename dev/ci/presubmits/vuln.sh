@@ -34,7 +34,9 @@ set -euo pipefail
 cd "$(repo_root)"
 
 toolchain="$(awk '/^toolchain/ {print $2}' go.mod)"
-GOTOOLCHAIN="$toolchain" ensure_tool govulncheck golang.org/x/vuln/cmd/govulncheck@latest
-GOTOOLCHAIN="$toolchain" govulncheck ./...
-(cd internal/prewarm/sdk/gkeutil && GOTOOLCHAIN="$toolchain" govulncheck -scan package ./...)
-(cd internal/prewarm && GOTOOLCHAIN="$toolchain" govulncheck -scan package ./...)
+export GOTOOLCHAIN="$toolchain"
+ensure_tool govulncheck golang.org/x/vuln/cmd/govulncheck@latest
+export PATH="$(go env GOROOT)/bin:$PATH"
+govulncheck ./...
+(cd internal/prewarm/sdk/gkeutil && govulncheck -scan package ./...)
+(cd internal/prewarm && govulncheck -scan package ./...)

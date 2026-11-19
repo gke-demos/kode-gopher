@@ -11,15 +11,17 @@ The quickest deployment: one bearer token that every client sends.
 scripts/deploy-gke-server.sh
 ```
 
-The script generates the token and stores it in the Secret `kode-gopher-token`. To connect Claude Code:
+The script generates the token and stores it in the Kubernetes Secret `kode-gopher-token` by default (or in Google Cloud Secret Manager when `SECRET_STORE=secret-manager` is set, granting `roles/secretmanager.secretAccessor` on that secret to kode-gopher's Workload Identity principal). To connect Claude Code:
 
 ```bash
 TOKEN=$(kubectl -n codemode get secret kode-gopher-token -o jsonpath='{.data.token}' | base64 -d)
+# Or when deployed with SECRET_STORE=secret-manager:
+# TOKEN=$(gcloud secrets versions access latest --secret=kode-gopher-token --project=<PROJECT_ID>)
 claude mcp add --transport http kode-gopher https://<host>/mcp --header "Authorization: Bearer $TOKEN"
 ```
 
 :::caution
-Anyone with the token can run code as the identity below. Share it like a password. To rotate it, delete the Secret and rerun the deploy script, which creates a new token and restarts kode-gopher to load it.
+Anyone with the token can run code as the identity below. Share it like a password. To rotate it under `SECRET_STORE=k8s`, delete the Kubernetes Secret and rerun the deploy script; under `SECRET_STORE=secret-manager`, add a new secret version (`gcloud secrets versions add kode-gopher-token --data-file=...`) and rerun the deploy script to pin and load the new version.
 :::
 
 ## Who snippets run as

@@ -25,6 +25,7 @@ Read before changing a subsystem:
 | `internal/mcp` | the MCP tools and their descriptions |
 | `internal/creds` | where a snippet's Google credentials come from (ADC, OAuth user, service account) |
 | `internal/oauth` | the OAuth 2.1 authorization server fronting Google sign-in, allow lists, custody |
+| `internal/secretmgr` | resolves server secret payloads from local files or Google Cloud Secret Manager (`sm://...`) over REST via ADC / Workload Identity |
 | `internal/curated`, `internal/prompts` | the precompiled package set and the generated LLM prompt |
 | `internal/prewarm` | a **separate Go module**: the sandbox image's prewarmed dependencies |
 | `manifests/` | kustomize: `base` (kind applies it directly), overlays `gke`, `gke-server`, `gke-server-oauth`, and `components/egress-allowlist` |
@@ -61,7 +62,7 @@ Open PRs ready for review against `main`, not as drafts, unless one genuinely ca
 - **Copy identifiers from tool output.** Commit hashes, run IDs, image digests, resource names: paste them, never type them from memory. Made-up ones have been used here.
 - **Never print secrets.** Tokens, client secrets, the OAuth keyring, cookie values: not in logs, test output, PR text or commands you echo. kode-gopher's own logs carry fixed strings and emails, not request data: gosec flags logging request values (G706), and it's right to.
 - **Leave other people's clusters and contexts alone.** Pass `KUBECONFIG=` or `CONTEXT=` to scripts; don't switch the current kube context. Don't delete or recreate workloads you didn't create.
-- **The deploy script keeps the OAuth keyring** in the `kode-gopher-oauth` Secret. Replacing it invalidates every token the server has issued.
+- **The deploy script keeps the OAuth keyring** in the `kode-gopher-oauth` Kubernetes Secret or `<prefix>-keyring` Secret Manager secret. Replacing it invalidates every token the server has issued.
 - **Don't tag or release unless asked.** The process is in [`docs/release-process.md`](./docs/release-process.md): annotated tags, and a `CHANGELOG.md` section that becomes the release notes verbatim.
 
 ## Foot-guns

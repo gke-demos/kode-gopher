@@ -22,7 +22,9 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 | `ADDRESS_NAME` | `kode-gopher-ip` | Name of the global static IP address in the project. Set a distinct name when running more than one deployment in the same project. |
 | `CERT_NAME` | `kode-gopher-cert` | Name of the Google-managed SSL certificate in the project. Set a distinct name when running more than one deployment in the same project. |
 | `EGRESS_ALLOW` | none | Extra hosts sandboxes may reach on port 443, comma-separated: `api.example.com,*.example.org`. A `*.` pattern matches one label. Always allowed: `*.googleapis.com`, `proxy.golang.org`, `sum.golang.org` and `*.<cluster-region>.gke.goog`. |
-| `KG_HOST` | `<ip-with-dashes>.sslip.io` | Public hostname. For your own domain, point a DNS A record at the IP; see [Operations](/deploy/operations/#your-own-domain). |
+| `KG_HOST` | `<ip-with-dashes>.sslip.io` | Public hostname. For your own domain, point a DNS A record at the IP; see [Operations](/deploy/operations/#your-own-domain-and-multiple-deployments). |
+| `SECRET_STORE` | `k8s` | Where server secrets live: `k8s` (cluster-local Kubernetes Secret) or `secret-manager` (versioned secrets in Google Cloud Secret Manager fetched directly at startup via kode-gopher's Workload Identity, with no Kubernetes Secret mounted). |
+| `SECRET_PREFIX` | `kode-gopher-token` (static) or `OAUTH_SECRET_NAME` (oauth) | Secret Manager secret name under `--auth=static`, or prefix under `--auth=oauth` (`<prefix>-google-client`, `<prefix>-keyring`, `<prefix>-clients`, and `<prefix>-google-client-<domain_with_underscores>`). Set distinct prefixes when running staging and production deployments in the same GCP project. |
 | `CAPTURE_DIR` | none | Directory inside the server container (such as `/tmp/kode-gopher-captures` on the `emptyDir` volume) where JSON debug records of `execute_go_code` calls are written (source files, compiler/runtime stderr, timings; never credentials or result values). |
 | `CAPTURE_MODE` | `failures` (when `CAPTURE_DIR` is set) | Which `execute_go_code` calls to capture when `CAPTURE_DIR` is set: `failures` (build errors, runtime errors, timeouts, normalize errors, and `go mod tidy` runs) or `all`. |
 | `OTEL_ENDPOINT` | none | OpenTelemetry OTLP gRPC collector endpoint (`--otel-endpoint`), such as `https://telemetry.googleapis.com` for Google Cloud Monitoring (enable `telemetry.googleapis.com` on `PROJECT` and grant the `kode-gopher` service account `roles/monitoring.metricWriter` and `roles/serviceusage.serviceUsageConsumer` on `PROJECT`). |
@@ -32,14 +34,17 @@ description: The environment variables and flags of scripts/deploy-gke-server.sh
 | Variable | Default | Meaning |
 |---|---|---|
 | `SERVICE_ACCOUNT` | none | Run every snippet as this Google service account (`--credentials=service`) instead of kode-gopher's own identity. kode-gopher needs `roles/iam.serviceAccountTokenCreator` on it. |
+| `TOKEN_SECRET_VERSION` | `latest` (resolved to numeric version) | With `SECRET_STORE=secret-manager`: pin an existing Secret Manager version (for example `1`) for the static bearer token instead of `latest`. |
 
 ## Google sign-in only
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `OAUTH_SECRET_NAME` | `kode-gopher-oauth` | Name of the Kubernetes Secret in `codemode` holding `google-client.json`, `keyring`, and `clients.json`. When creating a new Secret while `kode-gopher-oauth` exists, the script copies `keyring` and `clients.json` from `kode-gopher-oauth` so active tokens keep working while leaving the old Secret untouched for rollback. |
-| `GOOGLE_CLIENT_FILE` | none (required on first deploy) | The Google OAuth client JSON downloaded from the console. |
-| `DOMAIN_GOOGLE_CLIENT_FILES` | none | Comma-separated `<domain>=<path>` overrides for `GOOGLE_CLIENT_FILE` when admitting multiple Workspace organizations that need distinct OAuth clients (for example `google.com=./corp_client.json`). Stored in the Secret as `google-client-<domain>.json` and kept across redeploys when unset. |
+| `OAUTH_SECRET_NAME` | `kode-gopher-oauth` | Name of the Kubernetes Secret in `codemode` holding `google-client.json`, `keyring`, and `clients.json` (and default `SECRET_PREFIX` under `SECRET_STORE=secret-manager`). When creating a new Secret or migrating to `SECRET_STORE=secret-manager` while `kode-gopher-oauth` exists, the script copies `keyring` and `clients.json` so active tokens keep working while leaving the old Kubernetes Secret untouched for rollback. |
+| `GOOGLE_CLIENT_FILE` | none (required on first deploy) | The Google OAuth client JSON downloaded from the console. Under `SECRET_STORE=secret-manager`, a new version is added only when the file content differs from the current `latest` version. |
+| `DOMAIN_GOOGLE_CLIENT_FILES` | none | Comma-separated `<domain>=<path>` overrides for `GOOGLE_CLIENT_FILE` when admitting multiple Workspace organizations that need distinct OAuth clients (for example `google.com=./corp_client.json`). Stored as `google-client-<domain>.json` in Kubernetes or `<prefix>-google-client-<domain_with_underscores>` in Secret Manager, and kept across redeploys when unset. |
+| `GOOGLE_CLIENT_SECRET_VERSION`, `KEYRING_SECRET_VERSION`, `CLIENTS_SECRET_VERSION` | `latest` (resolved to numeric version) | With `SECRET_STORE=secret-manager`: pin an existing Secret Manager version (for example `1`) on the corresponding OAuth secret for atomic rollback without mutating Secret Manager. |
+| `DOMAIN_GOOGLE_CLIENT_SECRET_VERSIONS` | `latest` (resolved to numeric version) | With `SECRET_STORE=secret-manager`: comma-separated `<domain>=<version>` pins for per-domain Google client secrets. |
 | `ALLOW_DOMAINS` | none | Comma-separated Workspace domains to admit, matched against the ID token's `hd` claim. |
 | `ALLOW_GROUPS` | none | Comma-separated Google group emails to admit. Nested membership counts. |
 | `GROUPS_SERVICE_ACCOUNT` | none | The service account that checks `ALLOW_GROUPS`: it holds the Groups Reader admin role, and kode-gopher impersonates it. See [Groups](/deploy/google-sign-in/#groups). |
@@ -57,8 +62,8 @@ At least one of `ALLOW_DOMAINS` and `ALLOW_GROUPS` must be set: an empty allow-l
 |---|---|
 | Global static IP `kode-gopher-ip` | Kept across deploys. |
 | Google-managed certificate `kode-gopher-cert` | For `KG_HOST`. The script stops if it exists for a different hostname. |
-| Secret `kode-gopher-token` | Static token: a random token, created only if missing. |
-| Secret `kode-gopher-oauth` | Google sign-in: the client JSON, the token-sealing keyring (created only if the Secret is new), and `CLIENTS_FILE`. |
+| Secret `kode-gopher-token` | Static token: a random token in Kubernetes (`SECRET_STORE=k8s`) or Secret Manager (`SECRET_STORE=secret-manager`), created only if missing. |
+| Secret `kode-gopher-oauth` (or `<prefix>-*` in Secret Manager) | Google sign-in: the client JSON, the token-sealing keyring (created only if new or migrated from an existing Kubernetes Secret), and `CLIENTS_FILE`. Under `SECRET_STORE=secret-manager`, grants `roles/secretmanager.secretAccessor` on those secrets to kode-gopher's Workload Identity principal. |
 | Manifests in `codemode` | From `manifests/overlays/gke-server` or `gke-server-oauth`, with the API server's address, the image and the OAuth flags filled in. |
 
 The server's own flags are on the [CLI](/reference/cli/#kode-gopher-serve) page.

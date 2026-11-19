@@ -181,11 +181,11 @@ The reference deployment uses `gke-demos-345619` in the `gke.ninja` org.
 | Flag | Meaning |
 |---|---|
 | `--oauth-issuer` | Public base URL. The MCP endpoint, and every token's audience, is `<issuer>/mcp`. Must be https (http only on loopback, for tests). |
-| `--oauth-google-client-file` | kode-gopher's Google OAuth client, as the JSON the console downloads. Its redirect URIs must include `<issuer>/callback`, and under vault custody the auth provider's `oauthcallback` URL (the vault then returns the browser to `<issuer>/consent/continue`). |
-| `--oauth-keyring-file` | Sealing keys, one `<id> <base64 32 bytes>` per line, sealing key first. Keep older keys listed until what they sealed has expired (30 days for refresh tokens). |
+| `--oauth-google-client-file` | kode-gopher's Google OAuth client JSON file or `sm://` Secret Manager URI (`sm://projects/<p>/secrets/<s>[/versions/<v>]` or regional `.../locations/<l>/...`). Its redirect URIs must include `<issuer>/callback`, and under vault custody the auth provider's `oauthcallback` URL (the vault then returns the browser to `<issuer>/consent/continue`). |
+| `--oauth-keyring-file` | Sealing keys file or `sm://` Secret Manager URI, one `<id> <base64 32 bytes>` per line, sealing key first. Keep older keys listed until what they sealed has expired (30 days for refresh tokens). |
 | `--oauth-custody` | `vault` (default) with `--oauth-vault-auth-provider=projects/<p>/locations/<l>/authProviders/<name>`, or `sealed`. |
 | `--oauth-allow-domains`, `--oauth-allow-groups` | Comma-separated. At least one entry. |
-| `--oauth-clients-file` | Pre-registered clients: a JSON array of `{client_id, client_secret?, client_name, redirect_uris}`. |
+| `--oauth-clients-file` | Pre-registered clients file or `sm://` Secret Manager URI: a JSON array of `{client_id, client_secret?, client_name, redirect_uris}`. |
 | `--oauth-open-registration` | Accept DCR and CIMD clients. Default true. |
 | `--project`, `--quota-project` | Reported to snippets as `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_QUOTA_PROJECT`. |
 
@@ -346,7 +346,7 @@ What the script does that the overlay can't:
 - It renders the overlay through a temporary kustomization, which patches the image and the flags.
 
 Decisions made while building:
-- **Kubernetes Secrets, not Secret Manager**, for v1. Secret Manager needs the CSI add-on and IAM on each secret. Section 6's Workload Identity grant becomes unnecessary until then.
+- **Kubernetes Secrets (`SECRET_STORE=k8s`) or direct Secret Manager startup (`SECRET_STORE=secret-manager`).** v1 started with Kubernetes Secrets to avoid requiring the Secrets Store CSI driver add-on. Issue #85 added direct `sm://` resolution in `internal/secretmgr` over the Secret Manager REST API using kode-gopher's own Workload Identity (`roles/secretmanager.secretAccessor` granted per secret, no CSI add-on and no secret copies in Kubernetes `etcd`), with resolved numeric version IDs (`versions/<N>`) pinned in the Deployment args for atomic rollbacks.
 - **One replica.** Sessions and the OAuth replay cache are in memory. `Recreate` avoids two pods splitting them during a rollout.
 - **Backend timeout of 900 s.** The load balancer's 30 s default would cut off longer `execute_go_code` calls and the standalone SSE stream, and a token refresh or sign-in that waits out a nearly spent vault token (up to 93 s; any front end needs at least 2 minutes, see Vault renewal).
 - **Selectors use `component: server`** as well as `app: kode-gopher`. `app: kode-gopher` is what the sandbox policy admits, so other kode-gopher pods (test pods, `exec` jobs) carry it too and mustn't become Service endpoints.

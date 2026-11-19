@@ -71,6 +71,12 @@ func LoadGoogleClient(path string) (GoogleClient, error) {
 	if err != nil {
 		return GoogleClient{}, fmt.Errorf("read Google client: %w", err)
 	}
+	return ParseGoogleClient(b, path)
+}
+
+// ParseGoogleClient parses the client ID and secret from raw Google OAuth
+// client JSON bytes; source names the file or sm:// URI in error messages.
+func ParseGoogleClient(b []byte, source string) (GoogleClient, error) {
 	var f struct {
 		Web, Installed *struct {
 			ClientID     string `json:"client_id"`
@@ -78,14 +84,14 @@ func LoadGoogleClient(path string) (GoogleClient, error) {
 		}
 	}
 	if err := json.Unmarshal(b, &f); err != nil {
-		return GoogleClient{}, fmt.Errorf("parse Google client %s: %w", path, err)
+		return GoogleClient{}, fmt.Errorf("parse Google client %s: %w", source, err)
 	}
 	c := f.Web
 	if c == nil {
 		c = f.Installed
 	}
 	if c == nil || c.ClientID == "" || c.ClientSecret == "" {
-		return GoogleClient{}, fmt.Errorf("google client %s has no web client_id and client_secret", path)
+		return GoogleClient{}, fmt.Errorf("google client %s has no web client_id and client_secret", source)
 	}
 	return GoogleClient{ClientID: c.ClientID, ClientSecret: c.ClientSecret}, nil
 }
